@@ -190,7 +190,7 @@ enum MCP {
             if let error = (object as? [String: Any])?["error"] as? String { throw Failure(error) }
             return object
         case "petal_reload":
-            return ["ok": true, "note": petal("restart") + "; the Claude panel closes."]
+            return ["ok": true, "note": petal("restart") + "; the chat's panel closes."]
         default:
             throw Failure("Unknown tool")
         }

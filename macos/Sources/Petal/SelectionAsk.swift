@@ -173,13 +173,13 @@ private struct SelectionButton: View {
             HStack(spacing: 4) {
                 if note {
                     pill(action: write) {
-                        Image(systemName: "note.text").font(.system(size: 11, weight: .medium))
-                        Text("Note").font(.system(size: 12, weight: .medium))
+                        Image(systemName: "note.text").font(.system(size: TextSize.small, weight: .medium))
+                        Text("Note").font(.system(size: TextSize.callout, weight: .medium))
                     }
                 }
                 pill(action: ask) {
                     ProviderMark(provider: PetalApp.shared.chatProvider).frame(width: 13, height: 13)
-                    Text("Ask Petal AI").font(.system(size: 12, weight: .medium))
+                    Text("Ask Petal AI").font(.system(size: TextSize.callout, weight: .medium))
                 }
             }
         }
@@ -202,11 +202,11 @@ private struct SelectionWords: View {
     let words: String
 
     var body: some View {
-        Text(words).font(.system(size: 12, weight: .medium))
+        Text(words).font(.system(size: TextSize.callout, weight: .medium))
             .lineLimit(2).multilineTextAlignment(.center)
             .padding(.horizontal, 12).padding(.vertical, 7)
             .frame(maxWidth: 320)
-            .glassEffect(.regular, in: .rect(cornerRadius: 12))
+            .glassEffect(.regular, in: .rect(cornerRadius: Radius.tile))
             .padding(4)
     }
 }

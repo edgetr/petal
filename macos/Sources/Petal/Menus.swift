@@ -19,8 +19,8 @@ enum Menus {
         menu.addItem(.separator())
         menu.addItem(toggle("Auto-hide", config.autoHide) { config.setDock("autoHide", !config.autoHide) })
         menu.addItem(.separator())
-        if let provider = app.chatProvider {
-            menu.addItem(ClosureMenuItem(title: "Anything else? Ask \(provider.name)…") { app.claude.open(asking: nil) })
+        if app.chatProvider != nil {
+            menu.addItem(ClosureMenuItem(title: "Anything else? Ask Petal AI…") { app.claude.open(asking: nil) })
             let hint = NSMenuItem(title: "Like “stop the icons bouncing” or “turn off the app glow”.", action: nil, keyEquivalent: "")
             hint.isEnabled = false
             menu.addItem(hint)

@@ -71,9 +71,10 @@ private struct EqualizerBars: NSViewRepresentable {
                 let bar = CALayer()
                 let top = height * (i == 1 ? 1 : 0.7)
                 bar.backgroundColor = color.cgColor
-                bar.cornerRadius = 1
+                let width: CGFloat = 2
+                bar.cornerRadius = width / 2                     // round ends
                 bar.anchorPoint = CGPoint(x: 0.5, y: 0)          // grows up from the bottom
-                bar.bounds = CGRect(x: 0, y: 0, width: 2, height: 2)
+                bar.bounds = CGRect(x: 0, y: 0, width: width, height: 2)
                 bar.position = CGPoint(x: 1 + CGFloat(i) * 4, y: 0)
                 // The old timeline's sine, half a period each way: (sin + 1) / 2 of the bar's height.
                 let rise = CABasicAnimation(keyPath: "bounds.size.height")

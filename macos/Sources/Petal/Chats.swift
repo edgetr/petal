@@ -68,8 +68,8 @@ struct ChatsList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
-                Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.secondary)
-                TextField("Search your chats", text: $query).textFieldStyle(.plain).font(.system(size: 13))
+                Image(systemName: "magnifyingglass").font(.system(size: TextSize.small)).foregroundStyle(.secondary)
+                TextField("Search your chats", text: $query).textFieldStyle(.plain).font(.system(size: TextSize.body))
             }
             .padding(.horizontal, 10).frame(height: 28)
             .background(.white.opacity(0.06), in: .capsule)
@@ -77,7 +77,7 @@ struct ChatsList: View {
                 || $0.lines.contains { $0.text.localizedCaseInsensitiveContains(query) } }
             if loaded && shown.isEmpty {
                 Text(chats.isEmpty ? "No chats yet. Every chat is kept here." : "No chat has that.")
-                    .font(.system(size: 12.5)).foregroundStyle(.secondary).padding(.vertical, 6)
+                    .font(.system(size: TextSize.callout)).foregroundStyle(.secondary).padding(.vertical, 6)
             }
             ScrollView {
                 VStack(spacing: 2) {
@@ -97,7 +97,7 @@ struct ChatsList: View {
             .frame(maxHeight: 260)
         }
         .padding(12)
-        .background(.white.opacity(0.05), in: .rect(cornerRadius: 14))
+        .background(.white.opacity(0.05), in: .rect(cornerRadius: Radius.card))
         .onAppear { Chats.list { chats = $0; loaded = true } }
     }
 }
@@ -112,17 +112,17 @@ private struct ChatRow: View {
     var body: some View {
         HStack(spacing: 8) {
             ProviderMark(provider: Provider(rawValue: chat.provider)).frame(width: 14, height: 14).opacity(0.8)
-            Text(chat.title).font(.system(size: 13, weight: current ? .semibold : .regular)).lineLimit(1)
+            Text(chat.title).font(.system(size: TextSize.body, weight: current ? .semibold : .regular)).lineLimit(1)
             Spacer(minLength: 8)
             // A note: the app it was stuck to.
             if let place = chat.place, !place.app.isEmpty {
                 AppIconView(id: place.app, size: 14).help(place.appName)
             }
-            Text(chat.updated, format: .relative(presentation: .named)).font(.system(size: 11)).foregroundStyle(.secondary)
+            Text(chat.updated, format: .relative(presentation: .named)).font(.system(size: TextSize.small)).foregroundStyle(.secondary)
             if hovering { RoundButton(symbol: "trash", size: 20, action: delete) }
         }
         .padding(.horizontal, 8).frame(height: 30)
-        .background(hovering ? .white.opacity(0.07) : .clear, in: .rect(cornerRadius: 8))
+        .background(hovering ? .white.opacity(0.07) : .clear, in: .rect(cornerRadius: Radius.control))
         .contentShape(.rect)
         .onHover { hovering = $0 }
         .onTapGesture(perform: open)

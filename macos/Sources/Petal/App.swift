@@ -263,8 +263,10 @@ final class PetalApp {
 
     // MARK: Claude
 
+    /// The AI button's tooltip: Petal AI, then whose usage the ring shows (the engine's own name: it's its plan).
     var usageTooltip: String {
-        (chatProvider?.name ?? "AI") + usage.limits.map { " · \($0.label.replacingOccurrences(of: " (7-day)", with: "")) \(Int(((1 - $0.percent) * 100).rounded()))% left" }.joined()
+        let used = !usage.limits.isEmpty || usage.spentText != nil
+        return "Petal AI" + (used ? (chatProvider.map { " · " + $0.name } ?? "") : "") + usage.limits.map { " · \($0.label.replacingOccurrences(of: " (7-day)", with: "")) \(Int(((1 - $0.percent) * 100).rounded()))% left" }.joined()
             + (usage.spentText.map { " · " + $0 } ?? "")
     }
 

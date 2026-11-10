@@ -146,7 +146,7 @@ final class Tooltips {
 
     private func make() {
         made = true
-        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.font = .systemFont(ofSize: TextSize.callout, weight: .medium)
         label.textColor = .labelColor
         label.lineBreakMode = .byClipping
         let content = NSView()
@@ -681,7 +681,7 @@ struct PreviewView: View {
             }
         }
         .padding(12)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .glassEffect(.regular, in: .rect(cornerRadius: Radius.card))
         .padding(6)
     }
 }
@@ -695,18 +695,18 @@ struct PreviewTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.25))
+                RoundedRectangle(cornerRadius: Radius.tile).fill(.black.opacity(0.25))
                 if let image {
                     Image(nsImage: image).resizable().scaledToFit().padding(3)
                 } else {
-                    Image(systemName: window.minimized ? "minus.rectangle" : "macwindow").font(.system(size: 28)).foregroundStyle(.secondary)
+                    Image(systemName: window.minimized ? "minus.rectangle" : "macwindow").font(.system(size: TextSize.large)).foregroundStyle(.secondary)
                 }
             }
             .frame(width: 200, height: 124)
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(hovering ? Color(nsColor: PetalApp.shared.accent) : .white.opacity(0.12),
+            .overlay(RoundedRectangle(cornerRadius: Radius.tile).strokeBorder(hovering ? Color(nsColor: PetalApp.shared.accent) : .white.opacity(0.12),
                                                                     lineWidth: hovering ? 2 : 1))
             HStack(spacing: 6) {
-                Text(WindowTitles.title(window)).font(.system(size: 12)).lineLimit(1).truncationMode(.middle)
+                Text(WindowTitles.title(window)).font(.system(size: TextSize.callout)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)
                 if !window.minimized { RoundButton(symbol: "minus") { Windows.minimize(window) } }
                 RoundButton(symbol: "xmark") { Windows.close(window) }
@@ -738,7 +738,7 @@ struct WindowTitles: View {
                 app.settings.show(.permissions)
             } label: {
                 Label("Show pictures of windows…", systemImage: "rectangle.dashed.badge.record")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
                     .padding(.horizontal, 8).padding(.vertical, 4).contentShape(.rect)
             }
             .buttonStyle(.plain)
@@ -754,9 +754,9 @@ struct WindowRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: window.minimized ? "minus.rectangle" : "macwindow").font(.system(size: 12)).foregroundStyle(.secondary)
+            Image(systemName: window.minimized ? "minus.rectangle" : "macwindow").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
                 .frame(width: 16)
-            Text(WindowTitles.title(window)).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
+            Text(WindowTitles.title(window)).font(.system(size: TextSize.body)).lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 4)
             if hovering {
                 if !window.minimized { RoundButton(symbol: "minus") { Windows.minimize(window) } }
@@ -766,7 +766,7 @@ struct WindowRow: View {
         .frame(height: 22)
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(hovering ? .white.opacity(0.08) : .clear, in: .rect(cornerRadius: 9))
+        .background(hovering ? .white.opacity(0.08) : .clear, in: .rect(cornerRadius: Radius.control))
         .contentShape(.rect)
         .onHover { hovering = $0 }
         .onTapGesture { Windows.focus(window, onScreen: PetalApp.shared.docks.isOnScreen(window)); done() }
@@ -781,23 +781,23 @@ struct MediaControls: View {
     var body: some View {
         HStack(spacing: 12) {
             ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(.white.opacity(0.08))
+                RoundedRectangle(cornerRadius: Radius.control).fill(.white.opacity(0.08))
                 if let artwork = app.signals.artwork {
                     Image(nsImage: artwork).resizable().scaledToFill()
                 } else {
-                    Image(systemName: "music.note").font(.system(size: 18)).foregroundStyle(Color(nsColor: app.accent))
+                    Image(systemName: "music.note").font(.system(size: TextSize.subtitle)).foregroundStyle(Color(nsColor: app.accent))
                 }
             }
             .frame(width: 40, height: 40)
-            .clipShape(.rect(cornerRadius: 8))
+            .clipShape(.rect(cornerRadius: Radius.control))
             VStack(alignment: .leading, spacing: 2) {
-                Text(playing.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text(playing.artist).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                Text(playing.title).font(.system(size: TextSize.body, weight: .semibold)).lineLimit(1)
+                Text(playing.artist).font(.system(size: TextSize.callout)).foregroundStyle(.secondary).lineLimit(1)
             }
             .frame(width: 150, alignment: .leading)
             HStack(spacing: 2) {
                 MediaButton(symbol: "backward.fill") { app.signals.control("previous track") }
-                MediaButton(symbol: playing.playing ? "pause.fill" : "play.fill", size: 17) { app.signals.control("playpause") }
+                MediaButton(symbol: playing.playing ? "pause.fill" : "play.fill", size: TextSize.subtitle) { app.signals.control("playpause") }
                 MediaButton(symbol: "forward.fill") { app.signals.control("next track") }
             }
         }
@@ -806,7 +806,7 @@ struct MediaControls: View {
 
 struct MediaButton: View {
     let symbol: String
-    var size: CGFloat = 13
+    var size: CGFloat = TextSize.body
     let action: () -> Void
     @State private var hovering = false
 
@@ -853,7 +853,7 @@ struct StackView: View {
         let folder = contents.folder
         let entries = contents.entries
         VStack(alignment: .leading, spacing: 2) {
-            Text(Stacks.name(folder)).font(.system(size: 15, weight: .bold)).foregroundStyle(Color(nsColor: app.accent))
+            Text(Stacks.name(folder)).font(.system(size: TextSize.heading, weight: .semibold)).foregroundStyle(Color(nsColor: app.accent))
                 .padding(.horizontal, 8).padding(.bottom, 6)
             if entries.isEmpty {
                 Text("Empty").foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.vertical, 16)
@@ -873,7 +873,7 @@ struct StackView: View {
         }
         .padding(12)
         .frame(width: 300)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .glassEffect(.regular, in: .rect(cornerRadius: Radius.card))
         .padding(6)
     }
 }
@@ -894,13 +894,13 @@ struct StackRow: View {
                 }
             }
             .frame(width: 30, height: 30)
-            .clipShape(.rect(cornerRadius: 6))
-            Text(entry.name).font(.system(size: 13)).lineLimit(1).truncationMode(.middle)
+            .clipShape(.rect(cornerRadius: Radius.control))
+            Text(entry.name).font(.system(size: TextSize.body)).lineLimit(1).truncationMode(.middle)
             Spacer()
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 4)
-        .background(hovering ? .white.opacity(0.08) : .clear, in: .rect(cornerRadius: 9))
+        .background(hovering ? .white.opacity(0.08) : .clear, in: .rect(cornerRadius: Radius.control))
         .contentShape(.rect)
         .onHover { hovering = $0 }
         .onTapGesture(perform: open)
@@ -943,7 +943,7 @@ struct AskCard: View {
         }
         .padding(16)
         .frame(minWidth: 300, maxWidth: 420)
-        .glassEffect(.regular, in: .rect(cornerRadius: 16, style: .continuous))
+        .glassEffect(.regular, in: .rect(cornerRadius: Radius.card, style: .continuous))
         .padding(6)
     }
 }
@@ -974,9 +974,9 @@ struct AskRequestView: View {
             HStack(alignment: .top, spacing: 10) {
                 mark.frame(width: 18, height: 18)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(request.title).font(.system(size: 13, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
+                    Text(request.title).font(.system(size: TextSize.body, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
                     if !request.detail.isEmpty {
-                        Text(request.detail).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Text(request.detail).font(.system(size: TextSize.callout)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 Spacer(minLength: 0)

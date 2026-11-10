@@ -101,7 +101,7 @@ struct ViewerView: View {
                 if let selection = model.selection, model.marginOn, !snapshotting {
                     Button("Note") { model.newNote() }
                         .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: TextSize.callout, weight: .semibold))
                         .padding(.horizontal, 11).padding(.vertical, 5)
                         .glassEffect(.regular, in: .capsule)
                         .help("A note on this passage")
@@ -141,13 +141,13 @@ struct ViewerBar: View {
     var body: some View {
         HStack(spacing: 8) {
             HStack(spacing: 0) {
-                Text(model.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color(white: 0.114))
+                Text(model.name).font(.system(size: TextSize.body, weight: .semibold)).foregroundStyle(Color(white: 0.114))
                 if model.pageCount > 0 {
-                    Text(" · \(model.unit.title) \(model.current + 1) of \(model.pageCount)").font(.system(size: 13)).foregroundStyle(ViewerLook.gray)
+                    Text(" · \(model.unit.title) \(model.current + 1) of \(model.pageCount)").font(.system(size: TextSize.body)).foregroundStyle(ViewerLook.gray)
                 }
                 TimelineView(.periodic(from: .now, by: 20)) { time in
                     if let updated = ViewerUpdated.label(model.updated, now: time.date) {
-                        Text(" · " + updated).font(.system(size: 13)).foregroundStyle(ViewerLook.gray)
+                        Text(" · " + updated).font(.system(size: TextSize.body)).foregroundStyle(ViewerLook.gray)
                     }
                 }
             }
@@ -172,10 +172,10 @@ struct ViewerBarButton: View {
 
     var body: some View {
         Button(action: action) {
-            Text(title).font(.system(size: 12)).foregroundStyle(Color(white: 0.114))
+            Text(title).font(.system(size: TextSize.callout)).foregroundStyle(Color(white: 0.114))
                 .padding(.vertical, 4).padding(.horizontal, 10)
-                .background(.white, in: .rect(cornerRadius: 7))
-                .overlay { RoundedRectangle(cornerRadius: 7).stroke(.black.opacity(0.18), lineWidth: 0.5) }
+                .background(.white, in: .rect(cornerRadius: Radius.control))
+                .overlay { RoundedRectangle(cornerRadius: Radius.control).stroke(.black.opacity(0.18), lineWidth: 0.5) }
         }
         .buttonStyle(.plain)
     }
@@ -235,9 +235,9 @@ struct ViewerThumb: View {
         }
         .frame(width: ViewerLook.thumbs, height: ViewerLook.thumbs * ratio)
         .background(.white)
-        .clipShape(.rect(cornerRadius: 3))
-        .overlay { RoundedRectangle(cornerRadius: 3).stroke(.black.opacity(0.2), lineWidth: 0.5) }
-        .overlay { if on { RoundedRectangle(cornerRadius: 5).stroke(Color(nsColor: .controlAccentColor), lineWidth: 3).padding(-3.5) } }
+        .clipShape(.rect(cornerRadius: Radius.chip))
+        .overlay { RoundedRectangle(cornerRadius: Radius.chip).stroke(.black.opacity(0.2), lineWidth: 0.5) }
+        .overlay { if on { RoundedRectangle(cornerRadius: Radius.control).stroke(Color(nsColor: .controlAccentColor), lineWidth: 3).padding(-3.5) } }
     }
 }
 
@@ -255,7 +255,7 @@ struct ViewerDocument: View {
                 // The first load only: a reload keeps the pages shown until its own are in.
                 ProgressView().controlSize(.small).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let problem = model.problem {
-                Text(problem).font(.system(size: 13)).foregroundStyle(ViewerLook.caption).frame(maxWidth: .infinity, maxHeight: .infinity)
+                Text(problem).font(.system(size: TextSize.body)).foregroundStyle(ViewerLook.caption).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if model.live {
                 // Quick Look's own view is given Petal's private copy of the checked bytes, never the original's path.
                 if let copy = model.liveURL { ViewerQuickLookView(url: copy, version: model.updated) }
@@ -690,9 +690,9 @@ struct ViewerLensSlot: View {
     var body: some View {
         let tint = PaperLook.rgb(color)
         VStack(alignment: .leading, spacing: 1) {
-            Text("✦ Petal").font(.system(size: 11, weight: .semibold)).opacity(0.85)
+            Text("✦ Petal").font(.system(size: TextSize.small, weight: .semibold)).opacity(0.85)
             // Asked and not answered yet: a faint mark where the answer will be. No answer: why, faintly.
-            Text(answer.text.isEmpty ? "…" : answer.text).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+            Text(answer.text.isEmpty ? "…" : answer.text).font(.system(size: TextSize.callout)).fixedSize(horizontal: false, vertical: true)
                 .opacity(answer.text.isEmpty || answer.faint ? 0.55 : 1)
         }
         .foregroundStyle(PaperLook.color(NoteInk.ink(tint)))
@@ -700,7 +700,7 @@ struct ViewerLensSlot: View {
         .overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: color).opacity(0.4)).frame(width: 2) }
         .padding(10)
         .frame(width: ViewerLook.openWidth, alignment: .leading)
-        .background(PaperLook.color(NoteInk.paper(tint)), in: .rect(cornerRadius: 10))
+        .background(PaperLook.color(NoteInk.paper(tint)), in: .rect(cornerRadius: Radius.tile))
         .shadow(color: .black.opacity(0.1), radius: 6, y: 4)
     }
 }
@@ -724,7 +724,7 @@ struct ViewerInk: View {
                 let mark = words.insetBy(dx: -2, dy: -2)
                 // Each line on its own, never one box over words that weren't selected.
                 for line in model.highlightLines[paper.key] ?? [words] {
-                    context.fill(Path(roundedRect: line.insetBy(dx: -2, dy: -2), cornerRadius: 3), with: .color(color.opacity(0.24)))
+                    context.fill(Path(roundedRect: line.insetBy(dx: -2, dy: -2), cornerRadius: Radius.chip), with: .color(color.opacity(0.24)))
                 }
                 guard let spot = layout.spots[paper.key] else { continue }
                 let target = CGRect(x: marginX + spot.x, y: spot.y + ViewerLook.bar - model.marginOffset, width: ViewerLook.openWidth,
@@ -764,7 +764,7 @@ struct ViewerVersionsStrip: View {
         return VStack(alignment: .leading, spacing: 8) {
             // Picks held back while the original isn't the one these were made from (the copies stay).
             if let held {
-                Text(held).font(.system(size: 11.5, weight: .semibold)).foregroundStyle(ViewerLook.caption)
+                Text(held).font(.system(size: TextSize.small, weight: .semibold)).foregroundStyle(ViewerLook.caption)
                     .padding(.leading, 20).padding(.top, 12)
             }
             copies(held: held != nil)
@@ -777,7 +777,7 @@ struct ViewerVersionsStrip: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Group {
                         if version.refused {
-                            Text("Can't be shown").font(.system(size: 11.5)).foregroundStyle(ViewerLook.caption)
+                            Text("Can't be shown").font(.system(size: TextSize.small)).foregroundStyle(ViewerLook.caption)
                                 .frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.white)
                         } else if let thumb = version.thumb { Image(nsImage: thumb).resizable().aspectRatio(contentMode: .fit) } else { Color.white }
                     }
@@ -799,7 +799,7 @@ struct ViewerVersionsStrip: View {
                                 .help("Tell whoever made these that this is the one (the file itself isn't changed here)")
                         }
                     }
-                    .font(.system(size: 11.5))
+                    .font(.system(size: TextSize.small))
                 }
                 .frame(width: 200, alignment: .leading)
             }

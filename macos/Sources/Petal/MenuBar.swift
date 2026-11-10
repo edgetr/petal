@@ -179,9 +179,9 @@ struct ReleaseNotesView: View {
                 HStack(spacing: 14) {
                     Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 52, height: 52)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("What’s new in \(version)").font(.system(size: 22, weight: .bold))
+                        Text("What’s new in \(version)").font(.system(size: TextSize.title, weight: .bold))
                         Text(app.updater.ready == version ? "Ready: restart Petal to finish." : "Petal for macOS")
-                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                            .font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
                     }
                 }
                 Scroll {
@@ -197,7 +197,7 @@ struct ReleaseNotesView: View {
                     .padding(18)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .glassEffect(.regular, in: .rect(cornerRadius: 20))
+                .glassEffect(.regular, in: .rect(cornerRadius: Radius.panel))
                 HStack {
                     if let link = (notes ?? preloaded)?.link ?? URL(string: "https://github.com/edgetr/petal/releases") {
                         Button("On GitHub") { NSWorkspace.shared.open(link) }.buttonStyle(.glass)

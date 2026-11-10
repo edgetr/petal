@@ -251,13 +251,13 @@ struct NotebookFanView: View {
                     Text(book.name).fontWeight(.semibold)
                     Image(systemName: "arrow.up.right")
                 }
-                .font(.system(size: 12)).padding(.horizontal, 10).padding(.vertical, 5)
+                .font(.system(size: TextSize.callout)).padding(.horizontal, 10).padding(.vertical, 5)
                 .glassEffect(.regular.interactive(), in: .capsule)
             }
             .buttonStyle(.plain)
             ZStack(alignment: .bottomLeading) {
                 if papers.isEmpty {
-                    Text("No notes yet").font(.system(size: 12)).foregroundStyle(.secondary).padding(12).glassEffect(.regular, in: .capsule)
+                    Text("No notes yet").font(.system(size: TextSize.callout)).foregroundStyle(.secondary).padding(12).glassEffect(.regular, in: .capsule)
                 }
                 ForEach(Array(papers.enumerated().reversed()), id: \.element.key) { index, paper in
                     let spot = spots[index]

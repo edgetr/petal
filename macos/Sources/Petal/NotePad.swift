@@ -112,11 +112,11 @@ struct PaperGhost: View {
                 Rectangle().fill(Color(nsColor: color)).frame(height: 4)
             }
             .overlay(alignment: .bottomTrailing) { FoldCorner().fill(Color.black.opacity(0.13)).frame(width: 14, height: 14) }
-            .frame(width: Self.paper, height: Self.paper).clipShape(.rect(cornerRadius: 8)).modifier(PaperShadow(glass: false))
+            .frame(width: Self.paper, height: Self.paper).clipShape(.rect(cornerRadius: Radius.control)).modifier(PaperShadow(glass: false))
             .rotationEffect(.degrees(-4)).opacity(0.92)
-            Text("Stays on screen").font(.system(size: 11, weight: .semibold)).foregroundStyle(.white)
+            Text("Stays on screen").font(.system(size: TextSize.small, weight: .semibold)).foregroundStyle(.white)
                 .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(Color(.sRGB, red: 0.08, green: 0.08, blue: 0.1, opacity: 0.8), in: .rect(cornerRadius: 7))
+                .background(Color(.sRGB, red: 0.08, green: 0.08, blue: 0.1, opacity: 0.8), in: .rect(cornerRadius: Radius.control))
                 .fixedSize()
                 .opacity(kept ? 1 : 0)
         }

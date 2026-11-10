@@ -198,42 +198,42 @@ struct MarkdownView: View {
     @ViewBuilder private func view(_ block: MarkdownBlock, _ parsed: ParsedMarkdown) -> some View {
         switch block {
         case .heading(let level, let text):
-            Text(parsed.text(text)).font(.system(size: level <= 1 ? 16 : level == 2 ? 14.5 : 13.5, weight: .semibold))
+            Text(parsed.text(text)).font(.system(size: level <= 1 ? TextSize.subtitle : level == 2 ? TextSize.heading : TextSize.body, weight: .semibold))
                 .padding(.top, 2)
         case .paragraph(let text):
-            Text(parsed.text(text)).font(.system(size: 13.5)).lineSpacing(2)
+            Text(parsed.text(text)).font(.system(size: TextSize.body)).lineSpacing(2)
         case .list(let ordered, let items):
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(items.enumerated()), id: \.offset) { index, item in
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(ordered ? "\(index + 1)." : "•").font(.system(size: 13.5)).foregroundStyle(.secondary)
+                        Text(ordered ? "\(index + 1)." : "•").font(.system(size: TextSize.body)).foregroundStyle(.secondary)
                             .frame(minWidth: ordered ? 16 : 8, alignment: .trailing)
-                        Text(parsed.text(item)).font(.system(size: 13.5)).lineSpacing(2)
+                        Text(parsed.text(item)).font(.system(size: TextSize.body)).lineSpacing(2)
                     }
                 }
             }
         case .code(let code):
             ScrollView(.horizontal) {
-                Text(code).font(.system(size: 12, design: .monospaced)).padding(10)
+                Text(code).font(.system(size: TextSize.callout, design: .monospaced)).padding(10)
             }
             .scrollIndicators(.never)
-            .background(.white.opacity(0.06), in: .rect(cornerRadius: 10))
+            .background(.white.opacity(0.06), in: .rect(cornerRadius: Radius.tile))
         case .quote(let text):
             HStack(spacing: 8) {
                 Capsule().fill(.secondary.opacity(0.5)).frame(width: 3)
-                Text(parsed.text(text)).font(.system(size: 13.5)).foregroundStyle(.secondary)
+                Text(parsed.text(text)).font(.system(size: TextSize.body)).foregroundStyle(.secondary)
             }
             .fixedSize(horizontal: false, vertical: true)
         case .table(let header, let rows):
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 5) {
-                GridRow { ForEach(Array(header.enumerated()), id: \.offset) { Text(parsed.text($0.element)).font(.system(size: 12.5, weight: .semibold)) } }
+                GridRow { ForEach(Array(header.enumerated()), id: \.offset) { Text(parsed.text($0.element)).font(.system(size: TextSize.callout, weight: .semibold)) } }
                 Divider()
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    GridRow { ForEach(Array(row.enumerated()), id: \.offset) { Text(parsed.text($0.element)).font(.system(size: 12.5)) } }
+                    GridRow { ForEach(Array(row.enumerated()), id: \.offset) { Text(parsed.text($0.element)).font(.system(size: TextSize.callout)) } }
                 }
             }
             .padding(10)
-            .background(.white.opacity(0.05), in: .rect(cornerRadius: 10))
+            .background(.white.opacity(0.05), in: .rect(cornerRadius: Radius.tile))
         case .rule:
             Divider()
         }
@@ -288,6 +288,9 @@ enum Pages {
     /// A page's whole document: `body` in Petal's look.
     static func document(title: String, body: String) -> String { template(title: title, body: body) }
 
+    /// A step of the scale as CSS.
+    private static func px(_ step: CGFloat) -> String { "\(Int(step))px" }
+
     private static func template(title: String, body: String) -> String {
         """
         <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -295,11 +298,11 @@ enum Pages {
         <style>
         :root { color-scheme: light dark; --accent: #d9367f; --line: color-mix(in srgb, CanvasText 14%, transparent); }
         html, body { background: transparent; }
-        body { font: 14.5px/1.6 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 720px; margin: 8px auto 40px; padding: 0 30px; color: CanvasText; -webkit-font-smoothing: antialiased; }
-        h1 { font-size: 24px; margin: 0 0 14px; letter-spacing: -0.01em; } h2 { font-size: 17px; margin: 26px 0 8px; } h3 { font-size: 15px; margin: 20px 0 6px; }
-        a { color: var(--accent); } code { font: 12.5px ui-monospace, SFMono-Regular, monospace; background: color-mix(in srgb, CanvasText 8%, transparent); padding: 1px 5px; border-radius: 5px; }
-        pre { background: color-mix(in srgb, CanvasText 7%, transparent); padding: 12px 14px; border-radius: 12px; overflow-x: auto; } pre code { background: none; padding: 0; }
-        table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 13.5px; } th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); } th { font-weight: 600; }
+        body { font: \(px(TextSize.heading))/1.6 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-width: 720px; margin: 8px auto 40px; padding: 0 30px; color: CanvasText; -webkit-font-smoothing: antialiased; }
+        h1 { font-size: \(px(TextSize.title)); margin: 0 0 14px; letter-spacing: -0.01em; } h2 { font-size: \(px(TextSize.subtitle)); margin: 26px 0 8px; } h3 { font-size: \(px(TextSize.heading)); margin: 20px 0 6px; }
+        a { color: var(--accent); } code { font: \(px(TextSize.body)) ui-monospace, SFMono-Regular, monospace; background: color-mix(in srgb, CanvasText 8%, transparent); padding: 1px 5px; border-radius: \(px(Radius.chip)); }
+        pre { background: color-mix(in srgb, CanvasText 7%, transparent); padding: 12px 14px; border-radius: \(px(Radius.tile)); overflow-x: auto; } pre code { background: none; padding: 0; }
+        table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: \(px(TextSize.body)); } th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); } th { font-weight: 600; }
         blockquote { margin: 12px 0; padding: 2px 14px; border-left: 3px solid var(--accent); color: color-mix(in srgb, CanvasText 72%, transparent); }
         hr { border: none; border-top: 1px solid var(--line); margin: 22px 0; } li { margin: 3px 0; } svg { max-width: 100%; height: auto; }
         </style></head><body>
@@ -331,7 +334,7 @@ final class PageWindow: NSWindow, WKNavigationDelegate {
         web.setValue(false, forKey: "drawsBackground")   // the glass shows through the page
         web.navigationDelegate = self
 
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
+        titleLabel.font = .systemFont(ofSize: TextSize.body, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
         let browser = NSButton(title: "Open in Browser", target: nil, action: nil)
         browser.bezelStyle = .glass
@@ -353,7 +356,7 @@ final class PageWindow: NSWindow, WKNavigationDelegate {
             web.bottomAnchor.constraint(equalTo: content.bottomAnchor),
         ])
         let glass = NSGlassEffectView()
-        glass.cornerRadius = 22
+        glass.cornerRadius = Radius.panel
         glass.contentView = content
         contentView = glass
         center()
