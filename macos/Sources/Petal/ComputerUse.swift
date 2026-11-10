@@ -860,8 +860,9 @@ final class ComputerUse {
             // What it opened, when the person did nothing meanwhile (a window of theirs is never taken): onto the
             // run's display, without raising it.
             var opened: [(window: CGWindowID, pid: pid_t, element: AXUIElement)] = []
-            if let display, outcome.error == nil, outcome.needs == nil, !outcome.again, !cancel.stopped,
-               ProcessInfo.processInfo.systemUptime - Acting.idle() < baseline.at {
+            // Only what can open one (a press, a key, a menu item): typing and scrolling never wait for it.
+            if let display, ["press", "key", "menu"].contains(job.action), outcome.error == nil, outcome.needs == nil, !outcome.again,
+               !cancel.stopped, ProcessInfo.processInfo.systemUptime - Acting.idle() < baseline.at {
                 let bundle = map.bundle
                 opened = RunDisplays.newWindows(bundle: bundle, before: before, timeout: 0.6, live: { !cancel.stopped })
                     .filter { $0.pid == map.pid }
