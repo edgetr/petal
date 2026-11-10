@@ -1,6 +1,6 @@
 # Push a tag like macos-v1.0.0 (matching macos/VERSION) to publish Petal for macOS.
 # Builds Petal.app, zips it, writes latest-macos.json (what the
-# Mac updater and get.sh read), and creates the GitHub Release. Uses only the workflow's own GITHUB_TOKEN.
+# Mac updater and get.sh read), and creates the GitHub Release with macos/notes/<version>.md as its text. Uses only the workflow's own GITHUB_TOKEN.
 #
 # The release is never marked "latest": Omarchy's updater reads the latest release, which must stay a Linux one.
 name: Release macOS
@@ -25,6 +25,8 @@ jobs:
           v="${GITHUB_REF_NAME#macos-v}"
           m="$(cat macos/VERSION)"
           [ "$v" = "$m" ] || { echo "Tag $v doesn't match macos/VERSION $m"; exit 1; }
+          # The site's Download for Mac button (/download/mac) must point at this release.
+          grep -q "macos-v$v/Petal-$v-macos.zip" site/vercel.json || { echo "site/vercel.json's /download/mac doesn't point at $v"; exit 1; }
 
       # Petal has no Apple Developer ID. With a self-made signing certificate stored in the MACOS_SIGNING_P12 secret
       # (base64 .p12, password in MACOS_SIGNING_PASSWORD), every release carries the same signature, so macOS keeps
@@ -70,5 +72,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           v="${GITHUB_REF_NAME#macos-v}"
+          # The release's text is What's New in the app: macos/notes/<version>.md when there is one.
+          if [ -f "macos/notes/$v.md" ]; then notes=(--notes-file "macos/notes/$v.md"); else notes=(--generate-notes); fi
           gh release create "$GITHUB_REF_NAME" "dist/Petal-$v-macos.zip" dist/latest-macos.json \
-            --title "Petal for macOS $v" --generate-notes --latest=false
+            --title "Petal for macOS $v" "${notes[@]}" --latest=false
