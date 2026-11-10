@@ -75,12 +75,15 @@ enum RunDisplayRules {
     // MARK: Where a display goes
 
     /// Two rectangles share a stretch of edge longer than a point: the pointer could cross there.
-    static func sharesEdge(_ a: CGRect, _ b: CGRect) -> Bool {
+    static func sharesEdge(_ a: CGRect, _ b: CGRect) -> Bool { sharedEdge(a, b) > 0.5 }
+
+    /// How long a stretch of edge two rectangles share (0: none, or only a corner): what the pointer could cross.
+    static func sharedEdge(_ a: CGRect, _ b: CGRect) -> CGFloat {
         let overlapY = min(a.maxY, b.maxY) - max(a.minY, b.minY)
         let overlapX = min(a.maxX, b.maxX) - max(a.minX, b.minX)
         let sideBySide = abs(a.maxX - b.minX) < 0.5 || abs(b.maxX - a.minX) < 0.5
         let stacked = abs(a.maxY - b.minY) < 0.5 || abs(b.maxY - a.minY) < 0.5
-        return (sideBySide && overlapY > 0.5) || (stacked && overlapX > 0.5)
+        return max(sideBySide ? max(0, overlapY) : 0, stacked ? max(0, overlapX) : 0)
     }
 
     /// Overlapping by more than a sliver.
@@ -104,11 +107,11 @@ enum RunDisplayRules {
     static func origins(size: CGSize, screens: [CGRect], taken: [CGRect]) -> [CGPoint] {
         var candidates: [CGPoint] = []
         for screen in screens {
-            // Above first (people overshoot down, toward the dock), then below.
-            candidates.append(CGPoint(x: screen.minX - size.width, y: screen.minY - size.height))
-            candidates.append(CGPoint(x: screen.maxX, y: screen.minY - size.height))
-            candidates.append(CGPoint(x: screen.minX - size.width, y: screen.maxY))
+            // Below and right first: the corner macOS was seen to keep a display at (27.3). Then the other three.
             candidates.append(CGPoint(x: screen.maxX, y: screen.maxY))
+            candidates.append(CGPoint(x: screen.minX - size.width, y: screen.maxY))
+            candidates.append(CGPoint(x: screen.maxX, y: screen.minY - size.height))
+            candidates.append(CGPoint(x: screen.minX - size.width, y: screen.minY - size.height))
         }
         for other in taken {
             candidates.append(CGPoint(x: other.minX - size.width, y: other.minY))

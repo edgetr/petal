@@ -17,10 +17,23 @@ enum Screens {
     /// macOS no longer lists it (`forget`).
     nonisolated static func mark(_ id: CGDirectDisplayID) { lock.withLock { _ = runs.insert(id) } }
 
-    /// A removed display's id is let go only once it's really gone: between its removal and macOS saying so, it's
-    /// still not the person's.
+    /// The displays macOS has online now, from its own list. Never `CGDisplayIsOnline`: asked about the id of a
+    /// display that's gone, it goes on saying yes (seen on macOS 27.3, twelve seconds after), while this list and the
+    /// active one no longer hold it.
+    nonisolated static var online: Set<CGDirectDisplayID> {
+        var count: UInt32 = 0
+        CGGetOnlineDisplayList(0, nil, &count)
+        var list = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        CGGetOnlineDisplayList(count, &list, &count)
+        return Set(list.prefix(Int(count)))
+    }
+
+    nonisolated static func isOnline(_ id: CGDirectDisplayID) -> Bool { online.contains(id) }
+
+    /// A removed display's id is let go only once it's really gone (out of macOS's list): between its removal and
+    /// macOS saying so, it's still not the person's.
     nonisolated static func forget(_ id: CGDirectDisplayID) {
-        guard CGDisplayIsOnline(id) == 0 else { return }
+        guard !isOnline(id) else { return }
         lock.withLock { _ = runs.remove(id) }
     }
 
@@ -62,7 +75,8 @@ enum Screens {
 
     /// The run displays' frames now, in the window server's coordinates (any thread).
     nonisolated static var runFrames: [(id: CGDirectDisplayID, frame: CGRect)] {
-        runIDs.compactMap { id in CGDisplayIsOnline(id) != 0 ? (id, CGDisplayBounds(id)) : nil }
+        let here = online
+        return runIDs.compactMap { id in here.contains(id) ? (id, CGDisplayBounds(id)) : nil }
     }
 
     /// A window with this frame (the window server's coordinates) is on a run's display.

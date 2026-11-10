@@ -695,6 +695,11 @@ perl -0777 -ne '
 n=$(grep -n 'NSScreen\.screens\|NSScreen\.main\|CGGetActiveDisplayList\|CGGetOnlineDisplayList\|CGMainDisplayID' Sources/Petal/*.swift | grep -v '^Sources/Petal/Screens\.swift:\|^Sources/Petal/DisplayCheck\.swift:' || true)
 if [ -n "$n" ]; then echo "screens: read outside Screens (Screens.swift):"; echo "$n"; exit 1; fi
 echo "screens: only through Screens"
+# Whether a display is there is asked of macOS's own list (Screens.isOnline): CGDisplayIsOnline goes on saying yes
+# for the id of a display that's gone, so nothing relies on it (DisplayCheck.swift prints what it says, as information).
+n=$(grep -n 'CGDisplayIsOnline' Sources/Petal/*.swift | grep -v '^Sources/Petal/DisplayCheck\.swift:\|^Sources/Petal/Screens\.swift:[0-9]*: *///' || true)
+if [ -n "$n" ]; then echo "displays: CGDisplayIsOnline is relied on:"; echo "$n"; exit 1; fi
+echo "displays: online by macOS's own list"
 # Quitting answers later (notes are saved first), and AppKit waits for the answer inside `terminate`. Called from a
 # block of the main dispatch queue (a signal's handler, an asyncAfter), that wait stops the queue, the answer never
 # arrives and Petal never quits. So the one call to terminate is PetalApp.quit's, from the run loop, and the answer

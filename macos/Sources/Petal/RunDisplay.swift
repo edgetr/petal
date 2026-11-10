@@ -567,7 +567,7 @@ final class RunDisplays {
     }
 
     private func forgetRetired() {
-        for id in retired where CGDisplayIsOnline(id) == 0 {
+        for id in retired where !Screens.isOnline(id) {
             Screens.forget(id)
             retired.remove(id)
         }
@@ -636,46 +636,100 @@ final class RunDisplays {
     struct Placing {
         var frame: CGRect?
         var tried: [String] = []
+        /// How long it took to come online, and then to be placed (seconds).
+        var online: TimeInterval = 0
+        var placed: TimeInterval = 0
     }
 
-    /// Waits for the display to come online, then moves it to where it touches the person's screens only at a corner
-    /// (`RunDisplayRules.origins`), trying each such place until macOS keeps it there. Off the main thread: the
-    /// window server may take a moment. No fade, and only for this Petal: the person's own arrangement is never saved over.
+    /// The three calls that move a display, each with what macOS answered (0 is success).
+    struct Arranged {
+        var begin: Int32
+        var origin: Int32?
+        var complete: Int32?
+        var ok: Bool { begin == 0 && origin == 0 && complete == 0 }
+        var words: String {
+            "begin \(begin), origin \(origin.map(String.init) ?? "not called"), complete \(complete.map(String.init) ?? "not called")"
+        }
+    }
+
+    /// Asks macOS to put a display's top-left at `point`: exactly the three calls seen to work on macOS 27.3 (begin,
+    /// origin, complete for this app only), and nothing else. Only for this Petal: the person's own arrangement is
+    /// never saved over, and it's undone when Petal ends.
+    nonisolated static func arrange(_ id: CGDirectDisplayID, at point: CGPoint) -> Arranged {
+        var config: CGDisplayConfigRef?
+        let begin = CGBeginDisplayConfiguration(&config)
+        guard begin == .success, let config else { return Arranged(begin: begin.rawValue, origin: nil, complete: nil) }
+        let origin = CGConfigureDisplayOrigin(config, id, Int32(point.x.rounded()), Int32(point.y.rounded()))
+        guard origin == .success else {
+            CGCancelDisplayConfiguration(config)
+            return Arranged(begin: begin.rawValue, origin: origin.rawValue, complete: nil)
+        }
+        let complete = CGCompleteDisplayConfiguration(config, .forAppOnly)
+        return Arranged(begin: begin.rawValue, origin: origin.rawValue, complete: complete.rawValue)
+    }
+
+    /// Waits for the display to be in macOS's own list of online displays with real bounds and to have been there a
+    /// moment (asked sooner, macOS refuses: 1006), then moves it to where it touches the person's screens only at a
+    /// corner (`RunDisplayRules.origins`). A refusal is tried again for up to two seconds, from this thread and then
+    /// from the main one (what was seen to work ran there); a place macOS accepts but doesn't keep moves on to the
+    /// next corner. Where it landed is read until it's where it was asked or a second and a half passed. Never called
+    /// on the main thread: the window server may take a moment.
     nonisolated static func place(_ id: CGDirectDisplayID, size: CGSize) -> Placing {
         var placing = Placing()
-        let deadline = Date().addingTimeInterval(4)
-        while CGDisplayIsOnline(id) == 0 || CGDisplayBounds(id).isEmpty {
+        let started = Date()
+        let deadline = started.addingTimeInterval(5)
+        while !(Screens.isOnline(id) && CGDisplayBounds(id).width > 1) {
             guard Date() < deadline else {
-                placing.tried.append("the display never came online")
+                placing.tried.append("the display never came into macOS's list of online displays (5 s)")
                 return placing
             }
             usleep(50_000)
         }
+        placing.online = Date().timeIntervalSince(started)
+        // A moment more: a display just listed isn't ready to be moved yet. A second and a half after it was made is
+        // what was seen to work; never less than half a second after it's listed.
+        usleep(useconds_t(max(0.5, 1.5 - placing.online) * 1_000_000))
         let screens = Screens.displays.map { CGDisplayBounds($0) }
         let others = Screens.runFrames.filter { $0.id != id }.map(\.frame)
         let extent = CGDisplayBounds(id).size
-        let actual = extent.width > 0 ? extent : size
+        let actual = extent.width > 1 ? extent : size
+        let patience = Date().addingTimeInterval(2)
+        var onMain = false
         for point in RunDisplayRules.origins(size: actual, screens: screens, taken: others) {
-            var config: CGDisplayConfigRef?
-            guard CGBeginDisplayConfiguration(&config) == .success, let config else {
-                placing.tried.append("macOS wouldn't begin arranging the displays")
-                break
-            }
-            CGConfigureDisplayFadeEffect(config, 0, 0, 0, 0, 0)
-            if CGDisplayIsInMirrorSet(id) != 0 { CGConfigureDisplayMirrorOfDisplay(config, id, kCGNullDirectDisplay) }
-            CGConfigureDisplayOrigin(config, id, Int32(point.x.rounded()), Int32(point.y.rounded()))
-            let result = CGCompleteDisplayConfiguration(config, .forAppOnly)
-            usleep(120_000)
-            let now = CGDisplayBounds(id)
-            let hidden = RunDisplayRules.hiddenFrom(now, screens: Screens.displays.map { CGDisplayBounds($0) }, others: others)
-            placing.tried.append("asked for \(Int(point.x)),\(Int(point.y)): macOS said \(result.rawValue) and put it at \(Int(now.minX)),\(Int(now.minY)) \(Int(now.width))×\(Int(now.height))"
-                + (hidden ? ", out of the pointer's way" : ", where the pointer could reach it"))
-            if result == .success, hidden {
-                placing.frame = now
-                return placing
+            while true {
+                let asked = "asked for \(Int(point.x)),\(Int(point.y)) from \(onMain ? "the main thread" : "a background thread")"
+                var calls = Arranged(begin: -1, origin: nil, complete: nil)
+                if onMain, !Thread.isMainThread {
+                    DispatchQueue.main.sync { calls = arrange(id, at: point) }
+                } else {
+                    calls = arrange(id, at: point)
+                }
+                if calls.ok {
+                    // Where it landed: read until it's where it was asked, or a second and a half passed.
+                    var now = CGDisplayBounds(id)
+                    let until = Date().addingTimeInterval(1.5)
+                    while abs(now.minX - point.x) > 1 || abs(now.minY - point.y) > 1, Date() < until {
+                        usleep(100_000)
+                        now = CGDisplayBounds(id)
+                    }
+                    let hidden = RunDisplayRules.hiddenFrom(now, screens: Screens.displays.map { CGDisplayBounds($0) }, others: others)
+                    placing.tried.append("\(asked): \(calls.words); it is at \(Int(now.minX)),\(Int(now.minY)) \(Int(now.width))×\(Int(now.height))"
+                        + (hidden ? ", out of the pointer's way" : ", where the pointer could reach it"))
+                    if hidden {
+                        placing.frame = now
+                        placing.placed = Date().timeIntervalSince(started) - placing.online
+                        return placing
+                    }
+                    break   // accepted but not kept there: the next corner
+                }
+                placing.tried.append("\(asked): \(calls.words) (refused)")
+                guard Date() < patience else { break }
+                onMain.toggle()
+                usleep(300_000)
             }
         }
         if placing.tried.isEmpty { placing.tried.append("no corner of the person's screens is free") }
+        placing.placed = Date().timeIntervalSince(started) - placing.online
         return placing
     }
 
@@ -740,7 +794,8 @@ final class RunDisplays {
     }
 
     /// Moves a window onto a display through Accessibility: its position and size, nothing raised, nothing activated.
-    /// True when it's there after. Off the main thread.
+    /// True when it's there after, by what Accessibility reads back (the window server's own list says so only a
+    /// moment later, so it's never what confirms a move). Off the main thread.
     nonisolated static func move(_ element: AXUIElement, pid: pid_t, to display: CGRect, index: Int, live: () -> Bool = { true }) -> Bool {
         let size = Windows.frame(of: element)?.size ?? CGSize(width: 1000, height: 700)
         let target = RunDisplayRules.frame(for: size, on: display, index: index)

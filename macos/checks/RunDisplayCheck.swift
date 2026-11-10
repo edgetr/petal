@@ -158,7 +158,15 @@ struct RunDisplayCheck {
         let main = CGRect(x: 0, y: 0, width: 1512, height: 982)
         func frame(_ point: CGPoint?) -> CGRect { point.map { CGRect(origin: $0, size: size) } ?? .null }
         let first = RunDisplayRules.origin(size: size, screens: [main], taken: [])
-        expect(first == CGPoint(x: -1440, y: -900), "above and left of the main screen, at its corner", "\(String(describing: first))")
+        expect(first == CGPoint(x: 1512, y: 982), "below and right of the main screen, at its corner (the one macOS was seen to keep)", "\(String(describing: first))")
+        expect(RunDisplayRules.origins(size: size, screens: [main], taken: []).count == 4, "and the other three corners after it")
+        // The live run: a new display comes up beside the main screen, sharing 900 points of its edge.
+        let live = CGRect(x: 0, y: 0, width: 1920, height: 1080)
+        expect(RunDisplayRules.sharedEdge(CGRect(x: -1440, y: 0, width: 1440, height: 900), live) == 900, "beside it: 900 points of shared edge")
+        expect(RunDisplayRules.sharedEdge(CGRect(x: 1920, y: 1080, width: 1440, height: 900), live) == 0, "at its bottom-right corner: none")
+        expect(RunDisplayRules.sharedEdge(CGRect(x: 400, y: 1080, width: 1440, height: 900), live) == 1440, "under it: all of its width")
+        expect(RunDisplayRules.sharedEdge(CGRect(x: 5000, y: 5000, width: 1440, height: 900), live) == 0, "far away: none")
+        expect(RunDisplayRules.origin(size: size, screens: [live], taken: []) == CGPoint(x: 1920, y: 1080), "on a 1920×1080 screen: 1920,1080")
         expect(RunDisplayRules.hiddenFrom(frame(first), screens: [main], others: []), "which the pointer can't reach")
         expect(!RunDisplayRules.sharesEdge(frame(first), main) && !RunDisplayRules.overlaps(frame(first), main), "no shared edge, no overlap")
         // Beside the screen, where macOS first puts a new display: the pointer would wander onto it.
@@ -187,8 +195,8 @@ struct RunDisplayCheck {
             expect(RunDisplayRules.hiddenFrom(frame(point), screens: [main, second], others: []), "with two screens, out of reach of both: \(point)")
         }
         expect(!RunDisplayRules.origins(size: size, screens: [main, second], taken: []).isEmpty, "two screens still leave corners")
-        // A screen above and to the left of the main one, exactly where the first choice would go.
-        let above = CGRect(x: -1440, y: -900, width: 1440, height: 900)
+        // A screen below and to the right of the main one, exactly where the first choice would go.
+        let above = CGRect(x: 1512, y: 982, width: 1440, height: 900)
         let other = RunDisplayRules.origin(size: size, screens: [main, above], taken: [])
         expect(other != nil && frame(other) != above && RunDisplayRules.hiddenFrom(frame(other), screens: [main, above], others: []),
                "a corner already holding one of the person's screens is passed over")
@@ -199,7 +207,7 @@ struct RunDisplayCheck {
         expect(RunDisplayRules.persons([1, 2, 3], runs: [2]) == [1, 3], "a run's display is not the person's screen")
         expect(RunDisplayRules.persons([1, 2], runs: []) == [1, 2], "with none, every screen is theirs")
         expect(RunDisplayRules.persons([7], runs: [7]) == [], "only a run's: none of theirs")
-        let displays: [(id: Int, frame: CGRect)] = [(9, frame(first)), (10, CGRect(x: 1512, y: 982, width: 1440, height: 900))]
+        let displays: [(id: Int, frame: CGRect)] = [(9, CGRect(x: -1440, y: -900, width: 1440, height: 900)), (10, CGRect(x: 1512, y: 982, width: 1440, height: 900))]
         expect(RunDisplayRules.display(holding: CGRect(x: -1400, y: -860, width: 800, height: 600), among: displays) == 9, "a window is on the display its middle is on")
         expect(RunDisplayRules.display(holding: CGRect(x: 100, y: 100, width: 800, height: 600), among: displays) == nil, "one on the person's screen is on none")
         expect(RunDisplayRules.display(holding: CGRect(x: -500, y: -300, width: 1000, height: 800), among: displays) == nil,

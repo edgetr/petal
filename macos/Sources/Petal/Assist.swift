@@ -450,7 +450,7 @@ final class Assist {
                             let picture = await Self.screenshot(shot == "screen" ? nil : number, screen: shot == "screen", display: ownDisplay?.number,
                                                                 hiding: hidden, excluding: shielded)
                             if let path = picture.path {
-                                let what = shot != "screen" ? "window" : ownDisplay != nil ? "display of your own (the person's screen isn't in it; front: true shows that)" : "screen"
+                                let what = shot != "screen" ? "window" : ownDisplay != nil ? "display of your own (the person's screen isn't in it; front: true shows that; a menu bar along its top would be the system's, for whichever app is in front, not your window's)" : "screen"
                                 result["screenshot"] = path
                                 result["screenshotNote"] = "A PNG of the \(what); read it to see it. Black boxes are fields that may hold a password, card number, security code or key: Petal hides them."
                                     + (picture.note.map { " " + $0 } ?? "")

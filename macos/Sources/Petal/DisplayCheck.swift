@@ -11,7 +11,10 @@ import ScreenCaptureKit
 /// AppleScript, no System Events), writes a PNG of the display into the folder, shows that the app and window the
 /// person had in front, their pointer and their screens didn't change, then closes the window and removes the
 /// display. One line per step, "ok" or "FAIL" with what was read, so a failure says exactly what went wrong; the
-/// exit code is the number of failures (0: all passed).
+/// exit code is the number of failures (0: all passed). Indented lines are what it read along the way, never a
+/// verdict: each place tried with what macOS answered to each of the three calls, how long making, placing and
+/// removing took, and what AppKit and `CGDisplayIsOnline` say (neither is relied on: a process with no app of its own
+/// isn't told of new screens, and `CGDisplayIsOnline` goes on saying yes for a display that's gone).
 @MainActor
 enum DisplayCheck {
     private static var failures = 0
@@ -48,6 +51,11 @@ enum DisplayCheck {
         return (pid, running?.localizedName ?? "nothing", window.flatMap { Windows.id(of: $0) })
     }
 
+    /// Where the pointer is, in the window server's coordinates (as displays' bounds are).
+    private static func pointer() -> CGPoint { CGEvent(source: nil)?.location ?? .zero }
+
+    private static func seconds(_ time: TimeInterval) -> String { String(format: "%.2f s", time) }
+
     /// The first text area in a window, a few levels down.
     private static func textArea(in element: AXUIElement, depth: Int = 0) -> AXUIElement? {
         if (Windows.value(element, kAXRoleAttribute) as String?) == (kAXTextAreaRole as String) { return element }
@@ -78,34 +86,49 @@ enum DisplayCheck {
         // 2. How things are before.
         let before = front()
         let screensBefore = Screens.displays.map { CGDisplayBounds($0) }
-        let pointerBefore = NSEvent.mouseLocation
+        let pointerBefore = pointer()
         let countBefore = NSScreen.screens.count
+        let onlineBefore = Screens.online
         say("in front before: \(before.name) (pid \(before.pid), window \(before.window.map(String.init) ?? "none"))")
         say("the person's screens before: " + screensBefore.map(describe).joined(separator: " | "))
 
         // 3. The display.
         let gone = GoneFlag()
+        let makingStarted = Date()
         let display = VirtualDisplay.make(name: "Petal display check", serial: UInt32(getpid()), points: RunDisplayRules.size) { gone.set() }
-        step(display != nil, "a display was made", display.map { "id \($0.id), \($0.hiDPI ? "2880×1800 pixels (HiDPI)" : "1440×900 pixels (HiDPI refused)")" }
+        let making = Date().timeIntervalSince(makingStarted)
+        step(display != nil, "a display was made", display.map { "id \($0.id), \($0.hiDPI ? "2880×1800 pixels (HiDPI)" : "1440×900 pixels (HiDPI refused)"), in \(seconds(making))" }
             ?? "CGVirtualDisplay refused: initWithDescriptor or applySettings failed")
         guard let display else { finish() }
         let id = display.id
 
-        // 4. Where it is.
+        // 4. Where it is. Placing waits for macOS's own list to hold it, then a moment more, then asks.
         let placed = PlacedBox()
         RunDisplays.queue.async {
             let placing = RunDisplays.place(id, size: RunDisplayRules.size)
             DispatchQueue.main.async { placed.value = placing }
         }
-        wait(15) { placed.value != nil }
-        for line in placed.value?.tried ?? ["placing never answered"] { say(line) }
+        wait(30) { placed.value != nil }
+        for line in placed.value?.tried ?? ["placing never answered (30 s)"] { say(line) }
+        if let placing = placed.value {
+            say("online \(seconds(placing.online)) after it was made; placing took \(seconds(placing.placed)) more (the first ask waits until a second and a half after it was made)")
+        }
+        let listed = Screens.isOnline(id)
+        step(listed, "macOS's list of online displays holds it", "the list: \(Screens.online.sorted()), before: \(onlineBefore.sorted())")
         let frame = placed.value?.frame
-        step(frame != nil, "it touches the person's screens only at a corner (the pointer can't reach it)", frame.map(describe) ?? "see the tries above")
-        let online = CGDisplayIsOnline(id) != 0
-        step(online, "macOS lists it as a display", "CGDisplayIsOnline \(online), bounds \(describe(CGDisplayBounds(id)))")
-        wait(1.5) { NSScreen.screens.count > countBefore }
-        step(NSScreen.screens.count == countBefore + 1, "AppKit sees one more screen", "\(countBefore) before, \(NSScreen.screens.count) now")
-        step(Screens.all.count == countBefore, "Petal's own list of the person's screens leaves it out", "\(Screens.all.count) of \(NSScreen.screens.count)")
+        step(frame != nil, "macOS kept it where Petal asked, at a corner of the person's screens", frame.map(describe) ?? "see the tries above")
+        // Wherever it is now: could the pointer get onto it? Only across a shared stretch of edge (a corner alone
+        // can't be crossed), or where it overlaps a screen.
+        let bounds = CGDisplayBounds(id)
+        let persons = Screens.displays.map { CGDisplayBounds($0) }
+        let edges = persons.map { RunDisplayRules.sharedEdge(bounds, $0) }
+        let overlapping = persons.contains { RunDisplayRules.overlaps(bounds, $0) }
+        step(listed && !overlapping && edges.allSatisfy { $0 < 0.5 }, "the pointer can't get onto it: it shares no stretch of edge with any of the person's screens",
+             "it is at \(describe(bounds)); shared edge with each screen: \(edges.map { "\(Int($0)) pt" }.joined(separator: ", "))\(overlapping ? "; it overlaps one" : "")")
+        step(!Screens.displays.contains(id) && Screens.isRun(id), "Petal's list of the person's displays leaves it out",
+             "the person's: \(Screens.displays), runs': \(Screens.runIDs.sorted())")
+        wait(1) { NSScreen.screens.count > countBefore }
+        say("AppKit, in this process, sees \(NSScreen.screens.count) screen(s) (\(countBefore) before). A process with no app of its own isn't told of new screens; the running Petal is, at once, which is why Petal goes by the display's id and bounds.")
         let screensDuring = Screens.displays.map { CGDisplayBounds($0) }
         step(screensDuring == screensBefore, "the person's screens didn't move or change size",
              screensDuring == screensBefore ? "" : "now " + screensDuring.map(describe).joined(separator: " | "))
@@ -157,10 +180,14 @@ enum DisplayCheck {
             }
             wait(6) { moved.value != nil }
             let now = Windows.frame(of: window.element)
-            let server = RunDisplays.windowNumbers(pid: window.pid)[window.window]?.frame
-            let there = server.map { target.contains(CGPoint(x: $0.midX, y: $0.midY)) } ?? false
-            step(moved.value == true && there, "the window is on the display",
-                 "was \(was.map(describe) ?? "?"), Accessibility says \(now.map(describe) ?? "?"), the window server says \(server.map(describe) ?? "?"), the display is \(describe(target))")
+            // The window server's own list catches up a moment after Accessibility: read until it agrees, a second and a half at most.
+            var server: CGRect?
+            let agreed = wait(1.5) {
+                server = RunDisplays.windowNumbers(pid: window.pid)[window.window]?.frame
+                return server.map { target.contains(CGPoint(x: $0.midX, y: $0.midY)) } ?? false
+            }
+            step(moved.value == true && agreed, "the window is on the display",
+                 "was \(was.map(describe) ?? "?"), Accessibility says \(now.map(describe) ?? "?"), the window server says \(server.map(describe) ?? "?")\(agreed ? "" : " after 1.5 s"), the display is \(describe(target))")
             let words = "Typed by Petal on a hidden display, \(Int(Date().timeIntervalSince1970))"
             if let area = textArea(in: window.element) {
                 let set = AXUIElementSetAttributeValue(area, kAXValueAttribute as CFString, words as CFString)
@@ -177,10 +204,10 @@ enum DisplayCheck {
         step(after.pid == before.pid, "the app in front didn't change", "before \(before.name) (\(before.pid)), now \(after.name) (\(after.pid))")
         step(after.window == before.window, "its window in front didn't change",
              "before \(before.window.map(String.init) ?? "none"), now \(after.window.map(String.init) ?? "none")")
-        let pointerNow = NSEvent.mouseLocation
-        let pointerOn = Screens.all.contains { $0.frame.contains(pointerNow) }
+        let pointerNow = pointer()
+        let pointerOn = Screens.displays.contains { CGDisplayBounds($0).contains(pointerNow) }
         say("pointer before \(Int(pointerBefore.x)),\(Int(pointerBefore.y)), now \(Int(pointerNow.x)),\(Int(pointerNow.y)) (it may have moved if someone moved it)")
-        step(pointerOn, "the pointer is on one of the person's screens")
+        step(pointerOn && !CGDisplayBounds(id).contains(pointerNow), "the pointer is on one of the person's screens, not on the display")
 
         // 8. A picture of the display.
         if recording {
@@ -213,12 +240,17 @@ enum DisplayCheck {
         try? fm.removeItem(at: file)
 
         // 10. The display removed.
+        let removingStarted = Date()
         display.remove()
-        let removed = wait(5) { CGDisplayIsOnline(id) == 0 }
-        step(removed, "the display is gone", "CGDisplayIsOnline \(CGDisplayIsOnline(id) != 0)")
-        wait(1.5) { NSScreen.screens.count == countBefore }
+        let removed = wait(8) { !Screens.isOnline(id) }
+        let removing = Date().timeIntervalSince(removingStarted)
+        step(removed, "the display is gone: macOS's list of online displays no longer holds it",
+             "the list: \(Screens.online.sorted()), after \(seconds(removing))")
+        say("CGDisplayIsOnline(\(id)) says \(CGDisplayIsOnline(id) != 0) (it goes on saying yes for a display that's gone: never relied on)")
         Screens.forget(id)
-        step(NSScreen.screens.count == countBefore, "AppKit sees the screens it saw before", "\(countBefore) before, \(NSScreen.screens.count) now")
+        step(!Screens.isRun(id), "Petal let its id go", "runs': \(Screens.runIDs.sorted())")
+        step(Screens.online == onlineBefore, "the displays online are the ones from before", "before \(onlineBefore.sorted()), now \(Screens.online.sorted())")
+        say("made in \(seconds(making)), online after \(seconds(placed.value?.online ?? 0)), placed after \(seconds(placed.value?.placed ?? 0)) more, removed in \(seconds(removing))")
         let screensAfter = Screens.displays.map { CGDisplayBounds($0) }
         step(screensAfter == screensBefore, "the person's screens are as they were",
              screensAfter == screensBefore ? "" : "now " + screensAfter.map(describe).joined(separator: " | "))
