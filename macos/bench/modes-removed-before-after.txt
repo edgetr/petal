@@ -1,0 +1,79 @@
+Removing modes from Petal for macOS: the headless benches before (37667f6) and after, arm64 release builds, on throwaway
+folders (an empty config folder: before, the starter modes a new Mac was given; after, the first 12 installed apps).
+They skip the dock's background work, so they don't show what the removed timers cost on a running dock (the focus
+guard's look at the front window every second, held notifications every 2 s, per-mode windows every second, the
+schedule every 20 s, the activity history and the day's summary every minute).
+
+Petal --bench-dock, before:
+Petal dock bench: 3 modes, [10, 7, 8] apps, 2 more running
+strip: SwiftUI
+  switch mode median    2.41 ms   worst    3.19 ms   (18 runs)
+  an app comes forward median    0.90 ms   worst    1.15 ms   (20 runs)
+  refresh with nothing new median    0.06 ms   worst    0.45 ms   (20 runs)
+  dock sizes seen: 1028×76, 1030×76, 1040×76; window 1920×76
+strip: layers
+  switch mode median    1.68 ms   worst    2.06 ms   (18 runs)
+  rows not shown in the same pass: 0 of 3
+  an app comes forward median    0.28 ms   worst    1.31 ms   (20 runs)
+  refresh with nothing new median    0.33 ms   worst    0.41 ms   (20 runs)
+  dock sizes seen: 1028×76, 1030×76, 1040×76; window 1920×76
+
+Petal --bench-dock, after:
+Petal dock bench: 12 apps, 2 more running
+strip: SwiftUI
+  an app added or removed median    1.06 ms   worst    1.78 ms   (24 runs)
+  an app comes forward median    0.86 ms   worst    1.08 ms   (20 runs)
+  refresh with nothing new median    0.10 ms   worst    0.34 ms   (20 runs)
+  dock sizes seen: 1028×76, 982×76; window 1920×76
+strip: layers
+  an app added or removed median    1.16 ms   worst    2.00 ms   (24 runs)
+  changes not shown in the same pass: 0 of 2
+  an app comes forward median    0.31 ms   worst    1.31 ms   (20 runs)
+  refresh with nothing new median    0.19 ms   worst    0.28 ms   (20 runs)
+  dock sizes seen: 1028×76, 982×76; window 1920×76
+
+Petal --bench-windows --runs 5, before (18 windows) and after (13: the overview and the focus and summary cards are gone):
+                                                               before      after
+Settings: open, cold (first in a process), ms                   14.95      16.43
+Settings: open, warm (again), ms                                 0.55       0.56
+idle, Dock, ms CPU a second                                     11.37      11.56
+idle, AI, ms CPU a second                                       12.15      12.24
+idle, Permissions, ms CPU a second                               7.45      12.56
+Control (one line of text): open, cold (first in a process       3.14       2.81
+Control (one line of text): open, warm (again), ms               2.92       3.23
+idle, Control (one line of text), ms CPU a second               12.67      12.09
+Chat, empty: open, cold (first in a process), ms                19.79      19.13
+Chat, empty: open, warm (again), ms                             21.21      24.35
+idle, Chat, empty, ms CPU a second                              12.30      12.62
+Chat, 60 messages: open, cold (first in a process), ms          57.16      53.60
+Chat, 60 messages: open, warm (again), ms                       43.74      44.60
+idle, Chat, 60 messages, ms CPU a second                        15.13      14.38
+Chats list: open, cold (first in a process), ms                 25.32      22.07
+Chats list: open, warm (again), ms                              27.09      18.69
+idle, Chats list, ms CPU a second                               13.22      12.33
+Welcome: open, cold (first in a process), ms                    66.53      69.02
+Welcome: open, warm (again), ms                                 60.42      57.99
+idle, Welcome, ms CPU a second                                  13.20      13.38
+What's New: open, cold (first in a process), ms                 45.28      55.09
+What's New: open, warm (again), ms                              45.37      46.19
+idle, What's New, ms CPU a second                               13.66      12.01
+Vault editor: open, cold (first in a process), ms               63.20      59.73
+Vault editor: open, warm (again), ms                            49.34      58.14
+idle, Vault editor, ms CPU a second                             12.68      12.14
+Notes preview: open, cold (first in a process), ms              25.24      22.78
+Notes preview: open, warm (again), ms                           13.69      18.11
+idle, Notes preview, ms CPU a second                            12.43      12.48
+Window previews: open, cold (first in a process), ms            26.09      26.41
+Window previews: open, warm (again), ms                         17.99      18.21
+idle, Window previews, ms CPU a second                          12.84      11.80
+Stack: open, cold (first in a process), ms                      41.27      36.31
+Stack: open, warm (again), ms                                   31.25      31.96
+idle, Stack, ms CPU a second                                    13.69      13.72
+"+" search: open, cold (first in a process), ms                 24.43      18.43
+"+" search: open, warm (again), ms                              20.88      23.12
+idle, "+" search, ms CPU a second                               13.94      14.89
+every window opened once, ms CPU                                 4409       3442
+every window opened once, MB peak                               431.7      399.1
+in the background after closing them all, ms CPU a second        10.3       10.2
+
+The app's executable (arm64): 24085040 bytes before, 21109728 after.
