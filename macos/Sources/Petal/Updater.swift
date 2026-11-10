@@ -40,6 +40,8 @@ final class Updater {
                 guard let latest = try await Self.latest() else { status = "No Mac release yet."; return }
                 let current = PetalApp.shared.version
                 guard Self.newer(latest.version, than: current) else { status = "Petal \(current) is the newest."; return }
+                // Already downloaded and in place: asking again never downloads it a second time.
+                guard ready != latest.version else { status = "Petal \(latest.version) is ready. Restart Petal to finish."; return }
                 status = "Downloading Petal \(latest.version)…"
                 // With the person's own changes to Petal's code, it's rebuilt with them instead (Personal.swift).
                 if try await !Personal.update(to: latest.version, manual: manual) { try await install(latest) }
