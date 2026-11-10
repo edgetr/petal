@@ -7,7 +7,7 @@ enum Menus {
     static var app: PetalApp { PetalApp.shared }
     static var config: Config { app.config }
 
-    /// The dock's own menu stays tiny: where it sits, auto-hide, focus cards; anything else is asking Claude.
+    /// The dock's own menu stays tiny: where it sits and auto-hide; anything else is asking Claude.
     static func settings(for dock: ScreenDock?) {
         let menu = NSMenu()
         menu.addItem(header("Position"))
@@ -18,7 +18,6 @@ enum Menus {
         }
         menu.addItem(.separator())
         menu.addItem(toggle("Auto-hide", config.autoHide) { config.setDock("autoHide", !config.autoHide) })
-        menu.addItem(toggle("Focus cards", config.bool("focusGuard")) { config.set("focusGuard", !config.bool("focusGuard")) })
         menu.addItem(.separator())
         if let provider = app.chatProvider {
             menu.addItem(ClosureMenuItem(title: "Anything else? Ask \(provider.name)…") { app.claude.open(asking: nil) })
@@ -27,6 +26,8 @@ enum Menus {
             menu.addItem(hint)
             menu.addItem(.separator())
         }
+        // A dock with no apps of its own yet (a new one, or modes that couldn't be read): macOS's Dock, one click away.
+        if config.apps.isEmpty { menu.addItem(ClosureMenuItem(title: "Import macOS’s Dock") { config.importSystemDock() }) }
         menu.addItem(ClosureMenuItem(title: "Petal Settings…") { app.settings.show() })
         menu.addItem(ClosureMenuItem(title: "Use macOS’s Dock") { app.useDock("macos") })
         menu.addItem(ClosureMenuItem(title: "Quit Petal") { PetalApp.quit() })
@@ -91,22 +92,12 @@ enum Menus {
         }
         if listed { menu.addItem(header(name)) }
         if item.running { menu.addItem(ClosureMenuItem(title: "New Window") { app.docks.newWindow(item.id) }) }
-        let modeName = dock.mode?.name ?? "dock"
-        if let mode = dock.mode {
-            let inMode = mode.apps.contains(item.id)
-            menu.addItem(ClosureMenuItem(title: inMode ? "Remove from \(modeName)" : "Keep in \(modeName)") {
-                if inMode { config.removeApp(item.id, from: mode.id) } else { config.addApp(item.id, to: mode.id) }
+        // Finder is its own button (finderInDock), not one of the dock's apps.
+        if item.id != DockController.finder || !config.bool("finderInDock") {
+            let kept = config.apps.contains(item.id)
+            menu.addItem(ClosureMenuItem(title: kept ? "Remove from Dock" : "Keep in Dock") {
+                if kept { config.removeApp(item.id) } else { config.addApp(item.id) }
             })
-        }
-        if config.bool("modes") && config.modes.count > 1 {
-            menu.addItem(header("In modes"))
-            for mode in config.modes {
-                let row = toggle(mode.name, mode.apps.contains(item.id)) {
-                    if mode.apps.contains(item.id) { config.removeApp(item.id, from: mode.id) } else { config.addApp(item.id, to: mode.id) }
-                }
-                row.image = symbol(mode.icon, color: mode.color)
-                menu.addItem(row)
-            }
         }
         menu.addItem(.separator())
         menu.addItem(ClosureMenuItem(title: "Show in Finder") {
@@ -120,88 +111,12 @@ enum Menus {
         pop(menu)
     }
 
-    static func mode(_ mode: Mode, for dock: ScreenDock) {
-        let menu = NSMenu()
-        menu.addItem(header(mode.name))
-        if dock.mode?.id != mode.id, let desktop = dock.desktop {
-            menu.addItem(ClosureMenuItem(title: "Use on this Desktop") { app.requestMode(mode.id, desktop: desktop) })
-        }
-        menu.addItem(toggle("Default mode", config.defaultMode == mode.id) { config.setDefaultMode(mode.id) })
-        menu.addItem(toggle("Distracting", mode.isDistracting) {
-            var updated = mode
-            updated.distracting = !mode.isDistracting
-            config.save(updated)
-        })
-        if mode.isDistracting && config.bool("countdown") {
-            menu.addItem(header("Wait to get in"))
-            for (title, seconds) in [("15s", 15.0), ("30s", 30), ("1m", 60), ("2m", 120)] {
-                let row = ClosureMenuItem(title: title) {
-                    var updated = mode
-                    updated.focusDelay = seconds
-                    config.save(updated)
-                }
-                row.state = mode.wait == seconds ? .on : .off
-                menu.addItem(row)
-            }
-        }
-        if config.bool("holdNotifications") {
-            menu.addItem(toggle("Hold notifications", mode.hold) {
-                var updated = mode
-                updated.hold = !mode.hold
-                config.save(updated)
-            })
-        }
-        // What's waiting on this mode: clicking one goes there and opens it.
-        let held = app.notes.held(in: mode.id)
-        if !held.isEmpty {
-            menu.addItem(header("Held for \(mode.name)"))
-            for note in held.suffix(10).reversed() {
-                let text = [note.title, note.body].filter { !$0.isEmpty }.joined(separator: " — ")
-                let row = ClosureMenuItem(title: text.count > 60 ? String(text.prefix(59)) + "…" : text) { app.notes.open(note) }
-                row.image = icon(Apps.icon(Notes.appID(note.app)))
-                menu.addItem(row)
-            }
-            menu.addItem(ClosureMenuItem(title: "Clear") { app.notes.clear(mode.id) })
-        }
-        menu.addItem(ClosureMenuItem(title: "All Desktops…") { app.overview.show() })
-        menu.addItem(.separator())
-        if let provider = app.chatProvider {
-            menu.addItem(ClosureMenuItem(title: "Change with \(provider.name)…") { app.claude.open(asking: "Change my \(mode.name) mode: ", send: false) })
-        }
-        menu.addItem(ClosureMenuItem(title: "Edit in Settings…") { app.settings.show(.modes) })
-        if config.modes.count > 1 {
-            menu.addItem(ClosureMenuItem(title: "Delete Mode…") {
-                let alert = NSAlert()
-                alert.messageText = "Delete \(mode.name)?"
-                alert.informativeText = "Desktops in \(mode.name) go back to the default mode."
-                alert.addButton(withTitle: "Delete")
-                alert.addButton(withTitle: "Cancel")
-                alert.buttons.first?.hasDestructiveAction = true
-                NSApp.activate()
-                if alert.runModal() == .alertFirstButtonReturn { config.delete(mode: mode.id) }
-            })
-        }
-        pop(menu)
-    }
-
-    /// A website shortcut: open it, and which modes have it.
+    /// A website shortcut: open it, or take it out of the dock.
     static func site(_ item: DockItem, in dock: ScreenDock) {
         let menu = NSMenu()
         menu.addItem(header(Apps.name(item.id)))
         menu.addItem(ClosureMenuItem(title: "Open in Browser") { Sites.open(item.id) })
-        if let mode = dock.mode, mode.apps.contains(item.id) {
-            menu.addItem(ClosureMenuItem(title: "Remove from \(mode.name)") { config.removeApp(item.id, from: mode.id) })
-        }
-        if config.bool("modes") && config.modes.count > 1 {
-            menu.addItem(header("In modes"))
-            for mode in config.modes {
-                let row = toggle(mode.name, mode.apps.contains(item.id)) {
-                    if mode.apps.contains(item.id) { config.removeApp(item.id, from: mode.id) } else { config.addApp(item.id, to: mode.id) }
-                }
-                row.image = symbol(mode.icon, color: mode.color)
-                menu.addItem(row)
-            }
-        }
+        menu.addItem(ClosureMenuItem(title: "Remove from Dock") { config.removeApp(item.id) })
         pop(menu)
     }
 
@@ -303,10 +218,6 @@ enum Menus {
         let item = ClosureMenuItem(title: title, handler: action)
         item.state = on ? .on : .off
         return item
-    }
-
-    static func symbol(_ name: String, color: NSColor) -> NSImage? {
-        NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(.init(paletteColors: [color]))
     }
 
     static func icon(_ image: NSImage) -> NSImage {

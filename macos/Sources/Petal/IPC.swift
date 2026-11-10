@@ -2,16 +2,13 @@ import Foundation
 
 /// How scripts and Claude reach the running Petal on macOS, as `omarchy-shell petal <fn>` does on Omarchy: a Unix
 /// socket at ~/.config/petal/petal.sock. A client writes one line, the function and its arguments as a JSON array
-/// (["mode", "social"]), and reads one line back. Only the person's own account can open it.
+/// (["dock", "macos"]), and reads one line back. Only the person's own account can open it.
 ///
-///     printf '["current"]\n' | nc -U ~/.config/petal/petal.sock
+///     printf '["version"]\n' | nc -U ~/.config/petal/petal.sock
 @MainActor
 final class IPC {
     nonisolated static let path = Config.folder.appending(path: "petal.sock").path
     typealias Handler = @MainActor ([String]) -> String
-    /// A function that answers later (the AI's tools waiting for the person to allow something): it calls `reply`
-    /// once, on the main thread.
-    typealias Later = @MainActor ([String], @escaping @MainActor (String) -> Void) -> Void
     /// A function that needs to know who's asking (the vault, for agents outside Petal): Petal works it out from the
     /// socket itself (AgentCallers), never from what the caller says. It's handed its request, to hear when the
     /// client goes and to say when the person has a card up for it (`Pending`).
@@ -53,14 +50,12 @@ final class IPC {
         }
     }
     private var handlers: [String: Handler] = [:]
-    private var later: [String: Later] = [:]
     private var from: [String: From] = [:]
     private var fd: Int32 = -1
     /// The functions registered with `onFrom`: the socket's thread identifies their callers before they run.
     nonisolated static let identified: Set<String> = ["assist", "agentKeys"]
 
     func on(_ name: String, _ handler: @escaping Handler) { handlers[name] = handler }
-    func onLater(_ name: String, _ handler: @escaping Later) { later[name] = handler }
     func onFrom(_ name: String, _ handler: @escaping From) {
         precondition(Self.identified.contains(name))
         from[name] = handler
@@ -157,12 +152,10 @@ final class IPC {
                     // Its client went while it waited its turn here: nothing is done for nobody.
                     guard !pending.hungUp else { return }
                     handler(Array(words.dropFirst()), caller, pending, finish)
-                } else if let handler = self.later[name] {
-                    handler(Array(words.dropFirst()), finish)
                 } else if let handler = self.handlers[name] {
                     finish(handler(Array(words.dropFirst())))
                 } else {
-                    finish("unknown function; try: " + (Array(self.handlers.keys) + Array(self.later.keys) + Array(self.from.keys)).sorted().joined(separator: ", "))
+                    finish("unknown function; try: " + (Array(self.handlers.keys) + Array(self.from.keys)).sorted().joined(separator: ", "))
                 }
             }
         }

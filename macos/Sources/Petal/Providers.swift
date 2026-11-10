@@ -187,7 +187,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
 
     // MARK: Quick calls
 
-    /// A quick, cheap call that answers with JSON (sorting activity into modes).
+    /// A quick, cheap call that answers with JSON (routines' sorting, helpers in notes).
     var quickArguments: [String] {
         switch self {
         case .claude:

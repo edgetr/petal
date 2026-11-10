@@ -2,15 +2,12 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// Petal in the menu bar (`menuBarIcon`): the current mode's icon and name (Petal's mark when modes are off), with a
-/// menu of this Desktop's mode and the others, every Desktop, settings, and updates. When a new Petal is ready, the
-/// icon turns blue with a dot and the menu offers the restart and what's new.
+/// Petal in the menu bar (`menuBarIcon`): Petal's mark, with a menu of Petal Notes, settings, which dock, and
+/// updates. When a new Petal is ready, the mark turns blue with a dot and the menu offers the restart and what's new.
 @MainActor
 final class MenuBar: NSObject, NSMenuDelegate {
     private var item: NSStatusItem?
     private var shownDot = false
-    private var shownMode: Mode?
-    private var mode: Mode?
 
     var app: PetalApp { PetalApp.shared }
 
@@ -32,58 +29,16 @@ final class MenuBar: NSObject, NSMenuDelegate {
             item.button?.toolTip = "Petal"
             self.item = item
             shownDot = false
-            shownMode = nil
         } else if !wanted, let item {
             NSStatusBar.system.removeStatusItem(item)
             self.item = nil
         }
         let dot = app.updater.ready != nil
-        let mode = app.docks.shown && app.config.bool("modes") ? self.mode : nil
-        if let item, dot != shownDot || mode != shownMode {
-            if let mode {
-                // The mode's symbol only: its name is on the dock already.
-                item.button?.image = Self.modeImage(mode.icon, dot: dot)
-                item.button?.title = ""
-                item.button?.toolTip = dot ? "Petal: an update is ready" : "Petal: \(mode.name)"
-            } else {
-                item.button?.image = Self.mark(dot: dot)
-                item.button?.title = ""
-                item.button?.toolTip = dot ? "Petal: an update is ready" : "Petal"
-            }
+        if let item, dot != shownDot {
+            item.button?.image = Self.mark(dot: dot)
+            item.button?.toolTip = dot ? "Petal: an update is ready" : "Petal"
             shownDot = dot
-            shownMode = mode
         }
-    }
-
-    /// The mode in front changed (the dock calls this as it refreshes).
-    func show(mode: Mode?) {
-        guard mode != self.mode else { return }
-        self.mode = mode
-        refresh()
-    }
-
-    /// A mode's SF Symbol as a menu bar template image; with an update ready, in blue with the update dot. A Nerd
-    /// Font glyph (from an Omarchy modes.json) has no symbol, so Petal's mark stands in.
-    static func modeImage(_ symbol: String, dot: Bool) -> NSImage {
-        guard let base = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 13, weight: .medium)) else { return mark(dot: dot) }
-        guard dot else {
-            base.isTemplate = true
-            return base
-        }
-        let size = NSSize(width: base.size.width + 4, height: max(base.size.height, 16))
-        let image = NSImage(size: size, flipped: false) { rect in
-            base.draw(in: NSRect(x: 0, y: (rect.height - base.size.height) / 2, width: base.size.width, height: base.size.height))
-            NSColor.black.setFill()
-            NSBezierPath(ovalIn: NSRect(x: rect.maxX - 5, y: rect.maxY - 5, width: 5, height: 5)).fill()
-            // The symbol and its dot in blue (drawn again for each appearance, so it's macOS's blue for it).
-            updateBlue.setFill()
-            rect.fill(using: .sourceAtop)
-            return true
-        }
-        image.isTemplate = false
-        image.accessibilityDescription = "update ready"
-        return image
     }
 
     /// The menu bar icon's color while an update is ready, as an app's menu bar icon says it has news.
@@ -100,28 +55,6 @@ final class MenuBar: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let config = app.config
-        let dock = app.docks.focusedDock
-        let desktop = dock?.desktop ?? Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0])
-        if app.docks.shown && config.bool("modes") && !config.modes.isEmpty {
-            menu.addItem(Menus.header(desktop.map { "Desktop \($0)" } ?? "This Desktop"))
-            let current = dock?.mode?.id ?? desktop.flatMap { config.mode(forDesktop: $0)?.id }
-            for (index, mode) in config.modes.enumerated() {
-                let row = ClosureMenuItem(title: mode.name) { [weak self] in
-                    guard let self, let desktop else { return }
-                    app.requestMode(mode.id, desktop: desktop)
-                }
-                row.state = mode.id == current ? .on : .off
-                row.image = Menus.symbol(mode.icon, color: mode.color)
-                if index < 9 && config.bool("shortcuts") && !app.hotkeys.taken.contains(UInt32(index + 1)) {
-                    row.keyEquivalent = String(index + 1)
-                    row.keyEquivalentModifierMask = [.control, .option]
-                }
-                row.isEnabled = desktop != nil
-                menu.addItem(row)
-            }
-            menu.addItem(ClosureMenuItem(title: "All Desktops…") { [weak self] in self?.app.overview.show() })
-            menu.addItem(.separator())
-        }
         if let ready = app.updater.ready {
             menu.addItem(Menus.header("Petal \(ready) is ready"))
             menu.addItem(ClosureMenuItem(title: "Restart to Update") { [weak self] in self?.app.relaunch() })

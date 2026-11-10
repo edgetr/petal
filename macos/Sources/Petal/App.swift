@@ -3,19 +3,6 @@ import Observation
 import ServiceManagement
 import SwiftUI
 
-/// A switch into a distracting mode, waiting out its wait (the countdown setting).
-struct PendingMode: Equatable {
-    let desktop: Int
-    let mode: String
-    var deadline: Date
-    var total: Double
-
-    /// Another click halves the time left; under 1.5 s it's nil: switch now.
-    static func halved(_ left: Double) -> Double? {
-        left / 2 < 1.5 ? nil : left / 2
-    }
-}
-
 /// Petal for macOS: everything the dock, its popups, Claude and the settings window share.
 @MainActor @Observable
 final class PetalApp {
@@ -34,34 +21,23 @@ final class PetalApp {
     let aiSetup = AISetup()
     /// API keys saved in the Keychain, and checking that one works (APIKeys.swift).
     let apiKeyCheck = APIKeyCheck()
-    let insights = InsightsController()
-    @ObservationIgnored let activity = ActivityLog()
     @ObservationIgnored let tooltips = Tooltips()
     @ObservationIgnored let settings = SettingsWindow()
     @ObservationIgnored let welcome = Welcome()
-    @ObservationIgnored let recipes = RecipeWindow()
-    @ObservationIgnored let automation = ModeAutomation()
     @ObservationIgnored let menuBar = MenuBar()
-    @ObservationIgnored let overview = Overview()
     @ObservationIgnored let releaseNotes = ReleaseNotes()
     let hotkeys = Hotkeys()
     @ObservationIgnored private(set) var docks: DockController!
-    @ObservationIgnored private(set) var focus: FocusGuard!
+    /// Quick calls to the chosen AI's small model: routines' sorting and helpers in notes (Focus.swift).
+    @ObservationIgnored let brain = Brain()
     @ObservationIgnored let ipc = IPC()
 
     var launching: [String: (start: Date, windows: Int)] = [:]
-    var pendingMode: PendingMode?
-    @ObservationIgnored private var countdown: Timer?
-    @ObservationIgnored private var arrival: (() -> Void)?
-    /// Held notifications, Do Not Disturb while holding, and Petal's own banners (Notifications.swift).
-    let notes = Notes()
-    /// Petal AI's powers on the Mac: looking, acting (asked first), the Trash, memory, the day's summary.
+    /// Petal AI's powers on the Mac: looking, acting (asked first), the Trash, memory.
     let assist = Assist()
-    /// Replies drafted for held messages, in the person's own style.
-    let drafts = Drafts()
     /// "Ask Petal AI" by any selected text.
     @ObservationIgnored let selection = SelectionAsk()
-    /// Routines in the person's own words: what Petal does by itself when a file lands, an app opens, a mode starts.
+    /// Routines in the person's own words: what Petal does by itself when a file lands, an app opens, at a time.
     let routines = Routines()
     /// Petal Notes: the person's own notes on paper, stuck to places (NoteDesk.swift).
     let paper = NoteDesk()
@@ -85,15 +61,13 @@ final class PetalApp {
     init() {
         PetalApp.instance = self
         docks = DockController()
-        focus = FocusGuard()
-        connectWindowsToGuard()
         refreshSystemFacts()
         if !Headless.on {
             // Back from System Settings (or anywhere): what changed there shows in the windows still open.
             NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
                 MainActor.assumeIsolated {
                     let app = PetalApp.shared
-                    if app.settings.isOpen || app.welcome.isOpen || app.overview.isOpen { app.refreshSystemFacts() }
+                    if app.settings.isOpen || app.welcome.isOpen { app.refreshSystemFacts() }
                 }
             }
             Task {
@@ -110,7 +84,7 @@ final class PetalApp {
     var accent: NSColor { NSColor(hex: config.string("accentColor")) ?? NSColor(hex: "#d9367f")! }
 
     /// A Claude panel, menu or search is open: an auto-hiding dock stays out.
-    var overlayOpen: Bool { claude.isOpen || popups.card != nil }
+    var overlayOpen: Bool { claude.isOpen || popups.asking }
 
     func start() {
         MCP.inPetal = true
@@ -135,8 +109,6 @@ final class PetalApp {
         usage.start { [weak self] in self?.config.bool("claudeUsage") ?? false }
         signals.start(watchFolders: Stacks.resolve(config.strings("stackFolders")))
         updater.start()
-        activity.start()
-        automation.start()
         menuBar.start()
         paper.start()
         aiSetup.refreshAll()
@@ -152,7 +124,6 @@ final class PetalApp {
             self?.search.prepare()
             self?.settings.makeAhead()   // the settings open at once
         }
-        notes.start()
         assist.start()
         claude.startNotes()
         selection.start()
@@ -164,6 +135,7 @@ final class PetalApp {
         } else {
             useDock(config.whichDock)
         }
+        ModesLeftovers.settle()
     }
 
     func stop() {
@@ -175,7 +147,6 @@ final class PetalApp {
         AgentGrants.flush()
         Routines.flush()
         Windows.stopManaging()
-        notes.stop()
         ipc.stop()
         claude.stopAll()
         SystemDock.restore()
@@ -202,7 +173,7 @@ final class PetalApp {
             docks.show(false)
             hotkeys.refresh()
             popups.closeAll()
-            popups.dismissCard()
+            popups.closeAsk()
             SystemDock.restore()
         }
     }
@@ -223,28 +194,25 @@ final class PetalApp {
     private(set) var loginItem = false
     /// The apps in macOS's Dock (SystemDock.apps), for Import Dock and the sketches.
     private(set) var systemDockApps: [String] = []
-    /// How many Desktops there are, across every display.
-    private(set) var desktopCount = 0
     /// The person's notes for the AI (~/.config/petal/instructions.md), as the settings window edits them.
     @ObservationIgnored let instructions = InstructionsText()
 
-    /// Reads what the settings, welcome and overview windows show of macOS and of files off the main thread, so those
+    /// Reads what the settings and welcome windows show of macOS and of files off the main thread, so those
     /// windows never wait on them while they draw: the login item (an XPC call to macOS's service manager), macOS's
-    /// Dock (its preferences), the Desktops (the window server), Codex's default model and the notes for the AI.
+    /// Dock (its preferences), Codex's default model and the notes for the AI.
     /// Called at launch and as each of them opens. Reads go one after another, and only the newest one asked for is
     /// used: one begun before another (or before the login item was changed here) never overwrites it. `wait` reads
     /// it all before returning (snapshots).
     func refreshSystemFacts(wait: Bool = false) {
         factsAsked += 1
         let asked = factsAsked
-        let read = { () -> (login: Bool, dock: [String], desktops: Int) in
-            (SMAppService.mainApp.status == .enabled, SystemDock.readApps(), Spaces.count())
+        let read = { () -> (login: Bool, dock: [String]) in
+            (SMAppService.mainApp.status == .enabled, SystemDock.readApps())
         }
-        let apply = { (facts: (login: Bool, dock: [String], desktops: Int)) in
+        let apply = { (facts: (login: Bool, dock: [String])) in
             guard asked == self.factsAsked else { return }
             if facts.login != self.loginItem { self.loginItem = facts.login }
             if facts.dock != self.systemDockApps { self.systemDockApps = facts.dock }
-            if facts.desktops != self.desktopCount { self.desktopCount = facts.desktops }
         }
         refreshCodexDefault(wait: wait)
         instructions.refresh(wait: wait)
@@ -275,93 +243,6 @@ final class PetalApp {
             let model = PetalApp.readCodexDefault()
             DispatchQueue.main.async { MainActor.assumeIsolated { apply(model) } }
         }
-    }
-
-    // MARK: Modes
-
-    /// Puts a Desktop in a mode. Getting into a distracting mode (with countdown on) waits out its wait; each
-    /// extra ask halves what's left, and under 1.5 s it switches now. `then` runs once the Desktop is in the mode
-    /// (opening a held notification's app); Stay drops it.
-    func requestMode(_ id: String, desktop: Int, then: (() -> Void)? = nil) {
-        let current = config.mode(forDesktop: desktop)
-        if current?.id == id { stay(); then?(); return }
-        guard let target = config.modes.first(where: { $0.id == id }) else { return }
-        if var pending = pendingMode, pending.desktop == desktop, pending.mode == id {
-            if let then { arrival = then }
-            guard let left = PendingMode.halved(pending.deadline.timeIntervalSinceNow) else { apply(id, desktop: desktop); return }
-            pending.deadline = Date().addingTimeInterval(left)
-            pendingMode = pending
-            return
-        }
-        if config.bool("countdown") && target.isDistracting {
-            stay()
-            arrival = then
-            pendingMode = PendingMode(desktop: desktop, mode: id, deadline: Date().addingTimeInterval(target.wait), total: target.wait)
-            // No card about the mode while its countdown runs.
-            if let card = popups.card, card.target?.id == id { popups.dismissCard() }
-            countdown = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    guard let self, let pending = self.pendingMode else { return }
-                    if pending.deadline <= Date() { self.apply(pending.mode, desktop: pending.desktop) }
-                }
-            }
-        } else {
-            arrival = then
-            apply(id, desktop: desktop)
-        }
-    }
-
-    func stay() {
-        pendingMode = nil
-        arrival = nil
-        countdown?.invalidate()
-    }
-
-    /// Puts a Desktop in a mode at once, with no countdown (the schedule).
-    func setModeNow(_ id: String, desktop: Int) { apply(id, desktop: desktop) }
-
-    /// Per-mode windows and the focus guard: "Move to Design" takes the window (or, in a browser, just the tab) to
-    /// Design before switching, and a parked window brought forward (⌘-Tab, its app showing it) asks for its own
-    /// mode, so a distracting one still waits.
-    private func connectWindowsToGuard() {
-        focus.mover = { [unowned self] front, target, desktop in
-            guard Parking.active, let window = Windows.focused(), window.pid == front.pid else {
-                requestMode(target.id, desktop: desktop)
-                return
-            }
-            let running = NSRunningApplication(processIdentifier: front.pid)
-            if front.isBrowser, let running {
-                browsers.frontURL(of: running) { [unowned self] url in
-                    if let url { Parking.moveTab(url: url, from: window.element, to: target.id) }
-                    else { Parking.moveWindow(window.element, to: target.id) }
-                    requestMode(target.id, desktop: desktop)
-                }
-            } else {
-                Parking.moveWindow(window.element, to: target.id)
-                requestMode(target.id, desktop: desktop)
-            }
-        }
-        Parking.parkedWindowFocused = { [unowned self] window, mode in requestMode(mode, desktop: window.desktop) }
-    }
-
-    private func apply(_ id: String, desktop: Int) {
-        let then = arrival
-        stay()
-        Perf.span("apply: config.setMode") { self.config.setMode(id, forDesktop: desktop) }
-        Perf.span("apply: parking") { Parking.modeChanged(desktop: desktop) }
-        Perf.span("apply: tiling") { Tiling.modeChanged(desktop: desktop) }
-        if let card = popups.card, card.target?.id == id, card.kind != .note { popups.dismissCard() }
-        Perf.span("apply: docks.refresh") { self.docks.refresh(quick: true) }
-        then?()
-    }
-
-    // MARK: Describe your day
-
-    /// The person says what they do; the chat builds their modes from it with Petal's tools.
-    func describeDay(_ text: String) {
-        let text = text.trimmingCharacters(in: .whitespacesAndNewlines).trimmingCharacters(in: CharacterSet(charactersIn: "."))
-        guard !text.isEmpty, chatProvider != nil else { return }
-        claude.open(asking: "Here's what I do on this computer: \(text). Build my focus modes from the apps I have installed (petal_list_apps): a few clear modes with fitting icons, colors and abouts, replacing the starter modes I haven't changed. Then tell me in two lines what you made.")
     }
 
     // MARK: Launching
@@ -559,20 +440,10 @@ final class PetalApp {
 
     /// What `bin/petal` and Claude's tools can ask the running Petal (IpcHandler in Dock.qml).
     private func registerIPC() {
-        ipc.on("current") { [unowned self] _ in docks.focusedDock?.mode?.id ?? config.defaultMode }
+        // Petal's tools changing settings or the dock (`Petal --mcp`, petal-mcp.py): done here, in order.
+        ipc.on("mcpCall") { args in MCP.answer(args.first ?? "", args.dropFirst().first ?? "{}") }
         // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
         // person to allow it.
-        // Petal's tools changing settings, modes or the dock (`Petal --mcp`, petal-mcp.py): done here, in order.
-        ipc.onLater("mcpCall") { args, reply in
-            let name = args.first ?? "", json = args.dropFirst().first ?? "{}"
-            guard name == "petal_import_recipe" else { return reply(MCP.answer(name, json)) }
-            // Reading the recipe and finding its apps (a scan of the Applications folders, Launch Services) happen
-            // off the main thread; the modes it brings are made here, in order with every other change.
-            DispatchQueue.global(qos: .userInitiated).async {
-                let plan = Result { try MCP.importPlan(json) }
-                DispatchQueue.main.async { MainActor.assumeIsolated { reply(MCP.answer(name, json, plan: plan)) } }
-            }
-        }
         ipc.onFrom("assist") { [unowned self] args, who, request, reply in
             // Which chat asks: a note's id only from Petal's own chats (Petal started them); any other caller is the
             // process that connected, whatever it says, so it never stands in for a note or another session.
@@ -592,15 +463,6 @@ final class PetalApp {
         ipc.on("chats") { [unowned self] _ in claude.open(asking: nil); claude.chatsOpen = true; return "ok" }
         ipc.on("bench") { args in LiveBench.start(quiet: args.first == "quiet") }
 
-        ipc.on("mode") { [unowned self] args in
-            guard let id = args.first, config.modes.contains(where: { $0.id == id }) else { return "no such mode" }
-            guard let desktop = docks.focusedDock?.desktop ?? Spaces.desktop(on: NSScreen.main ?? NSScreen.screens[0]) else {
-                return "this Space is a full-screen app"
-            }
-            requestMode(id, desktop: desktop)
-            return "ok"
-        }
-        ipc.on("stay") { [unowned self] _ in stay(); return "ok" }
         ipc.on("desktop") { [unowned self] _ in (docks.focusedDock?.desktop).map(String.init) ?? "" }
         ipc.on("ask") { [unowned self] _ in claude.open(asking: nil); return "ok" }
         ipc.on("chat") { [unowned self] args in claude.open(asking: args.joined(separator: " ")); return "ok" }
@@ -610,37 +472,11 @@ final class PetalApp {
         ipc.on("search") { [unowned self] _ in search.open(in: nil); return "ok" }
         ipc.on("settings") { [unowned self] _ in settings.show(); return "ok" }
         ipc.on("reveal") { [unowned self] _ in docks.revealAll(); return "ok" }
-        ipc.on("check") { [unowned self] _ in focus.check(); return "ok" }
         ipc.on("stack") { [unowned self] args in
             let folders = Stacks.resolve(config.strings("stackFolders"))
             guard let index = args.first.flatMap(Int.init), folders.indices.contains(index), let dock = docks.focusedDock else { return "no such stack" }
             dock.panel?.reveal()
             popups.toggleStack(folders[index], in: dock)
-            return "ok"
-        }
-        ipc.on("testCard") { [unowned self] args in
-            switch args.first {
-            case "suggest": insights.showSuggestion(marking: false)
-            case "summary": insights.showSummary()
-            case "move", "peek", "note":
-                guard let card = FocusCard.sample(args[0], app: self) else { return "no such mode" }
-                popups.show(card)
-            default:
-                guard let card = FocusCard.sample("block", app: self) else { return "no such mode" }
-                popups.show(card)
-            }
-            return "ok"
-        }
-        ipc.on("testBanner") { [unowned self] _ in notes.banners.sample(); return "ok" }
-        ipc.on("held") { [unowned self] _ in
-            config.modes.map { "\($0.id) \(notes.held(in: $0.id).count)" }.joined(separator: "\n")
-        }
-        ipc.on("holding") { [unowned self] _ in notes.status.json }
-        ipc.on("overview") { [unowned self] _ in overview.show(); return "ok" }
-        ipc.on("summary") { [unowned self] _ in insights.showSummary(); return "ok" }
-        ipc.on("recipe") { [unowned self] args in
-            guard let path = args.first, FileManager.default.fileExists(atPath: path) else { return "no such file" }
-            recipes.show(URL(fileURLWithPath: path))
             return "ok"
         }
         ipc.on("testBounce") { [unowned self] args in
@@ -650,7 +486,7 @@ final class PetalApp {
         }
         ipc.on("emptyTrash") { _ in Stacks.emptyTrash(); return "ok" }
         ipc.on("close") { [unowned self] _ in
-            claude.close(); search.close(); popups.closeAll(); popups.dismissCard(); overview.close()
+            claude.close(); search.close(); popups.closeAll(); popups.closeAsk()
             return "ok"
         }
         ipc.on("dock") { [unowned self] args in
@@ -673,7 +509,6 @@ final class PetalApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var signals: [DispatchSourceSignal] = []
-    private var opened: [URL] = []
 
     let services = TextServices()
 
@@ -683,8 +518,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // "Ask Petal AI" and "Add to Petal AI" on selected text, in every app's right-click menu (Services).
         NSApp.servicesProvider = services
         NSUpdateDynamicServices()
-        for url in opened { app.recipes.show(url) }
-        opened = []
         // Being killed (logout, `killall Petal`) gives macOS its Dock back too, not only quitting.
         for number in [SIGTERM, SIGINT, SIGHUP] {
             signal(number, SIG_IGN)
@@ -692,13 +525,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             source.setEventHandler { PetalApp.quit() }
             source.resume()
             signals.append(source)
-        }
-    }
-
-    /// Double-clicking a .petal file someone shared: what it adds, first.
-    func application(_ application: NSApplication, open urls: [URL]) {
-        for url in urls where url.pathExtension.lowercased() == "petal" {
-            if PetalApp.started { PetalApp.shared.recipes.show(url) } else { opened.append(url) }
         }
     }
 

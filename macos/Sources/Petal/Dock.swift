@@ -5,7 +5,7 @@ import SwiftUI
 /// An app in the dock (DockModel.js and Dock.qml's itemsFor on Omarchy).
 struct DockItem: Identifiable, Equatable {
     let id: String          // bundle identifier
-    let pinned: Bool        // in this Desktop's mode
+    let pinned: Bool        // one of the dock's apps (dock.json), not just running
     var running: Bool
     var windows: Int        // its normal windows, anywhere
     var here: Bool          // one of them is on this screen's Desktop
@@ -16,7 +16,6 @@ struct DockItem: Identifiable, Equatable {
 @MainActor @Observable
 final class ScreenDock {
     var desktop: Int?
-    var mode: Mode?
     var items: [DockItem] = [] { didSet { if items.count != appCount { appCount = items.count } } }
     /// How many apps `items` holds, changing only when that does: "+" over the layer strip goes after them, and
     /// watching this instead of `items` keeps an app coming forward from updating it.
@@ -35,8 +34,6 @@ final class ScreenDock {
     @ObservationIgnored var order: [String] = []
     @ObservationIgnored var frames: [String: CGRect] = [:]   // slot frames in the panel, top-left origin
     @ObservationIgnored weak var panel: DockPanel?
-    /// Every mode's apps as this screen would show them, for the layer strip's rows made ahead of time.
-    @ObservationIgnored var rows: [String: [DockItem]] = [:]
     @ObservationIgnored weak var strip: AppStripView?
     let magnifier = Magnifier()
 
@@ -251,7 +248,7 @@ final class DockController {
 
     // MARK: Minimized windows
 
-    /// Each app's minimized windows, across Desktops and modes. Read again only for an app whose windows opened,
+    /// Each app's minimized windows, across Desktops. Read again only for an app whose windows opened,
     /// closed, minimized or came back (and once for every app when the events start), never by scanning every app.
     private var minimizedByApp: [pid_t: [AppWindow]] = [:]
     /// Apps with a window event lately, by when: each look in the second after reads them, so the trailing look
@@ -299,7 +296,7 @@ final class DockController {
         !window.minimized && (lastSnapshot?.onScreenFrames(pid: window.pid) ?? []).contains { $0.equalTo(window.frame, within: 4) }
     }
 
-    /// `quick`: what changed is the mode or a setting, not the windows, so the last look at them does.
+    /// `quick`: what changed is the dock's apps or a setting, not the windows, so the last look at them does.
     func refresh(quick: Bool = false) {
         refresh(with: quick ? (lastSnapshot ?? WindowList.current()) : Perf.span("refresh: window list") { WindowList.current() })
     }
@@ -318,7 +315,10 @@ final class DockController {
         let running = Perf.span("refresh: running apps") { (lastRunning ?? Self.runningApps()).filter { !$0.value.isTerminated } }
         if !config.bool("minimized") { minimizedCache = [] }
         let minimizedAll = minimizedCache
-        let modesOn = config.bool("modes")
+        let finderButton = config.bool("finderInDock")
+        // Finder is its own button by the AI button (FinderButton): never among the apps.
+        var seen = Set<String>()
+        let apps = config.apps.filter { Apps.shows($0) && !(finderButton && $0 == Self.finder) && seen.insert($0).inserted }
         Perf.span("refresh: launching") { app.updateLaunching(snapshot) }
 
         for screen in screens {
@@ -327,72 +327,37 @@ final class DockController {
             panels[id] = panel
             let dock = panel.dock
             let showing = Perf.span("refresh: desktop") { Spaces.showing(on: screen) }
-            let desktop = showing.desktop
-            if desktop != nil || dock.mode == nil {   // a full-screen app keeps the mode of the Desktop before it
-                dock.desktop = desktop
-            }
+            // A full-screen app's Space keeps the Desktop before it.
+            if let desktop = showing.desktop, desktop != dock.desktop { dock.desktop = desktop }
             panel.fullScreen = showing.fullScreen
             panel.aside = missionControl   // a screen joining while Mission Control is open
-            let mode = modesOn ? config.mode(forDesktop: dock.desktop ?? 1) : config.modes.first
-            Perf.span("refresh: set mode") { if mode != dock.mode { dock.mode = mode } }
             let here = Set(snapshot.apps(on: screen))
-            let otherModes = Set(config.modes.filter { $0.id != mode?.id }.flatMap(\.apps))
 
-            var items: [DockItem] = []
             func item(_ bundleID: String, pinned: Bool) -> DockItem {
                 DockItem(id: bundleID, pinned: pinned, running: running[bundleID] != nil, windows: snapshot.count[bundleID] ?? 0,
                          here: here.contains(bundleID), active: bundleID == frontmost)
             }
-            // Finder is its own button by the AI button (FinderButton), the same in every mode: never among the apps.
-            let finder: [DockItem] = []
-            let finderButton = config.bool("finderInDock")
-            for bundleID in mode?.apps ?? [] where Apps.shows(bundleID) && !items.contains(where: { $0.id == bundleID })
-                && !(finderButton && bundleID == Self.finder) {
-                items.append(item(bundleID, pinned: true))
+            // The dock's apps in their order, then the running apps that aren't among them, each keeping its slot
+            // for the session.
+            let pinned = apps.map { item($0, pinned: true) }
+            let others = snapshot.order.filter { id in
+                running[id] != nil && !seen.contains(id) && !(finderButton && id == Self.finder)
+                    && (!config.bool("thisWorkspaceOnly") || here.contains(id))
             }
-            for bundleID in snapshot.order where running[bundleID] != nil && !items.contains(where: { $0.id == bundleID })
-                && !(finderButton && bundleID == Self.finder) {
-                if modesOn && otherModes.contains(bundleID) { continue }
-                if config.bool("thisWorkspaceOnly") && !here.contains(bundleID) { continue }
-                items.append(item(bundleID, pinned: false))
-            }
-
-            // The mode's apps keep the mode's order; the others keep their slot for the session.
-            let pinned = items.filter(\.pinned)
-            let others = items.filter { !$0.pinned }
-            dock.order = dock.order.filter { key in others.contains { $0.id == key } }
-            for other in others where !dock.order.contains(other.id) { dock.order.append(other.id) }
-            let ordered = pinned + dock.order.compactMap { key in others.first { $0.id == key } }
+            dock.order = dock.order.filter { others.contains($0) }
+            for other in others where !dock.order.contains(other) { dock.order.append(other) }
+            let ordered = pinned + dock.order.map { item($0, pinned: false) }
             Perf.span("refresh: set items") { if ordered != dock.items { dock.items = ordered } }
             let finderNow = item(Self.finder, pinned: true)
             if finderNow != dock.finder { dock.finder = finderNow }
-            // The layer strip keeps every mode's row ready: each mode's apps, then the running apps in no mode.
-            if DockStrip.shared.layers {
-                let loose = ordered.filter { !$0.pinned }
-                var rows: [String: [DockItem]] = [:]
-                for other in modesOn ? config.modes : Array(config.modes.prefix(1)) where other.id != mode?.id {
-                    var seen = Set<String>()
-                    if finderButton { seen.insert(Self.finder) }
-                    rows[other.id] = finder + other.apps.filter { Apps.shows($0) && seen.insert($0).inserted }.map { item($0, pinned: true) } + loose
-                }
-                rows[mode?.id ?? ""] = ordered
-                dock.rows = rows
-            }
             if dock.minimized != minimizedAll { dock.minimized = minimizedAll }
-
-            // The stage is as long as the most apps any mode would show here, so switching never moves the rest.
-            let longest = Perf.span("refresh: stage") {
-                config.modes.map { m in m.apps.filter { Apps.shows($0) && !(finderButton && $0 == Self.finder) }.count }.max() ?? 0
-            }
-            let slots = max(longest + finder.count, ordered.count) + 1
+            // The stage holds the apps and "+".
+            let slots = ordered.count + 1
             if slots != dock.stageSlots { dock.stageSlots = slots }
 
             Perf.span("refresh: place panel") { panel.place(on: screen) }
         }
         Perf.span("refresh: keep windows clear") { keepWindowsClear(snapshot) }
-        Perf.span("refresh: automation") { app.automation.modeShown(dock(for: NSScreen.main)?.mode?.id) }
-        Perf.span("refresh: menu bar") { app.menuBar.show(mode: dock(for: NSScreen.main)?.mode) }
-        Perf.span("refresh: notes") { app.notes.update() }
     }
 
     /// macOS keeps no room for a dock other than its own, so windows would run under Petal's. While auto-hide is
@@ -414,9 +379,6 @@ final class DockController {
         }
         var moves: [(pid: pid_t, number: CGWindowID, from: CGRect, to: CGRect)] = []
         for window in snapshot.onScreenWindows {
-            // Parked by its mode (Parking): its frame there is Parking's, not the person's, so its record (and the
-            // frame from before Petal touched it) stays as it is until it comes back.
-            if Parking.parked[window.number] != nil { continue }
             let now = window.frame
             var before = now
             if let record = cleared[window.number] {
@@ -447,8 +409,8 @@ final class DockController {
                 AXUIElementSetMessagingTimeout(app, 0.3)
                 let list: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
                 guard let element = list.first(where: { Windows.id(of: $0) == move.number }),
-                      // Still where it was when this was decided: moved since (by the person, Parking, a newer
-                      // look), it's left alone.
+                      // Still where it was when this was decided: moved since (by the person, a newer look), it's
+                      // left alone.
                       let there = Windows.frame(of: element), there.equalTo(move.from, within: 4) else { continue }
                 let actual = Windows.place(element, pid: move.pid, move.to)
                 DispatchQueue.main.async {
@@ -548,7 +510,6 @@ final class DockController {
             launch(item.id)
             return
         }
-        if Perf.span("activate: parking", { Parking.activate(item.id) }) { return }   // each mode keeps its own windows
         // Decided here from what the dock already knows; the app's windows are listed (Accessibility, which waits on
         // a busy app) on the focus queue, and a newer click makes this one stand down.
         let pid = running.processIdentifier, active = item.active, known = item.windows, id = item.id
@@ -635,19 +596,16 @@ final class DockController {
 
     // MARK: Reordering
 
-    /// Dropping an app at a new place saves the new order as the mode's apps. Dragging an app that isn't in the
-    /// mode into place adds it.
+    /// Dropping an app at a new place saves the new order as the dock's apps. Dragging a running app that isn't
+    /// one of them into place adds it.
     func move(_ id: String, to index: Int, in dock: ScreenDock) {
-        // Finder stays first; nothing goes before it.
-        guard id != Self.finder, let mode = dock.mode, let from = dock.items.firstIndex(where: { $0.id == id }) else { return }
+        guard let from = dock.items.firstIndex(where: { $0.id == id }) else { return }
         var keys = dock.items.map(\.id)
         keys.remove(at: from)
-        let first = keys.first == Self.finder ? 1 : 0
-        keys.insert(id, at: min(max(first, index), keys.count))
-        let shown = keys.filter { key in key != Self.finder && (key == id || dock.items.first { $0.id == key }?.pinned == true) }
-        var updated = mode
-        updated.apps = shown + mode.apps.filter { !shown.contains($0) }
-        config.save(updated)
+        keys.insert(id, at: min(max(0, index), keys.count))
+        let shown = keys.filter { key in key == id || dock.items.first { $0.id == key }?.pinned == true }
+        // The dock's apps that aren't showing here (not installed on this Mac, or Finder under its own button) stay.
+        config.setApps(shown + config.apps.filter { !shown.contains($0) })
     }
 }
 
@@ -908,7 +866,7 @@ final class DockPanel: NSPanel {
 
     /// Measures the dock with the icons as large as the setting asks, or, when that many wouldn't fit in `room`
     /// along the screen's edge, as large as fits (not under 16 points), as macOS's Dock does. The dock's length is
-    /// the icons' share, which grows with them, plus a fixed part (padding, the mode's name): two measures tell
+    /// the icons' share, which grows with them, plus a fixed part (padding, the separators): two measures tell
     /// both, so the second guess fits.
     private func fit(along room: CGFloat) -> CGSize {
         let wanted = max(16, config.number("iconSize"))
@@ -1005,26 +963,26 @@ struct DockView: View {
 
     var body: some View {
         let layout = dock.vertical ? AnyLayout(VStackLayout(spacing: 0)) : AnyLayout(HStackLayout(spacing: 0))
-        let modesOn = config.bool("modes") && !config.modes.isEmpty
         let stacks = Stacks.resolve(config.strings("stackFolders"))
         let extras = (config.bool("nowPlaying") && app.signals.nowPlaying != nil) || !dock.minimized.isEmpty
             || (config.bool("stacks") && !stacks.isEmpty) || config.bool("trash")
+        let ai = !app.providers.isEmpty && (config.bool("ai") || config.bool("claudeUsage"))
+        let pad = config.bool("notes") && config.bool("notesPad")
         let row = layout {
-            if modesOn {
-                ModeSwitcher(dock: dock, size: icon * 0.95).padding(dock.vertical ? .vertical : .horizontal, 6)
-                    .magnified(dock, "switcher", scales: false)
-            }
-            if !app.providers.isEmpty && (config.bool("ai") || config.bool("claudeUsage")) {
+            if ai {
                 ClaudeButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, "claude")
             }
             if config.bool("finderInDock") {
                 FinderButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, Self.finderSlot)
             }
-            // The note pad, by the AI button and Finder's: the same in every mode, while Petal Notes is on.
-            if config.bool("notes") && config.bool("notesPad") {
+            // The note pad, by the AI button and Finder's, while Petal Notes is on.
+            if pad {
                 NotePadButton(dock: dock, size: icon * 0.95).frame(width: slot, height: slot).magnified(dock, Self.padSlot)
             }
-            if modesOn { Separator(vertical: dock.vertical, slot: slot).magnified(dock, "separator:modes", scales: false) }
+            // Petal's own buttons, then the apps.
+            if ai || pad || config.bool("finderInDock") {
+                Separator(vertical: dock.vertical, slot: slot).magnified(dock, "separator:buttons", scales: false)
+            }
             stage(layout)
             if extras { Separator(vertical: dock.vertical, slot: slot).magnified(dock, "separator:extras", scales: false) }
             if config.bool("nowPlaying"), let playing = app.signals.nowPlaying {
@@ -1056,8 +1014,6 @@ struct DockView: View {
         // (The layer strip animates its own apps, and its stage never changes size with them.)
         .animation(.easeOut(duration: 0.22), value: DockStrip.shared.layers && !snapshotting ? [] : dock.items.map(\.id))
         .animation(.easeOut(duration: 0.22), value: dock.minimized.map(\.id))
-        .animation(.easeOut(duration: 0.24), value: dock.mode?.id)
-        .animation(.easeOut(duration: 0.24), value: app.pendingMode?.mode)
         .animation(.easeOut(duration: 0.22), value: app.signals.nowPlaying == nil)
     }
 
@@ -1091,7 +1047,7 @@ struct DockView: View {
         return setting >= 0 ? min(setting, (slot + 8) / 2) : (slot + 8) / 2.6
     }
 
-    /// The mode's apps, the rest, and "+", centered on a stage as long as the fullest mode.
+    /// The dock's apps, the running ones that aren't among them, and "+".
     @ViewBuilder private func stage(_ layout: AnyLayout) -> some View {
         let length = CGFloat(dock.stageSlots) * slot
         if DockStrip.shared.layers && !snapshotting {
@@ -1151,14 +1107,13 @@ extension View {
             .animation(.easeOut(duration: on ? 0.06 : 0.14), value: on)
     }
 
-    /// A control's own surface on the dock's glass (the mode switcher, the AI button, "+"): clear Liquid Glass, so
-    /// the layers read as glass on glass, not shapes stacked on it. `on` false adds no glass at all (another mode's
-    /// button until the pointer is on it), not `.identity` glass, which still costs on every update. Pressed, it
+    /// A control's own surface on the dock's glass (the AI button, Finder's, "+"): clear Liquid Glass, so the layers
+    /// read as glass on glass, not shapes stacked on it. Pressed, it
     /// shrinks as `pressed` does and what's on it darkens; the glass itself stays clear (darkened, it turns into a
     /// dark disc).
-    func clearGlass<S: Shape>(_ on: Bool = true, in shape: S, pressed: Bool = false) -> some View {
+    func clearGlass<S: Shape>(in shape: S, pressed: Bool = false) -> some View {
         brightness(pressed ? -0.22 : 0)
-            .modifier(ClearGlass(on: on, shape: shape))
+            .glassEffect(.clear.interactive(), in: shape)
             .scaleEffect(pressed ? 0.92 : 1)
             .animation(.easeOut(duration: pressed ? 0.06 : 0.14), value: pressed)
     }
@@ -1175,18 +1130,6 @@ extension View {
             .animation(.easeOut(duration: 0.14), value: hovering)
     }
 }
-
-/// See `clearGlass`.
-struct ClearGlass<S: Shape>: ViewModifier {
-    let on: Bool
-    let shape: S
-
-    func body(content: Content) -> some View {
-        if on { content.glassEffect(.clear.interactive(), in: shape) } else { content }
-    }
-}
-
-// The mode switcher is in Switcher.swift.
 
 // MARK: - Claude button
 
@@ -1259,7 +1202,7 @@ struct ClaudeButton: View {
     }
 }
 
-/// Finder, as its own button by the AI button, the same in every mode (macOS's Dock keeps Finder first too): Petal's
+/// Finder, as its own button by the AI button (macOS's Dock keeps Finder first too): Petal's
 /// own mark for it on clear glass, a dot while it has windows, Finder's menu on a right-click, and files dropped on it
 /// shown in Finder.
 struct FinderButton: View {
@@ -1629,7 +1572,7 @@ enum AppColor {
     }
 }
 
-/// "+": add apps or folders to this Desktop's mode. A plus in the mode's color on a clear glass tile. The layer strip
+/// "+": add apps, folders or websites to the dock. A plus in Petal's accent on a clear glass tile. The layer strip
 /// leaves its slot empty and the dock puts this over it (see `DockView.stage`), so it's real glass either way.
 struct AddSlot: View {
     @Environment(PetalApp.self) private var app
@@ -1639,7 +1582,7 @@ struct AddSlot: View {
     @State private var pressed = false
 
     var body: some View {
-        let color = Color(nsColor: dock.mode?.color ?? PetalApp.shared.accent)
+        let color = Color(nsColor: app.accent)
         let side = icon * 0.8
         Image(systemName: "plus").font(.system(size: icon * 0.36, weight: .bold)).foregroundStyle(color)
             .scaleEffect(hovering ? 1.08 : 1)
@@ -1651,7 +1594,7 @@ struct AddSlot: View {
             .slotMouse(SlotMouse(left: { if app.search.isOpen { app.search.close() } else { app.popups.closeAll(); app.search.open(in: dock) } }, right: { Menus.settings(for: dock) },
                                hover: { on in
                                    hovering = on
-                                   app.tooltips.show(on ? (dock.mode.map { "Add apps to \($0.name)" } ?? "Add apps") : nil, over: "add", in: dock)
+                                   app.tooltips.show(on ? "Add apps" : nil, over: "add", in: dock)
                                }, press: { pressed = $0 }))
     }
 }
@@ -1890,7 +1833,7 @@ struct SlotMouse: NSViewRepresentable {
             leftObserver = nil
             guard let window else { return }
             // The dock stops taking the mouse as the pointer leaves it, sometimes before macOS says the pointer left
-            // this slot: a slot would stay hovered (a mode button kept its highlight). The dock says so instead.
+            // this slot: a slot would stay hovered (and keep its highlight). The dock says so instead.
             leftObserver = NotificationCenter.default.addObserver(forName: DockPanel.mouseLeft, object: window, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     guard let self, self.inside else { return }
@@ -1931,7 +1874,7 @@ struct SlotMouse: NSViewRepresentable {
         override func mouseUp(with event: NSEvent) {
             if !dragging { handlers?.press(false) }
             if dragging { handlers?.drag?(0, true) } else {
-                // Any click on the dock (an app, a website, Finder, the AI button, "+", a mode): an earlier click
+                // Any click on the dock (an app, a website, Finder, the AI button, "+"): an earlier click
                 // still bringing a window forward stands down, so it can't come up over what this one opens.
                 Windows.focusing.cancel()
                 handlers?.left()
@@ -1979,19 +1922,6 @@ struct RightClickCatcher: NSViewRepresentable {
         var action: (() -> Void)?
         override func rightMouseDown(with event: NSEvent) { action?() }
         override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-    }
-}
-
-struct ModeIcon: View {
-    let icon: String
-    let size: CGFloat
-
-    var body: some View {
-        if NSImage(systemSymbolName: icon, accessibilityDescription: nil) != nil {
-            Image(systemName: icon).font(.system(size: size, weight: .semibold))
-        } else {
-            Text(icon.isEmpty ? "●" : icon).font(.system(size: size))   // a Nerd Font glyph from an Omarchy modes.json
-        }
     }
 }
 

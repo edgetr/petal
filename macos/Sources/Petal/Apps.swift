@@ -46,6 +46,22 @@ enum Apps {
         }
     }
 
+    /// A name without invisible formatting marks (some apps put a left-to-right mark before theirs).
+    nonisolated static func plain(_ text: String) -> String {
+        String(String.UnicodeScalarView(text.unicodeScalars.filter { $0.properties.generalCategory != .format }))
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Names in a sentence: "Figma", "Figma and Linear", "Figma, Linear and Notion", "Figma, Linear and 2 more".
+    nonisolated static func listed(_ names: [String]) -> String {
+        switch names.count {
+        case 0: return ""
+        case 1: return names[0]
+        case 2, 3: return names.dropLast().joined(separator: ", ") + " and " + names.last!
+        default: return names.prefix(2).joined(separator: ", ") + " and \(names.count - 2) more"
+        }
+    }
+
     /// Something the dock can show: an installed app, or a website shortcut.
     static func shows(_ id: String) -> Bool { Sites.isWeb(id) || url(id) != nil }
 

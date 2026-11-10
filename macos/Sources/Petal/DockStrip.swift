@@ -14,12 +14,11 @@ final class DockStrip {
     static var label: String { shared.layers ? "layers" : "SwiftUI" }
 }
 
-/// The dock's apps as Core Animation layers in one view. Every mode's row is built once and kept, so
-/// switching mode only fades one ready row out and the next in; a row changes only when its mode's apps (or the
-/// running apps in no mode) change. Hover lift, the press, the bounce, the launch pulse, the glow and magnification
-/// are all layer properties and animations: the window server runs them, and SwiftUI never lays the dock out again
-/// for them. Popups find each app through `dock.frames`, as with the SwiftUI slots. Each row keeps the slot after its
-/// apps for "+", which the dock draws over it as SwiftUI's clear glass (`DockView.stage`): a layer can't be glass.
+/// The dock's apps as Core Animation layers in one view: a row that changes only when the apps do. Hover lift, the
+/// press, the bounce, the launch pulse, the glow and magnification are all layer properties and animations: the
+/// window server runs them, and SwiftUI never lays the dock out again for them. Popups find each app through
+/// `dock.frames`, as with the SwiftUI slots. The row keeps the slot after its apps for "+", which the dock draws over
+/// it as SwiftUI's clear glass (`DockView.stage`): a layer can't be glass.
 struct AppStrip: NSViewRepresentable {
     let dock: ScreenDock
     let length: CGFloat
@@ -53,10 +52,7 @@ final class AppStripView: NSView {
     /// The stage's size; the view reaches past it on every side by `room`.
     var stageSize: CGSize = .zero { didSet { if stageSize != oldValue { needsSync() } } }
 
-    private var rows: [String: Row] = [:]
-    private var shown: String?
-    /// The mode whose row is showing.
-    var shownMode: String? { shown }
+    private var row: Row?
     private var look: Look?
     private var hovered: String?
     private var pressed: String?
@@ -111,7 +107,7 @@ final class AppStripView: NSView {
     }
 
     /// Something the layers show changed: they're brought up to date in the window's next layout pass, before it
-    /// draws (so a mode switch is drawn in the same frame, and `petal bench` counts it).
+    /// draws (so the change is drawn in the same frame, and `petal bench` counts it).
     private func needsSync() {
         dirty = true
         needsLayout = true
@@ -136,7 +132,7 @@ final class AppStripView: NSView {
         applyLift()
     }
 
-    /// The settings the layers are drawn from; a change in any of them draws every row anew.
+    /// The settings the layers are drawn from; a change in any of them draws the row anew.
     struct Look: Equatable {
         var icon: CGFloat
         var slot: CGFloat
@@ -154,43 +150,25 @@ final class AppStripView: NSView {
         let now = Look(icon: icon, slot: icon + inset * 2, position: config.position, scale: window?.backingScaleFactor ?? 2,
                        glow: config.bool("appGlow"), accent: app.accent)
         if now != look {
-            for row in rows.values { row.container.removeFromSuperlayer() }
-            rows = [:]
-            shown = nil
+            row?.container.removeFromSuperlayer()
+            row = nil
             look = now
         }
         guard let look else { return }
         // What the dock shows that the layers depend on (read here so a change in any of them syncs again).
         let state = Shared(app: app, dock: dock, look: look)
-        let current = dock.mode?.id ?? ""
-        var wanted = dock.rows
-        wanted[current] = dock.items
-        for key in rows.keys where wanted[key] == nil {
-            rows[key]?.container.removeFromSuperlayer()
-            rows[key] = nil
+        // The first time the apps are just there; after that they grow in, shrink away and move.
+        let made = row == nil
+        let row = self.row ?? Row()
+        if made {
+            layer?.addSublayer(row.container)
+            self.row = row
         }
-        let stage = stageRect
-        for (key, items) in wanted {
-            let row: Row
-            if let existing = rows[key] {
-                // A row waiting off stage is brought up to date when it's shown, not on every change.
-                guard key == current else { continue }
-                row = existing
-            } else {
-                row = Row(mode: config.modes.first { $0.id == key })
-                row.container.isHidden = true
-                row.container.opacity = 0
-                layer?.addSublayer(row.container)
-                rows[key] = row
-            }
-            row.mode = config.modes.first { $0.id == key } ?? dock.mode
-            row.update(items, stage: stage, state: state, live: key == current && shown == current, strip: self)
-        }
-        if shown != current, let row = rows[current] { show(row, from: shown.flatMap { rows[$0] }) }
+        row.update(dock.items, stage: stageRect, state: state, live: !made, strip: self)
         // Bounces: once for each new ask.
         for (id, count) in app.signals.bounces where count != bounced[id] {
             bounced[id] = count
-            if config.bool("bounce"), let tile = rows[current]?.tiles[id], tile.item?.active == false { tile.bounce(look) }
+            if config.bool("bounce"), let tile = row.tiles[id], tile.item?.active == false { tile.bounce(look) }
         }
     }
 
@@ -236,42 +214,6 @@ final class AppStripView: NSView {
         return rect
     }
 
-    /// Fades the mode's row in (rising a little from the dock's edge) and the last one out.
-    private func show(_ row: Row, from old: Row?) {
-        shown = row.key
-        guard let look else { return }
-        let sink = Self.inward(look.position, -8)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        row.container.isHidden = false
-        if old == nil {
-            row.container.opacity = 1
-            row.container.transform = CATransform3DIdentity
-        } else {
-            row.container.opacity = 0
-            row.container.transform = CATransform3DMakeAffineTransform(sink)
-        }
-        CATransaction.commit()
-        guard let old else { return }
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.2)
-        CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(name: .easeOut))
-        CATransaction.setCompletionBlock { [weak self, weak old] in
-            MainActor.assumeIsolated {
-                guard let self, let old, old.key != self.shown else { return }
-                CATransaction.begin()
-                CATransaction.setDisableActions(true)
-                old.container.isHidden = true
-                CATransaction.commit()
-            }
-        }
-        row.container.opacity = 1
-        row.container.transform = CATransform3DIdentity
-        old.container.opacity = 0
-        old.container.transform = CATransform3DMakeAffineTransform(sink)
-        CATransaction.commit()
-    }
-
     /// A shift toward the inside of the screen (away from the dock's edge), in layer coordinates.
     static func inward(_ position: String, _ distance: CGFloat) -> CGAffineTransform {
         switch position {
@@ -281,13 +223,11 @@ final class AppStripView: NSView {
         }
     }
 
-    private var current: Row? { rows[dock?.mode?.id ?? ""] }
-
     // MARK: Where things are, for popups and magnification
 
     /// A tile's slot in the panel, top-left origin, as SwiftUI's `.global` frames are.
     func windowRect(of id: String) -> CGRect? {
-        guard let tile = current?.tiles[id], let content = window?.contentView else { return nil }
+        guard let tile = row?.tiles[id], let content = window?.contentView else { return nil }
         let rect = convert(tile.base, to: nil)
         return CGRect(x: rect.minX, y: content.bounds.height - rect.maxY, width: rect.width, height: rect.height)
     }
@@ -295,7 +235,7 @@ final class AppStripView: NSView {
     private var registered: Set<String> = []
 
     func registerFrames() {
-        guard let dock, let row = current, window != nil else { return }
+        guard let dock, let row, window != nil else { return }
         var now: Set<String> = []
         for id in row.order {
             guard let rect = windowRect(of: id) else { continue }
@@ -309,7 +249,7 @@ final class AppStripView: NSView {
 
     /// Magnification: each tile grows and moves by a transform, as the SwiftUI slots do.
     func magnify() {
-        guard let dock, let row = current, let look else { return }
+        guard let dock, let row, let look else { return }
         let magnifier = dock.magnifier
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -324,7 +264,7 @@ final class AppStripView: NSView {
 
     /// The tile under a point (view coordinates): its slot, reaching inward over its grown icon when magnified.
     private func tile(at point: NSPoint) -> Tile? {
-        guard let row = current, let look else { return nil }
+        guard let row, let look else { return nil }
         let reach = Magnifier.enabled ? look.icon * Magnifier.amount * 1.3 : 0
         for tile in row.allTiles where !tile.leaving {
             var area = tile.base
@@ -381,8 +321,8 @@ final class AppStripView: NSView {
     /// `petal bench`: the pointer reaching an icon, without moving it.
     func benchHover(_ id: String?) { setHover(id) }
 
-    /// The apps in the row showing, in order.
-    var shownOrder: [String] { current?.order ?? [] }
+    /// The apps showing, in order.
+    var shownOrder: [String] { row?.order ?? [] }
 
     private func setHover(_ id: String?) {
         guard id != hovered, let dock else { return }
@@ -394,7 +334,7 @@ final class AppStripView: NSView {
     }
 
     private func hover(_ id: String, _ on: Bool, _ dock: ScreenDock) {
-        guard let item = current?.tiles[id]?.item else {
+        guard let item = row?.tiles[id]?.item else {
             if !on { app.tooltips.show(nil, over: id, in: dock); app.previews.hover(nil, in: dock, id: id) }
             return
         }
@@ -407,7 +347,7 @@ final class AppStripView: NSView {
     }
 
     private func applyLift() {
-        guard let row = current, let look, let dock else { return }
+        guard let row, let look, let dock else { return }
         let amount = app.config.bool("hoverLift") && !Magnifier.enabled ? app.config.number("hoverLiftAmount") : 0
         for tile in row.allTiles {
             let on = tile.id == hovered && dock.dragging == nil
@@ -458,7 +398,7 @@ final class AppStripView: NSView {
         }
         // Released somewhere else: no click.
         guard tile(at: convert(event.locationInWindow, from: nil))?.id == id else { return }
-        if let item = current?.tiles[id]?.item {
+        if let item = row?.tiles[id]?.item {
             app.popups.closeAll()
             app.docks.activate(item)
         }
@@ -479,7 +419,7 @@ final class AppStripView: NSView {
         let old = pressed
         pressed = id
         for key in [old, id].compactMap({ $0 }) {
-            guard let tile = current?.tiles[key] else { continue }
+            guard let tile = row?.tiles[key] else { continue }
             tile.press(key == id)
         }
     }
@@ -528,22 +468,17 @@ private extension Optional where Wrapped == Bool {
     var isTrue: Bool { self ?? false }
 }
 
-// MARK: - A mode's row
+// MARK: - The row of apps
 
 @MainActor
 final class Row {
     let container = CALayer()
-    var mode: Mode?
     var tiles: [String: Tile] = [:]
     var order: [String] = []
 
-    var key: String { mode?.id ?? "" }
     var allTiles: [Tile] { order.compactMap { tiles[$0] } }
 
-    init(mode: Mode?) {
-        self.mode = mode
-        container.masksToBounds = false
-    }
+    init() { container.masksToBounds = false }
 
     /// Brings the row to `items`: new apps grow in, gone ones shrink away, the rest move to their places.
     func update(_ items: [DockItem], stage: CGRect, state: AppStripView.Shared, live: Bool, strip: AppStripView) {

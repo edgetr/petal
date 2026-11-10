@@ -2,10 +2,10 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// Websites: a mode's apps can hold web addresses (website shortcuts), and the focus guard sorts browser tabs by
-/// their site. A shortcut opens in the default browser and shows the site's own icon, fetched from the site itself
-/// (`/apple-touch-icon.png`, else the icon `<link>` in its page, else `/favicon.ico`; never a third-party service)
-/// and kept in ~/Library/Caches/Petal/sites, with a small globe at the bottom right, like macOS's web apps.
+/// Websites: the dock's apps can hold web addresses (website shortcuts). A shortcut opens in the default browser and
+/// shows the site's own icon, fetched from the site itself (`/apple-touch-icon.png`, else the icon `<link>` in its
+/// page, else `/favicon.ico`; never a third-party service) and kept in ~/Library/Caches/Petal/sites, with a small
+/// globe at the bottom right, like macOS's web apps.
 @MainActor @Observable
 final class Sites {
     static let shared = Sites()
@@ -47,18 +47,6 @@ final class Sites {
         let parts = host.split(separator: ".")
         guard parts.count >= 2, let last = parts.last, last.count >= 2, last.allSatisfy(\.isLetter), domain(text) != nil else { return nil }
         return "https://" + text
-    }
-
-    /// Whether a mode's `sites` entry matches a site: a domain matches it and its subdomains ("x.com" matches
-    /// "mobile.x.com"); a plain word matches the domain or the tab's title.
-    nonisolated static func matches(_ entry: String, domain: String?, title: String) -> Bool {
-        let word = entry.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !word.isEmpty else { return false }
-        if word.contains("."), let wanted = Self.domain(word) {
-            guard let domain else { return false }
-            return domain == wanted || domain.hasSuffix("." + wanted)
-        }
-        return (domain?.contains(word) ?? false) || title.lowercased().contains(word)
     }
 
     static func open(_ id: String) {

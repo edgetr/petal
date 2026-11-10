@@ -6,7 +6,7 @@ import ColorSync
 ///
 /// macOS says when the Space changes (NSWorkspace.activeSpaceDidChangeNotification) but has no public way to say
 /// which one it is. SkyLight, the private framework behind Mission Control, answers that read-only, as yabai and
-/// AeroSpace read it. It is looked up at run time, so a macOS that drops it leaves Petal on the default mode
+/// AeroSpace read it. It is looked up at run time, so a macOS that drops it leaves Petal without Desktop numbers
 /// instead of failing to launch.
 @MainActor
 enum Spaces {
@@ -63,13 +63,6 @@ enum Spaces {
             }
         }
         return (found, fullScreen)
-    }
-
-    /// How many Desktops there are, across every display. A read-only call to the window server: from any thread.
-    nonisolated static func count() -> Int {
-        guard let mainConnection, let copySpaces,
-              let displays = copySpaces(mainConnection())?.takeRetainedValue() as? [[String: Any]] else { return 0 }
-        return displays.reduce(0) { $0 + ($1["Spaces"] as? [[String: Any]] ?? []).filter { $0["type"] as? Int == 0 }.count }
     }
 
     private static func uuid(of screen: NSScreen) -> String? {

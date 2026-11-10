@@ -2,8 +2,8 @@ import AppKit
 import QuartzCore
 import SwiftUI
 
-// The dock's moving parts that run by themselves (the equalizer, the countdown's fill), drawn with Core Animation:
-// once started, the window server runs them, and the main thread does nothing until something changes.
+// The dock's moving part that runs by itself (the equalizer), drawn with Core Animation: once started, the window
+// server runs it, and the main thread does nothing until something changes.
 
 /// A plain layer-backed view, its layers kept on the same scale as the screen it's on.
 class LayerView: NSView {
@@ -89,143 +89,6 @@ private struct EqualizerBars: NSViewRepresentable {
                 return bar
             }
             viewDidChangeBackingProperties()
-        }
-    }
-}
-
-// MARK: - The countdown
-
-/// A countdown's fill in the mode's color: a bar filling left to right inside a capsule (with its track), or a ring
-/// going round. It runs from where the wait is now to the deadline on its own; a new deadline (another click halved
-/// the wait) starts it again from there.
-struct CountdownFill: View {
-    @Environment(\.snapshotting) private var snapshotting
-    let color: NSColor
-    let pending: PendingMode
-    var ring = false
-
-    var body: some View {
-        if snapshotting {
-            let done = 1 - max(0, pending.deadline.timeIntervalSinceNow) / max(0.1, pending.total)
-            if ring {
-                Circle().trim(from: 0, to: done).stroke(Color(nsColor: color), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                    .rotationEffect(.degrees(-90))
-            } else {
-                GeometryReader { box in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color(nsColor: color).opacity(0.28))
-                        Rectangle().fill(Color(nsColor: color)).frame(width: box.size.width * done)
-                    }
-                    .clipShape(.capsule)
-                }
-            }
-        } else {
-            CountdownLayers(color: color, deadline: pending.deadline, total: pending.total, ring: ring)
-        }
-    }
-}
-
-private struct CountdownLayers: NSViewRepresentable {
-    let color: NSColor
-    let deadline: Date
-    let total: Double
-    let ring: Bool
-
-    func makeNSView(context: Context) -> FillView { FillView() }
-    func updateNSView(_ view: FillView, context: Context) {
-        view.set(color: color, deadline: deadline, total: total, ring: ring)
-    }
-
-    final class FillView: LayerView {
-        private let track = CALayer()
-        private let bar = CALayer()
-        private let arc = CAShapeLayer()
-        private var state: (color: NSColor, deadline: Date, total: Double, ring: Bool)?
-        private var laidOut: CGSize = .zero
-
-        override init(frame: NSRect) {
-            super.init(frame: frame)
-            layer?.addSublayer(track)
-            layer?.addSublayer(bar)
-            layer?.addSublayer(arc)
-            bar.anchorPoint = CGPoint(x: 0, y: 0.5)
-            arc.fillColor = nil
-            arc.lineWidth = 2.5
-            arc.lineCap = .round
-        }
-
-        func set(color: NSColor, deadline: Date, total: Double, ring: Bool) {
-            if let state, state.color == color, state.deadline == deadline, state.total == total, state.ring == ring { return }
-            state = (color, deadline, total, ring)
-            restart()
-        }
-
-        override func layout() {
-            super.layout()
-            guard bounds.size != laidOut else { return }
-            laidOut = bounds.size
-            restart()
-        }
-
-        private func restart() {
-            guard let state, bounds.width > 0 else { return }
-            let left = max(0, state.deadline.timeIntervalSinceNow)
-            let done = min(1, max(0, 1 - left / max(0.1, state.total)))
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            track.isHidden = state.ring
-            bar.isHidden = state.ring
-            arc.isHidden = !state.ring
-            if state.ring {
-                let inset = arc.lineWidth / 2
-                // From the top, clockwise: a path drawn counterclockwise in a y-up view, starting at 12 o'clock.
-                let box = bounds.insetBy(dx: inset, dy: inset)
-                let path = CGMutablePath()
-                path.addArc(center: CGPoint(x: box.midX, y: box.midY), radius: box.width / 2, startAngle: .pi / 2,
-                            endAngle: .pi / 2 - 2 * .pi, clockwise: true)
-                arc.frame = bounds
-                arc.path = path
-                arc.strokeColor = state.color.cgColor
-                arc.removeAllAnimations()
-                arc.strokeEnd = 1
-                let fill = CABasicAnimation(keyPath: "strokeEnd")
-                fill.fromValue = done
-                fill.toValue = 1
-                fill.duration = max(0.01, left)
-                arc.add(fill, forKey: "fill")
-            } else {
-                layer?.cornerRadius = bounds.height / 2
-                layer?.masksToBounds = true
-                track.frame = bounds
-                track.backgroundColor = state.color.withAlphaComponent(0.28).cgColor
-                bar.backgroundColor = state.color.cgColor
-                bar.bounds = CGRect(x: 0, y: 0, width: bounds.width, height: bounds.height)
-                bar.position = CGPoint(x: 0, y: bounds.midY)
-                bar.removeAllAnimations()
-                let fill = CABasicAnimation(keyPath: "bounds.size.width")
-                fill.fromValue = bounds.width * done
-                fill.toValue = bounds.width
-                fill.duration = max(0.01, left)
-                bar.add(fill, forKey: "fill")
-            }
-            CATransaction.commit()
-        }
-    }
-}
-
-/// A timeline that ticks only when a countdown's whole seconds change ("0:30" → "0:29"), not every frame.
-struct SecondsLeft: TimelineSchedule {
-    let deadline: Date
-
-    func entries(from start: Date, mode: TimelineScheduleMode) -> AnyIterator<Date> {
-        var date = start
-        var first = true
-        return AnyIterator {
-            if first { first = false; return start }
-            let left = deadline.timeIntervalSince(date)
-            guard left > 0.0001 else { return nil }
-            date = deadline.addingTimeInterval(-(left - 0.0001).rounded(.down))
-            return date
         }
     }
 }

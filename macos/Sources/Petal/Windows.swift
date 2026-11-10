@@ -191,21 +191,6 @@ enum Windows {
         }
     }
 
-    /// The title of the front window of the app in front: a browser's is its tab's title.
-    static func frontTitle() -> String {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return "" }
-        return frontTitle(of: app.processIdentifier)
-    }
-
-    /// The title of an app's focused window, from any thread.
-    nonisolated static func frontTitle(of pid: pid_t) -> String {
-        guard trusted else { return "" }
-        let element = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(element, 0.3)
-        guard let window: AXUIElement = value(element, kAXFocusedWindowAttribute) else { return "" }
-        return value(window, kAXTitleAttribute) ?? ""
-    }
-
     /// Presses the app's menu item whose shortcut is ⌘ plus `key` (no other modifiers), the way choosing it from the
     /// menu would. Returns false when there's none, or no Accessibility. Off the main thread.
     nonisolated static func pressMenuItem(pid: pid_t, key: String) -> Bool {
@@ -241,10 +226,10 @@ enum Windows {
     }
 }
 
-// MARK: - Managing windows (per-mode windows and tiling)
+// MARK: - Managing windows (tiling)
 
 /// A window on a Desktop that's showing, as the window server lists it (front to back): its id, owner, and frame in
-/// Accessibility's coordinates. Windows parked off-screen by Parking are listed too: one point of them is showing.
+/// Accessibility's coordinates.
 struct ScreenWindow: Equatable {
     let id: CGWindowID
     let pid: pid_t
@@ -253,20 +238,14 @@ struct ScreenWindow: Equatable {
 }
 
 extension Windows {
-    /// Per-mode windows and tiling, from launch to quit (App.swift's start and stop).
-    static func startManaging() {
-        Parking.start()
-        Tiling.start()
-    }
+    /// Tiling, from launch to quit (App.swift's start and stop).
+    static func startManaging() { Tiling.start() }
 
-    static func stopManaging() {
-        Tiling.stop()
-        Parking.stop()
-    }
+    static func stopManaging() { Tiling.stop() }
 
     private typealias GetWindow = @convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> AXError
     /// `_AXUIElementGetWindow`, the private call every window manager uses to tie an Accessibility window to the
-    /// window server's id. Looked up at run time, so a macOS without it leaves per-mode windows and tiling idle
+    /// window server's id. Looked up at run time, so a macOS without it leaves tiling idle
     /// instead of failing to launch.
     nonisolated private static let getWindow: GetWindow? = {
         guard let pointer = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else { return nil }   // RTLD_DEFAULT
@@ -419,7 +398,7 @@ extension Windows {
     }
 }
 
-/// What windows do, for the dock, Parking and Tiling: macOS tells other apps nothing about windows opening, closing,
+/// What windows do, for the dock, tiling and Petal Notes: macOS tells other apps nothing about windows opening, closing,
 /// moving or minimizing, except through an Accessibility observer on each app. Observers run only while something
 /// listens and Petal may use Accessibility, and start or stop when that permission changes, without a restart. They
 /// live on a thread of their own (`AXWatcher`): adding one asks the app, and a hung app must never stall the dock.
