@@ -71,6 +71,10 @@ enum Snapshot {
         // Without Screen Recording: the windows by name.
         app.previews.preview(windows: sampleWindows, pictures: false)
         write(render(AnyView(PreviewView(id: "com.apple.Safari") {}), app: app, size: nil), name: "preview-titles", folder: folder)
+        // A player that hasn't been asked whether Petal may see what's playing: the line that asks, under its windows.
+        app.signals.preview(trashEmpty: true, fresh: [], nowPlaying: nil, playersWaiting: ["com.apple.Music"])
+        write(render(AnyView(PreviewView(id: "com.apple.Music") {}), app: app, size: nil), name: "preview-player-ask", folder: folder)
+        app.signals.preview(trashEmpty: true, fresh: [], nowPlaying: nil)
         app.previews.preview(windows: [], pictures: false)
         // Over the AI button: sticky notes at work in their windows in the background, one waiting for the person,
         // one done, and one in an app kept private (no picture).

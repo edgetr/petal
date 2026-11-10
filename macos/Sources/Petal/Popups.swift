@@ -679,6 +679,15 @@ struct PreviewView: View {
                     WindowTitles(windows: windows, done: done)
                 }
             }
+            // Music or Spotify, not asked yet whether Petal may see what's playing: asked from here, once.
+            if app.config.bool("nowPlaying"), app.signals.playersWaiting.contains(id) {
+                Button { app.signals.askPlayer(id) } label: {
+                    Label("Show what’s playing…", systemImage: "music.note")
+                        .font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
+                        .padding(.horizontal, 8).padding(.vertical, 4).contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .padding(12)
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
