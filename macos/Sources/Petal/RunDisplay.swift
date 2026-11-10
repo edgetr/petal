@@ -1220,6 +1220,8 @@ final class RunDisplays {
     /// `finished`, whatever became of the open.
     func turn(_ caller: String, app bundle: String, name: String, hold: Bool, done: @escaping (Failure?) -> Void) {
         guard !bundle.isEmpty, !(displays.isEmpty && turns.holders.isEmpty && settling.isEmpty) else { return done(nil) }
+        // The quick question acting in an app is the person's own request, in front of them: it never waits.
+        guard RunDisplayRules.takesTurns(asker: asker(caller), hold: hold) else { return done(nil) }
         if !name.isEmpty { appNames[bundle] = name }
         let group = group(of: caller)
         // Being put away for a run that just ended: asked again once that's done.
@@ -1381,6 +1383,15 @@ final class RunDisplays {
         for display in displays.values where display.launched[pid] != nil {
             display.launched[pid]?.used = true
             letGoOfApps(display.group)
+        }
+    }
+
+    /// A run opened something in this app on the person's screen (`on: "screen"`), for them to see: if a run had
+    /// started it on a display, it's the person's from now on.
+    func handedOver(bundle: String) {
+        guard !bundle.isEmpty else { return }
+        for display in displays.values {
+            for started in display.launched.values where started.bundle == bundle && !started.used { used(started.pid) }
         }
     }
 

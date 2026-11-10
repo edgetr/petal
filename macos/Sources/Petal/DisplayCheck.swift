@@ -441,10 +441,19 @@ enum DisplayCheck {
                 DispatchQueue.main.async { found.value = made; found.done = true }
             }
             wait(20) { found.done }
-            ownWindows += found.value
+            // Only the window that shows the check's own file is the check's: a document of yours that TextEdit
+            // brings back as it starts is never taken for it, and never closed.
+            let own = found.value.filter { item in
+                let document: String = Windows.value(item.element, kAXDocumentAttribute) ?? ""
+                return document.contains(file.lastPathComponent)
+            }
+            ownWindows += own
             checkStartedTextEdit = isRunning(textEdit)
-            step(checkStartedTextEdit && !found.value.isEmpty, "TextEdit wasn't open, so the check started it itself, outside any run, to stand for an app you had open",
-                 opened.error ?? "its window \(found.value.first.map { String($0.window) } ?? "wasn't found"), on your screen, not activated")
+            step(checkStartedTextEdit && !own.isEmpty, "TextEdit wasn't open, so the check started it itself, outside any run, to stand for an app you had open",
+                 opened.error ?? "its window \(own.first.map { String($0.window) } ?? "wasn't found"), on your screen, not activated")
+            if found.value.count > own.count {
+                say("TextEdit also brought back \(found.value.count - own.count) window(s) of yours as it started: left alone")
+            }
             if let pid = pid(of: textEdit) { startedApps.insert(pid) }
         }
         guard let textEditPID = pid(of: textEdit) else {

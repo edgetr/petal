@@ -53,6 +53,11 @@ struct RunDisplayCheck {
         expect(RunDisplayRules.place(asked: "screen", on: true, asker: .helper) == .screen, "a helper may say the person's screen")
         expect(RunDisplayRules.place(asked: "elsewhere", on: true, asker: .helper) == .display, "a word it doesn't know is no word")
 
+        expect(!RunDisplayRules.takesTurns(asker: .chat, hold: false), "the quick question acting in an app is the person's own request: it never waits behind a helper")
+        expect(RunDisplayRules.takesTurns(asker: .chat, hold: true), "its own open on a display of its own takes turns like any")
+        expect(RunDisplayRules.takesTurns(asker: .helper, hold: false) && RunDisplayRules.takesTurns(asker: .helper, hold: true), "a helper takes turns for acts and opens")
+        expect(RunDisplayRules.takesTurns(asker: .outside, hold: false) && RunDisplayRules.takesTurns(asker: .outside, hold: true), "and so does an AI session outside Petal")
+
         // MARK: The plan: not before it's needed
 
         var plan = RunDisplayPlan(limit: 2)

@@ -704,8 +704,10 @@ final class Assist {
                 guard let url else { return fail("That isn't an address or a file.") }
                 // Finding the app (a scan of the Applications folders) and Launch Services wait on the disk or the
                 // app: off the main thread.
+                let opener = OpenedOnDisplay()
                 return Self.off(live, {
                     let appURL = name.isEmpty ? nil : NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID(name))
+                    opener.bundle = (appURL ?? NSWorkspace.shared.urlForApplication(toOpen: url)).flatMap { Bundle(url: $0)?.bundleIdentifier } ?? ""
                     // Its asker gone while the app was looked up: nothing opens.
                     guard live() else { return }
                     if let appURL {
@@ -713,7 +715,12 @@ final class Assist {
                     } else {
                         NSWorkspace.shared.open(url)
                     }
-                }) { ran in if ran { send(["opened": target]) } }
+                }) { [weak self] ran in
+                    guard ran else { return }
+                    // Opened for the person to see: an app a run had started on a display is theirs from now on.
+                    self?.app.displays.handedOver(bundle: opener.bundle)
+                    send(["opened": target])
+                }
             }
             // The name is looked up off the main thread (it scans the Applications folders); the launch is the dock's.
             var found: (id: String, url: URL?) = (name, nil)
@@ -724,6 +731,7 @@ final class Assist {
                 guard let self, ran, live() else { return }
                 guard found.url != nil else { return fail("No app called \(name) is installed.") }
                 self.app.docks.launch(found.id)
+                self.app.displays.handedOver(bundle: found.id)
                 send(["opened": Apps.name(found.id)])
             }
         case "quit", "hide", "focus":

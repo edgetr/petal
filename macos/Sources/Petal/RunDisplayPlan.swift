@@ -51,6 +51,11 @@ enum RunDisplayRules {
         return asker == .chat ? .screen : .display
     }
 
+    /// Whether an ask for an app takes its turn behind another run. `hold`: an open on the asker's own display.
+    /// The quick question acting in an app is the person's own request, in front of them, and their use of an app
+    /// always wins: it never waits behind a helper. Everything else takes turns.
+    static func takesTurns(asker: Asker, hold: Bool) -> Bool { hold || asker != .chat }
+
     /// What opening something for a run's display would do, known before anything opens.
     enum Opening: Equatable {
         /// A new window results, which is moved to the display.
