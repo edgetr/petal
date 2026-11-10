@@ -45,7 +45,8 @@ extension ClaudePanel {
         let waiting = !agent.running && !agent.waiting.isEmpty
         return NoteStatus.Facts(running: agent.running || waiting, ready: note.ready, asking: asking, needs: agent.needs,
                                 activity: waiting ? "Waiting for another note to finish" : agent.activity.text,
-                                waitingForDisplay: PetalApp.shared.displays.waits(note.id.uuidString))
+                                waitingForDisplay: PetalApp.shared.displays.waits(note.id.uuidString),
+                                waitingForApp: PetalApp.shared.displays.waitsForApp(note.id.uuidString))
     }
 
     /// The notes the preview shows, waiting for the person first.

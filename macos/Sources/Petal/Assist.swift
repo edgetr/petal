@@ -382,7 +382,7 @@ final class Assist {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Another run's display is none of this one's: nothing of its window is told.
-                    if looked != nil, self.app.displays.foreign(frame, to: note) {
+                    if looked != nil, self.app.displays.foreign(frame, to: note) || self.app.displays.foreign(window: number, to: note) {
                         return send(["note": "\(front.localizedName ?? "That app")'s window there belongs to another helper's work, on a display of its own: Petal keeps them apart."])
                     }
                     result["window"] = title
@@ -704,8 +704,10 @@ final class Assist {
                 guard let url else { return fail("That isn't an address or a file.") }
                 // Finding the app (a scan of the Applications folders) and Launch Services wait on the disk or the
                 // app: off the main thread.
+                let opener = OpenedOnDisplay()
                 return Self.off(live, {
                     let appURL = name.isEmpty ? nil : NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID(name))
+                    opener.bundle = (appURL ?? NSWorkspace.shared.urlForApplication(toOpen: url)).flatMap { Bundle(url: $0)?.bundleIdentifier } ?? ""
                     // Its asker gone while the app was looked up: nothing opens.
                     guard live() else { return }
                     if let appURL {
@@ -713,7 +715,12 @@ final class Assist {
                     } else {
                         NSWorkspace.shared.open(url)
                     }
-                }) { ran in if ran { send(["opened": target]) } }
+                }) { [weak self] ran in
+                    guard ran else { return }
+                    // Opened for the person to see: an app a run had started on a display is theirs from now on.
+                    self?.app.displays.handedOver(bundle: opener.bundle)
+                    send(["opened": target])
+                }
             }
             // The name is looked up off the main thread (it scans the Applications folders); the launch is the dock's.
             var found: (id: String, url: URL?) = (name, nil)
@@ -724,11 +731,21 @@ final class Assist {
                 guard let self, ran, live() else { return }
                 guard found.url != nil else { return fail("No app called \(name) is installed.") }
                 self.app.docks.launch(found.id)
+                self.app.displays.handedOver(bundle: found.id)
                 send(["opened": Apps.name(found.id)])
             }
         case "quit", "hide", "focus":
             guard let running = running(name) else { return fail("\(name) isn't open.") }
             let label = running.localizedName ?? name
+            // An app a run started on its display, which the person never saw: another run's is none of this one's,
+            // and its own quits without a card and never comes forward (RunDisplayRules.apps).
+            let owner = app.displays.owner(of: running.processIdentifier, for: caller)
+            let answer = RunDisplayRules.apps(action, owner: owner)
+            if answer == .refuse {
+                return fail(owner == .another
+                    ? "\(label) belongs to another helper's work, on a display of its own: Petal keeps them apart, and nothing of it is quit, hidden or brought forward from here."
+                    : "\(label) is on your own display, where nothing comes forward. Work in it with petal_ui and petal_act; petal_windows with action: show brings its windows to the person's screen when they need to see one.")
+            }
             switch action {
             // Each asks the app (or Launch Services): off the main thread, the answer back on it.
             case "hide": Self.off(live, { running.hide() }) { ran in if ran { send(["hidden": label]) } }
@@ -746,13 +763,18 @@ final class Assist {
                     send(["focused": label])
                 }
             default:
-                ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.", owner: caller) { allowed in
-                    guard allowed, live() else { return send(["declined": "The person didn't allow quitting \(label)."]) }
+                let quit = {
                     Self.off(live, { running.terminate() }) { ran in
                         guard ran else { return }
                         self.did("Quit \(named: label, else: "an app")")
                         send(["quit": label])
                     }
+                }
+                // Its own, which the person never saw: the run's to put away, with nobody to ask.
+                if answer == .go { return quit() }
+                ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.", owner: caller) { allowed in
+                    guard allowed, live() else { return send(["declined": "The person didn't allow quitting \(label)."]) }
+                    quit()
                 }
             }
         default:
@@ -760,11 +782,13 @@ final class Assist {
         }
     }
 
-    /// Opens an app, a file or an address on the caller's own hidden display: its display first (now, or once it's its
-    /// turn), then the open without activating anything, and the window that results moved there through
-    /// Accessibility. Only a window that wasn't there before is moved: one the person had is never taken. Where
-    /// nothing new would result (a browser already open takes an address as a tab in the person's own window; an app
-    /// already open shows nothing new), nothing is opened and it says so.
+    /// Opens an app, a file or an address on the caller's own hidden display: the app it opens in is found first,
+    /// then its display (now, or once it's its turn), then its turn for that app (another run using it on its display
+    /// has it until it ends or lets go: "Waiting for TextEdit"), then the open without activating anything, and the
+    /// window that results moved there through Accessibility (`RunDisplays.open`). Only a window that wasn't there
+    /// before is moved: one the person had is never taken. Where nothing new would result (a browser already open
+    /// takes an address as a tab in the person's own window; an app already open shows nothing new), nothing is
+    /// opened and it says so. An app this open started is the run's to put away when it ends.
     private func openOnDisplay(name: String, target: String, caller: String, label: String, live: @escaping @Sendable () -> Bool,
                                _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         var url: URL?
@@ -774,80 +798,74 @@ final class Assist {
         } else if name.isEmpty {
             return fail("Give an app, a file or an address to open.")
         }
-        let web = ["http", "https"].contains(url?.scheme?.lowercased() ?? "")
-        app.displays.need(caller, label: label) { [weak self] result in
-            guard let self, live() else { return }
-            let display: RunDisplays.Display
-            switch result {
-            case .failure(let why): return fail(why.words)
-            case .success(let got): display = got
+        // Which app: looked up off the main thread (it scans the Applications folders).
+        let found = OpenedOnDisplay()
+        Self.off(live, {
+            let appURL: URL?
+            if !name.isEmpty {
+                appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID(name))
+            } else {
+                appURL = url.flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) }
             }
-            let frame = display.frame
-            let index = self.app.displays.nextIndex(for: caller)
-            let found = OpenedOnDisplay()
-            Self.off(live, {
-                let appURL: URL?
-                if !name.isEmpty {
-                    appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID(name))
-                } else {
-                    appURL = url.flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) }
-                }
-                guard let appURL, let bundle = Bundle(url: appURL)?.bundleIdentifier else {
-                    found.problem = name.isEmpty ? "No app on this Mac opens that." : "No app called \(name) is installed."
-                    return
-                }
-                found.app = appURL.deletingPathExtension().lastPathComponent
-                let running = !NSRunningApplication.runningApplications(withBundleIdentifier: bundle).isEmpty
-                let before = Set(RunDisplays.windowNumbers(bundle: bundle).keys)
-                switch RunDisplayRules.opening(running: running, windows: before.count, address: web, browser: Browsers.kind(bundle) != nil, bare: url == nil) {
-                case .tabInTheirs:
-                    found.problem = "\(found.app) is open with the person's own windows, and an address opens there as a tab in one of them, in front of them. Nothing was opened. Read the page with your own web tools, or pass on: \"screen\" if the person would want it opened on their screen."
-                    return
-                case .nothingNew:
-                    found.problem = "\(found.app) is already open with the person's own windows, and Petal never moves those to your display. Nothing was opened. Open a file or an address in it (that makes a window of your own), or pass on: \"screen\" to use it on their screen."
-                    return
-                case .go: break
-                }
-                // Its asker gone while the app was looked up: nothing opens.
-                guard live() else { return }
-                let configuration = NSWorkspace.OpenConfiguration()
-                configuration.activates = false
-                configuration.addsToRecentItems = false
-                let done = DispatchSemaphore(value: 0)
-                let finished: @Sendable (NSRunningApplication?, Error?) -> Void = { _, error in
-                    found.problem = error?.localizedDescription
-                    done.signal()
-                }
-                if let url {
-                    NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: configuration, completionHandler: finished)
-                } else {
-                    NSWorkspace.shared.openApplication(at: appURL, configuration: configuration, completionHandler: finished)
-                }
-                _ = done.wait(timeout: .now() + 15)
-                guard found.problem == nil else { return }
-                // What it made: an app still starting takes a while to show its window.
-                let made = RunDisplays.newWindows(bundle: bundle, before: before, timeout: running ? 5 : 15, live: live)
-                for (offset, item) in made.enumerated() {
-                    if RunDisplays.move(item.element, pid: item.pid, to: frame, index: index + offset, live: live) {
-                        found.moved.append(item)
-                    } else {
-                        found.stayed += 1
+            guard let appURL, let bundle = Bundle(url: appURL)?.bundleIdentifier else { return }
+            found.appURL = appURL
+            found.bundle = bundle
+            found.app = appURL.deletingPathExtension().lastPathComponent
+        }) { [weak self] ran in
+            guard let self, ran, live() else { return }
+            guard let appURL = found.appURL else {
+                return fail(name.isEmpty ? "No app on this Mac opens that." : "No app called \(name) is installed.")
+            }
+            let bundle = found.bundle, appName = found.app
+            self.app.displays.need(caller, label: label) { [weak self] result in
+                guard let self, live() else { return }
+                if case .failure(let why) = result { return fail(why.words) }
+                // Its turn for the app: another run using it on its display has it until it ends or lets it go.
+                self.app.displays.turn(caller, app: bundle, name: appName, hold: true) { [weak self] refused in
+                    guard let self else { return }
+                    if let refused {
+                        if live() { fail(refused.words) }
+                        return
+                    }
+                    // From here its turn is given back whatever becomes of the open.
+                    let displays = self.app.displays
+                    guard live(), let display = displays.display(for: caller) else {
+                        displays.finished(caller, app: bundle)
+                        if live() { fail(RunDisplays.Failure.ended.words) }
+                        return
+                    }
+                    let frame = display.frame
+                    let index = displays.nextIndex(for: caller)
+                    Self.off(live, {
+                        found.opened = RunDisplays.open(appURL: appURL, bundle: bundle, url: url, on: frame, index: index, live: live)
+                    }) { [weak self] ran in
+                        guard let self else { return }
+                        let opened = found.opened
+                        // What it started and what it made are its own, whoever is still there to hear of it: the
+                        // run's ending puts them away.
+                        if let pid = opened.launched { displays.launched(pid, bundle: bundle, name: appName, by: caller) }
+                        if !opened.moved.isEmpty {
+                            displays.track(opened.moved, for: caller, bare: url == nil, panels: opened.panels, app: (bundle, appName))
+                        }
+                        displays.finished(caller, app: bundle)
+                        guard ran, live() else { return }
+                        if let problem = opened.problem { return fail(problem) }
+                        let what = target.isEmpty ? appName : target
+                        guard !opened.moved.isEmpty else {
+                            return send(["opened": what, "on": "the person's screen",
+                                         "note": opened.stayed > 0
+                                            ? "\(appName) wouldn't let Petal move its window, so it's on the person's screen, not your display."
+                                            : "\(appName) showed no new window for it (it may have opened in a window the person already had), so nothing is on your display."])
+                        }
+                        self.did("Opened \(named: appName, else: "an app") on a display of its own")
+                        var reply: [String: Any] = ["opened": what, "app": appName, "on": "your own display",
+                              "next": "petal_ui with app: \"\(appName)\" reads it there, and petal_act works in it without a pointer and without bringing anything forward. The person doesn't see it; petal_look with a screenshot shows you."]
+                        if opened.launched != nil {
+                            reply["yours"] = "\(appName) wasn't open, so it's yours: when you're done Petal quits it, unless the person used it meanwhile, you showed it to them (petal_windows, action: show) or it has unsaved changes."
+                        }
+                        send(reply)
                     }
                 }
-            }) { [weak self] ran in
-                guard let self, ran, live() else { return }
-                if let problem = found.problem { return fail(problem) }
-                let what = target.isEmpty ? found.app : target
-                guard !found.moved.isEmpty else {
-                    return send(["opened": what, "on": "the person's screen",
-                                 "note": found.stayed > 0
-                                    ? "\(found.app) wouldn't let Petal move its window, so it's on the person's screen, not your display."
-                                    : "\(found.app) showed no new window for it (it may have opened in a window the person already had), so nothing is on your display."])
-                }
-                self.app.displays.track(found.moved, for: caller, bare: url == nil)
-                self.did("Opened \(named: found.app, else: "an app") on a display of its own")
-                send(["opened": what, "app": found.app, "on": "your own display",
-                      "next": "petal_ui with app: \"\(found.app)\" reads it there, and petal_act works in it without a pointer and without bringing anything forward. The person doesn't see it; petal_look with a screenshot shows you."])
             }
         }
     }
@@ -904,7 +922,7 @@ final class Assist {
                     // Its asker gone while the windows were read: nothing is asked or done for it.
                     guard live() else { return }
                     // Another run's display is none of this one's: its windows aren't listed, found or touched.
-                    let found = found.filter { !self.app.displays.foreign($0.frame, to: caller) }
+                    let found = found.filter { !self.app.displays.foreign($0.frame, to: caller) && !self.app.displays.foreign(window: $0.number, to: caller) }
                     let mine = { (window: AppWindow) in caller.map { self.app.displays.holds(window.frame, for: $0) } ?? false }
                     if action == "list" {
                         let hidden = self.privatePIDs
@@ -935,8 +953,7 @@ final class Assist {
                             if ran { send(["minimized": label]) }
                         }
                     case "close":
-                        self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.", owner: caller) { allowed in
-                            guard allowed, live() else { return send(["declined": "The person didn't allow closing it."]) }
+                        let close = {
                             let element = window.element
                             var pressed = false
                             Self.off(live, {
@@ -950,6 +967,13 @@ final class Assist {
                                 self.did("Closed \(quoted: label, else: "a window")")
                                 send(["closed": label])
                             }
+                        }
+                        // Its own window on its own display, which the person never saw: closed without asking them
+                        // (its app still asks to save anything unsaved, there, where the run can answer).
+                        if self.app.displays.owns(window: window.number, for: caller) { return close() }
+                        self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.", owner: caller) { allowed in
+                            guard allowed, live() else { return send(["declined": "The person didn't allow closing it."]) }
+                            close()
                         }
                     case "arrange":
                         let layout = args["layout"] as? String ?? "full"
@@ -1087,7 +1111,7 @@ final class Assist {
 /// What `Assist.openOnDisplay` found, handed from the thread that opened it to the main one.
 final class OpenedOnDisplay: @unchecked Sendable {
     var app = ""
-    var problem: String?
-    var moved: [(window: CGWindowID, pid: pid_t, element: AXUIElement)] = []
-    var stayed = 0
+    var bundle = ""
+    var appURL: URL?
+    var opened = RunDisplays.Opened()
 }

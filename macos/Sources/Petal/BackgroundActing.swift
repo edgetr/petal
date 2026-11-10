@@ -180,6 +180,7 @@ extension Acting {
                     outcome.error = Background.unsure(map.appName, changed: false)
                 } else {
                     outcome.needs = reason
+                    outcome.untouched = true
                 }
                 return
             case .press:

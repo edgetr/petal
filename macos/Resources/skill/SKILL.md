@@ -51,10 +51,14 @@ Use, in this order:
    with no pointer and nothing brought forward, and `petal_look` with `screenshot: "screen"` shows your display.
    Only a window your open made is ever moved there: an address in a browser the user already has open, or an app
    they already have open asked for by itself, opens nothing and says so. The display goes when your run ends (a
-   helper's run, a chat's reply, a session's process or ten quiet minutes): a window you opened and left empty is
-   closed, anything else comes to the user's screen then. Petal's questions, Buy and the vault's card still show to
-   the user where they are. `petal_windows` with `action: show` brings your windows to their screen; they can do it
-   themselves with Show me in the AI button's preview.
+   helper's run, a chat's reply, a session's process or ten quiet minutes): an app your open started (it wasn't
+   open) that the user never used, with nothing unsaved, is quit; a window you opened and left empty is closed;
+   anything else comes to the user's screen then. Petal's questions, Buy and the vault's card still show to
+   the user where they are. `petal_windows` with `action: show` brings your windows to their screen (what you
+   showed is theirs and stays when you're done); they can do it themselves with Show me in the AI button's preview.
+   Two runs take turns on one app: while another run uses an app on its display, your open or act in that app
+   waits ("Waiting for TextEdit") until it's done or lets the app go, and you never see or touch its windows.
+   Where you need real keys in an app the user is using right now, Petal waits for them to leave it first.
    The vault (`petal_vault`): logins, contact info, addresses, payment info and API keys, filled by Petal
    into fields from `petal_ui` without the AI seeing a secret (`action: fill`, the item and `fields`
    {field: id}). A login fills by itself on its own site or app, an API key on its service's site, this Mac or an

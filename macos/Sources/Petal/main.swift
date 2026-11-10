@@ -98,7 +98,7 @@ MainActor.assumeIsolated {
     case .displayCheck(let folder):
         // One real hidden display, for whoever is at the Mac (it changes the screens for a few seconds).
         app.setActivationPolicy(.prohibited)
-        DisplayCheck.run(folder: folder)
+        DisplayCheck.run(folder: folder, full: CommandLine.arguments.contains("--full"))
     case .mcp, .usage:
         exit(0)   // handled above
     case .dock:
