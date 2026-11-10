@@ -147,7 +147,7 @@ extension Snapshot {
     }
 }
 
-/// `Petal --viewer-check <file>… [--out <folder>]`: the viewer's loading as the window does it, without showing
+/// `Petal --viewer-check [<file>…] [--out <folder>]` (given no file, it makes its own: ViewerSamples): the viewer's loading as the window does it, without showing
 /// anything: each file checked (ViewerPath), read off the main thread, its pages exported through Quick Look where
 /// it isn't a PDF, and for a PDF its notes written as comments into a copy beside it (made-up notes). Then, on
 /// throwaway copies in a folder of its own: a comment write refused when the PDF changed under it (into a copy and
@@ -180,6 +180,15 @@ enum ViewerCheck {
         var words = arguments.drop { $0 != "--viewer-check" }.dropFirst().makeIterator()
         while let word = words.next() {
             if word == "--out" { out = words.next() } else { files.append(word) }
+        }
+        // Given no files, it makes its own (ViewerSamples: a PDF, a Word document, a deck), in a folder that goes
+        // with the run.
+        var samples: URL?
+        if files.isEmpty {
+            let folder = scratch()
+            guard let made = ViewerSamples.make(in: folder) else { exit(1) }
+            files = [made.pdf.path, made.document.path, made.deck.path]
+            samples = folder
         }
         var failed = false
         for file in files {
@@ -234,12 +243,47 @@ enum ViewerCheck {
         failed = !remote() || failed
         try? FileManager.default.removeItem(at: trashed)
         try? FileManager.default.removeItem(at: versionsRoot)
+        if let samples { try? FileManager.default.removeItem(at: samples) }
+        if let own { try? FileManager.default.removeItem(at: own) }
+        print(failed ? "viewer-check: failed" : "viewer-check: all passed")
         exit(failed ? 1 : 0)
     }
 
-    private static func wait(_ seconds: Double, until done: () -> Bool) {
+    /// Folders of the run's own for Petal's settings, state and notes, wherever the run doesn't point them
+    /// elsewhere: never the person's, and never a copy of theirs. Before anything reads a setting or a file.
+    static func isolate() {
+        Headless.on = true
+        let root = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "petal-viewer-check-own-\(getpid())")
+        for (variable, name) in [("PETAL_CONFIG_DIR", "config"), ("PETAL_SUPPORT_DIR", "support"), ("PETAL_NOTES", "notes")]
+        where ProcessInfo.processInfo.environment[variable]?.isEmpty != false {
+            let folder = root.appending(path: name)
+            try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            setenv(variable, folder.path, 1)
+            own = root
+        }
+    }
+    private static var own: URL?
+
+    /// How long a wait may last before the run gives up on it: only so a real failure ends the run. A step never
+    /// passes or fails by how quick this Mac is, or how busy.
+    private static let patience: TimeInterval = 120
+
+    /// The main thread turned until `done` holds. `seconds` is only how long the step expects that to take: the
+    /// wait lasts as long as it needs (up to `patience`), and says so when what it waited for never came.
+    private static func wait(_ seconds: Double, line: Int = #line, until done: () -> Bool) {
+        let limit = max(seconds, patience)
+        let until = Date().addingTimeInterval(limit)
+        while !done() {
+            guard Date() < until else { return print("  (line \(line): waited \(Int(limit)) s for something that never came)") }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+    }
+
+    /// The main thread turned for `seconds`: only where a step shows that something does not happen (after work a
+    /// hook slowed on purpose), never to give something time to happen.
+    private static func pause(_ seconds: Double) {
         let until = Date().addingTimeInterval(seconds)
-        while !done() && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
     }
 
     private static func check(_ file: String, out: String?, _ done: @escaping @MainActor (Bool) -> Void) {
@@ -619,12 +663,12 @@ enum ViewerCheck {
         let shown = { app.viewers.open.contains { $0.url.lastPathComponent == "Deck.pdf" } }
         var answered = false
         app.viewers.open(path: deck.path, live: { false }) { _ in answered = true }
-        wait(2) { answered || shown() }
+        pause(2)
         expect(!answered && !shown(), "a request already gone: nothing opened")
         let gone = HangUp()
         app.viewers.open(path: deck.path, live: { !gone.gone }) { _ in answered = true }
         gone.gone = true
-        wait(3) { answered || shown() }
+        pause(3)
         expect(!answered && !shown(), "hung up while its file was checked: no window")
         var opened: ViewerModel?
         app.viewers.open(path: deck.path, live: { true }) { if case .success(let model) = $0 { opened = model } }
@@ -754,8 +798,12 @@ enum ViewerCheck {
         var first = NoteStick(kind: .file)
         first.path = model.url.path
         first.page = 1
-        guard let paper = app.paper.make(on: first, body: "On the gate's file", open: false) else { expect(false, "a note on the file (set up)"); return false }
-        wait(2) { false }
+        guard let made = app.paper.make(on: first, body: "On the gate's file", open: false) else { expect(false, "a note on the file (set up)"); return false }
+        // A new note shows under a plain name until its file lands under its own: waited for, and the note found
+        // by its id from then on (never by the key it was first shown with).
+        wait(20) { !app.paper.store.working }
+        let now = { app.paper.store.notes.first { $0.noteID == made.noteID && $0.version == nil } }
+        guard let paper = now() else { expect(false, "the note landed (set up)"); return false }
         func call(_ tool: String, _ args: [String: Any]) -> (answer: Bool, refusal: String?) {
             var answered = false
             var refusal: String?
@@ -772,12 +820,12 @@ enum ViewerCheck {
         expect(model.openKey == nil, "a margin paper doesn't open for writing")
         app.paper.newHere()
         model.newNote()
-        wait(1.5) { false }
+        pause(0.3)
         expect(app.paper.store.notes.count == before, "⌃⌥N in the viewer and New note make nothing")
         var second = first
         second.page = 2
         app.paper.restick(paper.key, [second])
-        expect(app.paper.store.paper(paper.key)?.file.places.first?.page == 1, "the letterhead's Stick it here changes nothing")
+        expect(now()?.file.places.first?.page == 1, "the letterhead's Stick it here changes nothing (page \(now()?.file.places.first?.page ?? 0))")
         let viewed = call("petal_view", ["path": shown.path])
         let comments = call("petal_note_pdf_comments", ["path": shown.path])
         expect(!viewed.answer && viewed.refusal == NoteStore.gettingReady && !comments.answer && comments.refusal == NoteStore.gettingReady,
@@ -786,9 +834,9 @@ enum ViewerCheck {
         app.paper.store.previewEntering(false)
         expect(model.marginEditable, "ready: the margin takes typing")
         app.paper.restick(paper.key, [second])
-        expect(app.paper.store.paper(paper.key)?.file.places.first?.page == 2, "Stick it here works")
+        expect(now()?.file.places.first?.page == 2, "Stick it here works (page \(now()?.file.places.first?.page ?? 0))")
         model.newNote()
-        wait(8) { app.paper.store.notes.count == before + 1 }
+        wait(8) { app.paper.store.notes.count == before + 1 && model.openKey != nil }
         expect(app.paper.store.notes.count == before + 1 && model.openKey != nil, "New note makes a note, open in the margin")
         let again = call("petal_view", ["path": shown.path])
         expect(again.answer, "petal_view answers (\(again.refusal ?? "answered"))")
@@ -861,7 +909,7 @@ enum ViewerCheck {
         var before = notesNow()
         model.newNote()
         model.unselected()
-        wait(1.5) { false }
+        pause(1.5)
         expect(notesNow() == before, "the selection gone while its place was made: no note")
         // The viewer closed meanwhile: nothing made, nothing opened.
         model.selected(page: 0, bounds: CGRect(x: 72, y: 700, width: 60, height: 14), range: word, anchor: .zero)
@@ -869,7 +917,7 @@ enum ViewerCheck {
         before = notesNow()
         model.newNote()
         app.viewers.closed(model)
-        wait(1.5) { false }
+        pause(1.5)
         expect(notesNow() == before && model.openKey == nil, "the viewer closed while its place was made: no note")
         print("thirteenth: " + (ok ? "Stick it here from the viewer's own file and page; a pending selection waited for; a changed selection or closed viewer makes nothing" : "failed"))
         return ok
@@ -958,7 +1006,7 @@ enum ViewerCheck {
         onB.refreshPlaces(late: 1.0)
         app.paper.store.preview(withB, notebooks: app.paper.store.notebooks)
         onB.refreshPlaces()
-        wait(2.5) { false }
+        pause(2.5)
         expect(!onB.onFile.contains(onBNote.fileKey), "an older read finishing last never replaces the newest")
         app.viewers.closed(onB)
         app.viewers.closed(model)
@@ -1002,11 +1050,11 @@ enum ViewerCheck {
         guard case .success(let set)? = newer else { expect(false, "the newer request made its set (\(String(describing: newer)))"); return false }
         if case .failure(.superseded)? = older {} else { expect(false, "the older request: superseded, never shown (\(String(describing: older)))") }
         expect(model.versions === set && FileManager.default.fileExists(atPath: set.versions[0].url.path), "the newer set shown, its copies there")
-        wait(1) { false }
-        let ownLeft = ((try? FileManager.default.contentsOfDirectory(atPath: set.folder.deletingLastPathComponent().path)) ?? []).filter { name in
+        let ownLeft = { ((try? FileManager.default.contentsOfDirectory(atPath: set.folder.deletingLastPathComponent().path)) ?? []).filter { name in
             ((try? FileManager.default.contentsOfDirectory(atPath: set.folder.deletingLastPathComponent().appending(path: name).path)) ?? []).contains { $0.contains("(Older)") }
-        }
-        expect(ownLeft.isEmpty, "the older request's own copies removed")
+        } }
+        wait(5) { ownLeft().isEmpty }
+        expect(ownLeft().isEmpty, "the older request's own copies removed")
 
         // A copy someone edited, then replaced by newer versions: to the Trash, never deleted.
         if let handle = try? FileHandle(forWritingTo: set.versions[0].url) {
@@ -1311,7 +1359,7 @@ enum ViewerCheck {
             model.refreshVersions(set)
         }
         wait(20) { model.versionPageCount(one.id) == 11 }
-        wait(1.5) { false }
+        pause(1.5)
         expect(set.loads.started - before <= 2, "ten saves of a slow copy: at most one follow-up (\(set.loads.started - before) loads)")
         expect(model.versionPageCount(one.id) == 11, "the follow-up shows the copy as it ended up")
         expect(!read.all.contains(set.versions[1].url.lastPathComponent), "the copy that didn't change isn't read again (\(read.all))")
@@ -1346,7 +1394,7 @@ enum ViewerCheck {
         model.makeVersions(["One", "Two"], asker: "check") { if case .success(let set) = $0 { made = set } }
         wait(20) { made != nil || !exported.all.isEmpty }
         wait(60) { !exported.all.isEmpty }
-        wait(15) { false }
+        pause(15)
         expect(exported.all.count == 1, "closed mid-export: the next copy never goes to Quick Look (\(exported.all.count) exports)")
         expect(made.map { set in set.versions.allSatisfy { $0.thumb == nil } } ?? true, "and nothing of it drawn")
         print("closing: " + (ok ? "a set closed mid-export stops at its next step" : "failed"))
@@ -1393,7 +1441,7 @@ enum ViewerCheck {
         defer { ViewerLoads.converting = nil }
         model.load()
         wait(90) { !model.loading && gauge.running == 0 }
-        wait(1) { false }
+        pause(1)
         expect(model.pageCount > 0, "the deck shown (set up)")
         expect(gauge.peak == 1 && gauge.started <= 2, "saves during a slow conversion: one conversion at a time, at most two (\(gauge.started) started, \(gauge.peak) at once)")
         expect(model.readsStarted <= 2, "and at most one follow-up load (\(model.readsStarted))")
@@ -1445,10 +1493,11 @@ enum ViewerCheck {
         }
         defer { ViewerModel.versionDrawing = nil }
         for page in 1...20 { model.go(to: page) }
-        wait(0.08) { false }
+        pause(0.08)
         app.viewers.closed(model)
         let atClose = gauge.started
-        wait(1) { false }
+        wait(5) { gauge.running == 0 }
+        pause(1)
         expect(gauge.running == 0, "closed: no picture still drawing")
         expect(gauge.started - atClose <= 2, "closed: nothing more drawn but what was under way (\(gauge.started - atClose))")
         expect(gauge.started <= 6, "paging twenty pages quickly: at most a follow-up per version (\(gauge.started) drawn)")
@@ -1502,7 +1551,7 @@ enum ViewerCheck {
         var late: ViewerModel.LoadAnswer?
         model.whenLoaded(within: 5) { late = $0 }
         expect(late == .closed, "asked after closing: closed at once")
-        wait(2) { false }
+        pause(2)
         print("twentyfirst: " + (ok ? "closing a loading viewer settles every waiter (petal_view says it was closed); only the dock sweeps; the check's own versions root" : "failed"))
         return ok
     }
@@ -1552,14 +1601,14 @@ enum ViewerCheck {
         defer { ViewerModel.vaultChecking = nil }
         var answers: [ViewerModel.HereOutcome] = []
         viewer.herePlace(passage: true) { answers.append($0) }
-        wait(0.3) { false }
+        pause(0.3)
         let closing = Date()
         app.viewers.closed(viewer)
         let took = Date().timeIntervalSince(closing)
         let first = answers.first
-        wait(2.5) { false }
+        pause(2.5)
         if case .closed? = first {} else { expect(false, "closed during the vault check: told closed (\(String(describing: first)))") }
-        expect(took < 0.2 && answers.count == 1, "at once, and the late vault result ignored (\(answers.count) answers)")
+        expect(took < 1.0 && answers.count == 1, "at once (never waiting for the vault check, 1.5 s), and the late vault result ignored (\(answers.count) answers)")
         print("twentysecond: " + (ok ? "a vanished file leaves no pages or place; closing during a vault check answers the place at once, once" : "failed"))
         return ok
     }
@@ -1595,7 +1644,7 @@ enum ViewerCheck {
         defer { ViewerLoads.converting = nil }
         model.load()
         wait(90) { moved.gone && gauge.running == 0 && !model.loading }
-        wait(2) { false }
+        pause(2)
         expect(moved.gone, "moved during the conversion (set up)")
         expect(model.problem == ViewerModel.cantShowText && model.pageCount == 0 && model.document == nil && !model.live && model.fileAnchor() == nil,
                "moved out of the allowed roots mid-conversion: stays refused (\(model.problem ?? "no problem"), \(model.pageCount) pages)")
@@ -1743,7 +1792,7 @@ enum ViewerCheck {
         expect((steady.answer?["picked"] as? [String: Any])?["id"] as? String == third.set.versions[0].id, "nothing changed: the pick is told")
         // petal_view answered as its viewer closes: said closed, never its pages.
         let viewing = toolCall("petal_view", ["path": third.file.path])
-        wait(0.2) { false }
+        pause(0.2)
         app.viewers.closed(third.model)
         let viewed = viewing()
         expect(viewed.answer == nil && viewed.refusal == Viewers.closedText, "petal_view as the viewer closes: said closed (\(viewed.refusal ?? String(describing: viewed.answer)))")
@@ -1837,7 +1886,7 @@ enum ViewerCheck {
         let model = app.viewers.show(first, front: false)
         wait(20) { !model.loading }
         let renaming = toolCall("petal_view", ["path": first.path])
-        wait(0.2) { false }
+        pause(0.2)
         let renamed = root.appending(path: "After.pdf")
         try? FileManager.default.moveItem(at: first, to: renamed)
         model.fileChanged()
@@ -1848,7 +1897,7 @@ enum ViewerCheck {
         // for isn't checked against the document before.
         let pageCount = model.pageCount
         let reloading = toolCall("petal_view", ["path": renamed.path, "page": pageCount + 7])
-        wait(0.2) { false }
+        pause(0.2)
         ViewerLoader.duringRead = { _, _ in Thread.sleep(forTimeInterval: 4.0) }
         try? pages(pageCount + 20, from: source)?.write(to: renamed)
         model.load()
@@ -1970,7 +2019,6 @@ enum ViewerCheck {
         let text = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
         text.string = "Before, typed"
         coordinator.schedule(text)
-        wait(1.2) { false }
         let journal = NoteJournal.file(noteID)
         // The snapshot is the whole note (its front matter too): its body is what's compared here.
         let flushedJournal = { () -> String? in
@@ -1978,6 +2026,7 @@ enum ViewerCheck {
             NoteJournal.queue.sync { entry = NoteJournal.read(journal) }
             return entry.map { NoteFile.parse($0.text, fallbackID: "x", fallbackDate: Date()).body }
         }
+        wait(5) { flushedJournal() == "Before, typed" }
         expect(coordinator.marker.dirty && flushedJournal() == "Before, typed", "refused: in the journal at once, under its note's id")
         // More typed, then the editor closes before its next try (nothing waiting, still dirty): handed over now.
         text.string = "Before, typed, and more"
@@ -2012,8 +2061,7 @@ enum ViewerCheck {
             _ = one.write(to: a)
         }
         model.fileChanged()
-        wait(3) { model.url.lastPathComponent == "B.pdf" }
-        wait(1) { false }
+        wait(3) { model.url.lastPathComponent == "B.pdf" && !model.loading }
         expect(model.url.lastPathComponent == "B.pdf" && model.pageCount == pages, "renamed: it follows the file, not the new one at its old path")
         // The original gone: the file at its path is accepted (as after a save that made a new file).
         try? FileManager.default.removeItem(at: b)
@@ -2052,7 +2100,7 @@ enum ViewerCheck {
         let text = NoteTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
         text.string = "Before and typed"
         coordinator.schedule(text)
-        wait(1.2) { false }
+        pause(1.2)
         expect(coordinator.marker.dirty && coordinator.body == "Before" && saved.isEmpty, "a refused save keeps the editor dirty, its words not taken as saved")
         accept.gone = true
         wait(4) { !saved.isEmpty }
@@ -2116,7 +2164,7 @@ enum ViewerCheck {
             model.makeVersions(["One", "Two"], asker: "check", live: live) { result = $0 }
             if closeAtOnce { model.close() }
             wait(20) { result != nil }
-            wait(0.5) { false }
+            pause(0.5)
             return result
         }
         let left = { Set((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []).subtracting(before) }
@@ -2250,15 +2298,15 @@ enum ViewerCheck {
             file.places = places
             return PaperNote(file: file, url: folder.appending(path: id + ".md"), notebook: "Inbox")
         }
-        func margin(_ url: URL) -> [String] {
+        func margin(_ url: URL, notes expected: Int = 2) -> [String] {
             // Loaded as the viewer loads it: membership is worked out for the file's checked identity.
             let model = ViewerModel(url: URL(fileURLWithPath: ViewerPath.canonical(url.path) ?? url.path), kind: .pdf)
             model.load()
             wait(20) { !model.loading }
             model.refreshPlaces()
-            wait(3) { !model.notes.isEmpty }
+            // (None expected: there's nothing to wait for but the membership's own read.)
+            if expected > 0 { wait(3) { model.notes.count == expected } } else { pause(1) }
             defer { model.close() }
-            wait(0.3) { false }
             return model.notes.map(\.paper.noteID).sorted()
         }
         func export(_ url: URL) -> ViewerPDFComments.Outcome? {
@@ -2295,7 +2343,7 @@ enum ViewerCheck {
         } else { expect(false, "renamed, then exported") }
         // Its old path taken by a new file: the notes stay with the renamed one, never on the new one.
         try? FileManager.default.copyItem(at: source, to: a)
-        expect(margin(a).isEmpty, "a new file at the old path gets none of them")
+        expect(margin(a, notes: 0).isEmpty, "a new file at the old path gets none of them")
         if case .failed? = export(a) {} else { expect(false, "and none of them are exported into it") }
         expect(margin(b) == ["P1", "P2"], "they're still on the file itself")
         print("places: " + (ok ? "one resolver: a Preview sentence, a renamed file and a reused path, in the margin and the comments" : "failed"))
@@ -2339,7 +2387,7 @@ enum ViewerCheck {
             return result
         }
         let blocked = pages(localOnly: true)
-        wait(1) { false }
+        pause(1)
         let reachedBlocked = server.hits
         _ = pages(localOnly: false)
         wait(2) { server.hits > reachedBlocked }
@@ -2391,7 +2439,7 @@ enum ViewerCheck {
         model.load()
         wait(20) { !model.loading && model.pdfView != nil }
         window.contentView?.layoutSubtreeIfNeeded()
-        wait(1) { false }
+        pause(1)
         guard let view = model.pdfView, let page = view.document?.page(at: 0), let text = page.string,
               let found = text.range(of: "Growth held steady") else {
             print("window: the PDF view didn't come up (\(model.pageCount) pages)")
@@ -2408,8 +2456,8 @@ enum ViewerCheck {
         let selection = page.selection(for: NSRange(found, in: text))
         view.setCurrentSelection(selection, animate: false)
         expect(model.selection == nil, "the page's text isn't read on the main thread (the selection waits for it)")
-        wait(3) { model.selection != nil }
-        wait(0.5) { false }
+        wait(3) { model.selection?.quote == "Growth held steady" }
+        pause(0.5)
         expect(model.selection?.page == 0 && model.selection?.quote == "Growth held steady" && model.selection?.pageText == text, "the selection's page and words")
         // A new selection starting: the one before (and its Note) gone at once, the new one only once its read is in.
         if let other = text.range(of: "second half") {
@@ -2547,14 +2595,16 @@ enum ViewerCheck {
         model.load()
         wait(20) { !model.loading && model.document !== firstDocument && model.pdfView?.document === model.document }
         window.contentView?.layoutSubtreeIfNeeded()
-        wait(1) { false }
+        wait(5) { model.current == 1 && shownIndex() == 1 }
+        pause(0.3)
         expect(model.current == 1 && shownIndex() == 1, "a reload keeps the page shown (current \(model.current + 1), view \(shownIndex().map { $0 + 1 } ?? 0))")
         let again = model.document
         model.load()
         model.ask(page: 1)
         wait(20) { !model.loading && model.document !== again && model.pdfView?.document === model.document }
         window.contentView?.layoutSubtreeIfNeeded()
-        wait(1) { false }
+        wait(5) { model.current == 0 && shownIndex() == 0 }
+        pause(0.3)
         expect(model.current == 0 && shownIndex() == 0, "a page asked for during a reload is the one shown after (current \(model.current + 1), view \(shownIndex().map { $0 + 1 } ?? 0))")
         print("window: " + (ok ? "PDF view, selection read off the main thread, passages found by their words, highlight, margin and pages in step, a link's note, ownership across an id change, the old selection cleared at once, an empty draft kept across a hand-off, notes off closing the margin, the right paper flipped, a rename keeping its editor, a reload keeping its page and the page asked for during it" : "failed"))
         window.close()

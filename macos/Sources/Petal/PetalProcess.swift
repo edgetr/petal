@@ -27,7 +27,7 @@ enum PetalProcess {
         case bench
         case routinesCheck(ai: Bool)
         case snapshot(String)
-        /// `Petal --viewer-check <file>…`: the viewer's loading, headless, on throwaway files.
+        /// `Petal --viewer-check [<file>…]`: the viewer's loading, headless, on throwaway files (its own, given none).
         case viewerCheck
         /// `Petal --helpers-check [--ai]`: helpers in notes run end to end, headless, on throwaway folders.
         case helpersCheck(ai: Bool)
@@ -79,10 +79,7 @@ enum PetalProcess {
         if words.contains("--bench") { return .bench }
         if words.contains("--routines-check") { return .routinesCheck(ai: words.contains("--ai")) }
         if words.contains("--helpers-check") { return .helpersCheck(ai: words.contains("--ai")) }
-        if words.contains("--viewer-check") {
-            guard value(after: "--viewer-check") != nil else { return .usage("usage: Petal --viewer-check <file>… [--out <folder>]") }
-            return .viewerCheck
-        }
+        if words.contains("--viewer-check") { return .viewerCheck }
         if words.contains("--snapshot") {
             guard let folder = value(after: "--snapshot") else { return usage("--snapshot") }
             return .snapshot(folder)

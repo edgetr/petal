@@ -247,6 +247,11 @@ final class RootSession {
     @ObservationIgnored var entering = false
     /// The folder changed while it was being entered: read again once it's ready.
     @ObservationIgnored var reloadWanted = false
+    /// A read of the folder is under way (NoteStore.reload: one at a time), and one more was asked for meanwhile.
+    @ObservationIgnored var reading = false
+    @ObservationIgnored var readAgain = false
+    /// Whoever waits for a read begun after they asked.
+    @ObservationIgnored var readWaiters: [@MainActor () -> Void] = []
 
     init(root: URL) { self.root = root }
 
@@ -317,7 +322,6 @@ final class NoteStore {
     var root: URL { session.root }
     @ObservationIgnored private var stream: FSEventStreamRef?
     private var reloadSoon: DispatchWorkItem? { get { session.reloadSoon } set { session.reloadSoon = newValue } }
-    @ObservationIgnored private var generation = 0
     /// Changes made here, on one clock with the reads of the folder: what a read that began before them must keep.
     @ObservationIgnored private var clock = 0
     private var changedAt: [String: Int] { get { session.changedAt } set { session.changedAt = newValue } }
@@ -618,31 +622,61 @@ final class NoteStore {
 
     // MARK: Reading
 
-    /// Reads the whole folder again, off the main thread; a newer read wins, and changes made here meanwhile stay.
-    func reload() {
+    /// Reads the whole folder again, off the main thread; changes made here meanwhile stay. One read at a time: asked
+    /// for while one is under way, exactly one more follows it, begun after the ask (so it sees what the ask was
+    /// about). A read is never thrown away for a newer one: under a steady stream of changes (iCloud bringing a
+    /// folder down, a paste of many pictures) every read that runs lands, and a save never waits on the files' queue
+    /// behind reads nobody will use. `done`: called once a read begun after this ask was taken in (never, when the
+    /// folder is switched away from first).
+    func reload(then done: (@MainActor () -> Void)? = nil) {
         // A folder being entered reads itself (`switchRoot`'s third step): a change heard meanwhile is read once
         // it's ready. One not entered yet is entered by its first read, when the folder is known.
-        guard !switching else { session.reloadWanted = true; return }
+        guard !switching else {
+            session.reloadWanted = true
+            if let done { session.readWaiters.append(done) }
+            return
+        }
         guard session.ready else {
             // Asked from inside its own last step (a cover change dropped there): read once it's ready.
             if session.entering { session.reloadWanted = true } else if resolved { switchRoot(to: root) }
+            // (Entering reads the folder itself; whoever waits is told by a read begun after that one.)
+            if let done { session.reloadWanted = true; session.readWaiters.append(done) }
             return
         }
-        generation += 1
-        let mine = generation
+        if let done { session.readWaiters.append(done) }
+        guard !session.reading else { session.readAgain = true; return }
+        beginRead()
+    }
+
+    private func beginRead() {
+        let captured = session
+        captured.reading = true
+        captured.readAgain = false
+        let waiters = captured.readWaiters
+        captured.readWaiters = []
         clock += 1
         let started = clock
-        let root = self.root, captured = session
+        let root = self.root
         Self.io.async {
             let read = Self.read(root)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard self.current(captured), mine == self.generation, !self.switching, root == self.root else { return }
+                    // A session a switch ended reads nothing more (its `reading` goes with it).
+                    guard self.current(captured) else { return }
+                    captured.reading = false
                     self.take(read, started: started, root: root)
                     self.onChange()
+                    for waiter in waiters { waiter() }
+                    if captured.readAgain, self.current(captured) { self.beginRead() }
                 }
             }
         }
+    }
+
+    /// Something of this folder's is under way or waiting to be done: its entering, a read, a note's work (a write
+    /// that failed and will be tried again too), a cover or a canvas being written.
+    var working: Bool {
+        switching || session.reading || sessions.values.contains { $0.busy } || !coverLanding.isEmpty || !coverMaking.isEmpty || !canvasWriting.isEmpty
     }
 
     /// A note renamed or moved elsewhere (Finder, another Mac): the paper in memory takes its new path, and its open

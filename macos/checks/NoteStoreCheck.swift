@@ -26,6 +26,70 @@ struct NoteStoreCheck {
         NoteStore.io.async { NoteJournal.queue.async { NoteStore.io.async { hold.wait() } } }
     }
 
+    // Waiting. Nothing below waits a length of time and then looks: each wait is for the thing itself (the store
+    // ready, a read taken in, nothing under way, a file there), so no check depends on how quick this Mac is, or how
+    // busy. `patience` is only how long a wait may last before the run gives up on it, so a real failure ends.
+    static let patience: TimeInterval = 180
+
+    /// The main thread turned until `done` holds: what the store finishes comes in on the main queue.
+    @MainActor @discardableResult static func wait(_ done: () -> Bool) -> Bool {
+        let end = Date().addingTimeInterval(patience)
+        while !done() {
+            guard Date() < end else { return false }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        return true
+    }
+
+    /// Everything queued so far has run: on the files' queue, the journal's, the files' again (a journal step may
+    /// hand on to it), then the main queue.
+    @MainActor static func turn() {
+        NoteStore.io.sync {}
+        NoteJournal.queue.sync {}
+        NoteStore.io.sync {}
+        mainTurn()
+    }
+
+    @MainActor static func mainTurn() {
+        var ran = false
+        DispatchQueue.main.async { ran = true }
+        wait { ran }
+    }
+
+    /// The same while a check holds the journal's queue: what entering a folder does before its journal step.
+    @MainActor static func turnBeforeJournal() {
+        for _ in 0..<3 { NoteStore.io.sync {}; mainTurn() }
+    }
+
+    /// Nothing the store started is under way any more (NoteStore.working), and what its last steps handed to the
+    /// queues has run: the moment to check that something did not happen.
+    @MainActor @discardableResult static func idle(_ store: NoteStore) -> Bool {
+        var quiet = 0
+        return wait {
+            turn()
+            quiet = store.working ? 0 : quiet + 1
+            return quiet >= 3
+        }
+    }
+
+    /// A read of the folder begun now and taken in, and everything it started done.
+    @MainActor static func readAgain(_ store: NoteStore) {
+        var taken = false
+        store.reload { taken = true }
+        wait { taken }
+        idle(store)
+    }
+
+    /// The folder read again (each read waited for, with what it starts) until `done` holds: what a file event
+    /// would do in the running app, where the folder is watched.
+    @MainActor @discardableResult static func reading(_ store: NoteStore, until done: () -> Bool) -> Bool {
+        wait {
+            if done() { return true }
+            readAgain(store)
+            return done()
+        }
+    }
+
     @MainActor static func main() {
         // File names from titles as they are (nothing here is a secret), except where a check says otherwise.
         NoteStore.nameRedactor = { $0 }
@@ -624,8 +688,7 @@ struct NoteStoreCheck {
             ids.append(file.id)
             _ = store.make(file, in: "Renamed", live: { true }) { made in answers.append((made?.url.lastPathComponent ?? "none", made?.noteID ?? "")) }
         }
-        let until = Date().addingTimeInterval(5)
-        while answers.count < 2 && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { answers.count >= 2 }
         expect(Set(answers.map(\.name)) == ["Renamed 2.md", "Renamed 3.md"] && Set(answers.map(\.id)) == Set(ids),
                "a name taken on disk: each note lands on its own name, with its own answer", "\(answers)")
         expect(NoteReservations.names(in: folder.path.lowercased(), except: nil).isEmpty, "and their names are free again")
@@ -728,8 +791,7 @@ struct NoteStoreCheck {
         expect(journaled?.text.contains("The answer") == true && journaled?.text.contains("My words") == true, "in the notes journal the moment it's made (a whole snapshot)")
         let drained = DispatchSemaphore(value: 0)
         store.drain { drained.signal() }
-        let until = Date().addingTimeInterval(10)
-        while drained.wait(timeout: .now()) == .timedOut && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { drained.wait(timeout: .now()) != .timedOut }
         expect(text(file)?.contains("The answer") == true && text(file)?.contains("My words") == true, "drained at quit: the answer is on disk, with the person's words", text(file) ?? "nil")
     }
 
@@ -746,8 +808,7 @@ struct NoteStoreCheck {
         let store = NoteStore(root: root)
         func reread() { let read = NoteStore.read(root); store.preview(read.notes, notebooks: read.notebooks) }
         func settle(_ until: () -> Bool) {
-            let end = Date().addingTimeInterval(10)
-            while !until() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            wait { until() }
         }
         reread()
         guard let paper = store.notes.first(where: { $0.noteID == "HK1" }) else { return expect(false, "the note is read") }
@@ -804,8 +865,7 @@ struct NoteStoreCheck {
         let store = NoteStore(root: root)
         func reread() { let read = NoteStore.read(root); store.preview(read.notes, notebooks: read.notebooks) }
         func settle(_ until: () -> Bool) {
-            let end = Date().addingTimeInterval(10)
-            while !until() && Date() < end { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            wait { until() }
         }
         reread()
         guard let paper = store.notes.first(where: { $0.noteID == "RS1" }) else { return expect(false, "the note is read") }
@@ -890,8 +950,7 @@ struct NoteStoreCheck {
         _ = store.change(paper.key, touch: false, edit: { file in file.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", at: Date()) })
         let drained = DispatchSemaphore(value: 0)
         store.drain { drained.signal() }
-        let until = Date().addingTimeInterval(10)
-        while drained.wait(timeout: .now()) == .timedOut && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { drained.wait(timeout: .now()) != .timedOut }
         let papers = ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).filter { $0.hasSuffix(".md") }.sorted()
         expect(papers.count == 2, "one conflict copy, never a third paper", "\(papers)")
         let copy = papers.first { $0 != "Carried.md" }.map { folder.appending(path: $0) }
@@ -999,8 +1058,7 @@ struct NoteStoreCheck {
         try? Data("not a folder".utf8).write(to: blocker)
         guard let refs = store.acceptPictures(changeable.key, [("png", Data("bytes".utf8), "")]) else { return expect(false, "accepted") }
         let name = refs[0].file.lastPathComponent
-        let until = Date().addingTimeInterval(5)
-        while store.pictureTrouble[changeable.key] == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { store.pictureTrouble[changeable.key] != nil }
         expect(store.pictureTrouble[changeable.key]?.map(\.name) == [name] && store.keepsBytes("RM2", name), "set aside, its bytes kept for recovery")
         // Remove with an editor open: off the paper at once, no write of its own; the bytes go only when the editor's
         // save without the picture lands.
@@ -1009,7 +1067,7 @@ struct NoteStoreCheck {
         let names = store.retirePictures(changeable.key, write: false)
         expect(names == [name] && store.pictureTrouble[changeable.key] == nil && store.keepsBytes("RM2", name), "Remove: off the paper, the bytes kept until it lands")
         _ = store.change(changeable.key) { $0.body = $0.body.replacingOccurrences(of: "\n" + refLine, with: "") }   // the editor's save
-        while store.keepsBytes("RM2", name) && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { !store.keepsBytes("RM2", name) }
         expect(!store.keepsBytes("RM2", name) && text(single)?.contains(name) == false, "the save without it landed: the reference gone from the file, then the bytes")
         // Undo of that Remove: its bytes accepted again (under its own name) and the line back; with the folder
         // writable now, the picture is written, and it's all there when the notes are read again.
@@ -1017,9 +1075,7 @@ struct NoteStoreCheck {
         store.reaccept(changeable.key, [NotePictureBytes(name: name, data: Data("bytes".utf8), caption: "")])
         _ = store.change(changeable.key) { $0.body += "\n" + refLine }
         let pictureFile = root.appending(path: NoteShelf.pictureFolder(id: "RM2") + "/" + name)
-        while (!fm.fileExists(atPath: pictureFile.path) || text(single)?.contains(name) != true) && Date() < until.addingTimeInterval(5) {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        }
+        wait { fm.fileExists(atPath: pictureFile.path) && text(single)?.contains(name) == true }
         let reopened = NoteStore.read(root).notes.first { $0.noteID == "RM2" }
         expect(reopened?.file.body.contains(refLine) == true && (try? Data(contentsOf: pictureFile)) == Data("bytes".utf8) && !store.keepsBytes("RM2", name),
                "Remove, saved, undone: the picture back, written, and there after a reopen")
@@ -1035,19 +1091,19 @@ struct NoteStoreCheck {
             return expect(false, "the moving note's picture accepted")
         }
         let name3 = refs3[0].file.lastPathComponent
-        while store.pictureTrouble[moving.key] == nil && Date() < until.addingTimeInterval(10) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { store.pictureTrouble[moving.key] != nil }
         let bytes3 = store.asideBytes(moving.key)
         _ = store.retirePictures(moving.key, write: true)
         var movedThere = false
         store.move(moving.key, to: "Elsewhere", then: { _ in movedThere = true })
-        while !movedThere && Date() < until.addingTimeInterval(15) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { movedThere }
         try? fm.removeItem(at: blocker3)
         let now3 = store.current("RM3")
         expect(now3 != nil && now3?.key != moving.key && store.paper(moving.key) == nil, "after the move, the note found by its id at its new place")
         if let now3 {
             store.reaccept(now3.key, bytes3)
             let written3 = root.appending(path: NoteShelf.pictureFolder(id: "RM3") + "/" + name3)
-            while !fm.fileExists(atPath: written3.path) && Date() < until.addingTimeInterval(20) { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            wait { fm.fileExists(atPath: written3.path) }
             expect((try? Data(contentsOf: written3)) == Data("three".utf8), "Remove, move, undo: its bytes accepted again and written")
         }
     }
@@ -1231,8 +1287,7 @@ struct NoteStoreCheck {
         _ = store.change(paper.key) { $0.body += "\nmore" }
         var moved: PaperNote?? = .none
         store.move(paper.key, to: "Elsewhere", then: { moved = .some($0) })
-        let until = Date().addingTimeInterval(5)
-        while moved == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { moved != nil }
         expect((moved ?? nil) == nil && fm.fileExists(atPath: file.path) && !fm.fileExists(atPath: root.appending(path: "Elsewhere/Shared.md").path)
                && said.contains("wasn't moved"), "the move stops after the flush was kept beside, and says so", said)
     }
@@ -1266,8 +1321,7 @@ struct NoteStoreCheck {
         expect(store.beginImport(paper.key, NoteImport(files: [], png: png, tiff: nil, at: -1)) == nil, "a paste on an id-less note isn't recorded by its path's id")
         var given: String??
         store.ensureID(paper.key) { given = .some($0) }
-        let until = Date().addingTimeInterval(5)
-        while given == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { given != nil }
         let id = given ?? nil
         let written = text(file).map { NoteFile.parse($0, fallbackID: "?", fallbackDate: Date()).id }
         expect(id != nil && written == id && store.pendingIDs.isEmpty, "its id written into its file first, then told", "\(String(describing: id)) \(String(describing: written))")
@@ -1288,8 +1342,7 @@ struct NoteStoreCheck {
         var refused: String??
         if let stuck = store.notes.first(where: { $0.notebook == "IdLocked" }) {
             store.ensureID(stuck.key) { refused = .some($0) }
-            let until = Date().addingTimeInterval(5)
-            while refused == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+            wait { refused != nil }
         }
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path)
         try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: locked.appending(path: "Stuck.md").path)
@@ -1337,8 +1390,7 @@ struct NoteStoreCheck {
         // The note moves away; a new id-less file appears at its old path: never the moved note.
         var answered = false
         store.move(paper.key, to: "Away", then: { _ in answered = true })
-        let until = Date().addingTimeInterval(5)
-        while !answered && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { answered }
         try? Data("# Loose\nsomeone else's".utf8).write(to: file)
         let again = NoteStore.read(root).notes.first { $0.notebook == "Follow" && $0.url.lastPathComponent == "Loose.md" }
         expect(again != nil && again?.noteID == old && again?.instance != paper.instance, "a new file at the old path, with the old path's id",
@@ -1363,8 +1415,7 @@ struct NoteStoreCheck {
         var moved: PaperNote?
         var answered = false
         store.move(paper.key, to: "Elsewhere", then: { moved = $0; answered = true })
-        let until = Date().addingTimeInterval(5)
-        while !answered && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { answered }
         let landed = root.appending(path: "Elsewhere/Shopping.md")
         let written = text(landed).map { NoteFile.parse($0, fallbackID: "?", fallbackDate: Date()) }
         expect(moved != nil && written != nil && !NoteShelf.needsID(written?.id ?? "file:") && written?.body.contains("milk") == true,
@@ -1380,8 +1431,7 @@ struct NoteStoreCheck {
         for _ in 0..<2 {
             _ = store.make(NoteFile(body: "# Same title"), in: "Same", live: { true }) { made in answers.append(made?.url.lastPathComponent ?? "none") }
         }
-        let until = Date().addingTimeInterval(5)
-        while answers.count < 2 && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { answers.count >= 2 }
         expect(Set(answers) == ["Same title.md", "Same title 2.md"], "two at once: two files, two answers", "\(answers)")
     }
 
@@ -1438,8 +1488,7 @@ struct NoteStoreCheck {
         var saved: NoteCanvas?
         store.editCanvas("Board", .move("n1", .init(x: 3, y: 4))) { saved = $0 }
         store.editCanvas("Board", .move("n2", .init(x: 5, y: 6))) { _ in }
-        var until = Date().addingTimeInterval(3)
-        while !store.canvasUnsaved.contains("Board") && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { store.canvasUnsaved.contains("Board") }
         NoteJournal.queue.sync {}
         let journaled = NoteJournal.readCanvas(NoteJournal.canvasFile(boardKey))
         expect(store.canvasUnsaved.contains("Board") && store.canvasPending("Board").count == 2 && saved == nil
@@ -1449,8 +1498,7 @@ struct NoteStoreCheck {
         try? fm.removeItem(at: canvasFile)
         let later = NoteCanvas().applying(.move("n1", .init(x: 900, y: 900)), at: Date().timeIntervalSince1970 + 3600)
         try? Data(later.encoded().utf8).write(to: canvasFile)
-        until = Date().addingTimeInterval(8)
-        while saved == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { saved != nil }
         NoteJournal.queue.sync {}
         let landed = NoteCanvas.decode(text(folder.appending(path: NoteStore.canvasName)))
         expect(landed?.notes["n1"]?.x == 900 && landed?.notes["n2"]?.x == 5, "tried again, merged: the newer move elsewhere stays, its own edit lands",
@@ -1502,10 +1550,7 @@ struct NoteStoreCheck {
         NoteJournal.queue.sync {}
         store.drainCanvas()
         hold.signal()
-        NoteStore.io.sync {}
-        let until = Date().addingTimeInterval(1)
-        while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-        NoteJournal.queue.sync {}
+        idle(store)
         var left: [String] = []
         for stamped in NoteJournal.readCanvas(NoteJournal.canvasFile(drainKey))?.edits ?? [] {
             if case .move(let id, _) = stamped.edit { left.append(id) }
@@ -1533,18 +1578,12 @@ struct NoteStoreCheck {
         expect(fm.fileExists(atPath: NoteJournal.coverFile(pending.key).path) && left.holding.allSatisfy { !fm.fileExists(atPath: $0.path) },
                "journaled again before the moved-aside copy goes")
         store.reload()
-        var until = Date().addingTimeInterval(5)
-        while store.notebook("Quit") == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { store.notebook("Quit") != nil }
         expect(store.notebook("Quit")?.isPrivate == true, "Private at once after the launch, before any cover")
-        until = Date().addingTimeInterval(8)
         func onDisk() -> NoteFile? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) } }
-        while onDisk().map(NoteContract.isPrivate) != true && Date() < until {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-            store.reload()
-        }
+        reading(store) { onDisk().map(NoteContract.isPrivate) == true }
         expect(onDisk().map(NoteContract.isPrivate) == true, "and it lands on the cover made for it")
-        until = Date().addingTimeInterval(3)
-        while fm.fileExists(atPath: NoteJournal.coverFile(pending.key).path) && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)); NoteJournal.queue.sync {} }
+        idle(store)
         expect(!fm.fileExists(atPath: NoteJournal.coverFile(pending.key).path), "its journal entry goes once it landed")
     }
 
@@ -1567,9 +1606,8 @@ struct NoteStoreCheck {
         torn.set("private", "true")
         NoteJournal.queue.sync { _ = NoteJournal.keepCover(torn) }
         store.switchRoot(to: root, launch: true)
-        let until = Date().addingTimeInterval(3)
-        while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.1)) }
-        NoteStore.io.sync {}
+        wait { store.notesReady }
+        idle(store)
         let after = [text(folder.appending(path: NoteShelf.coverName)), text(folder.appending(path: "About this notebook (conflicted copy).md"))]
         expect(after == before && store.notebook("Torn")?.isPrivate == true, "a cover in conflict isn't written; the change shows and waits")
         try? fm.removeItem(at: folder)
@@ -1617,26 +1655,19 @@ struct NoteStoreCheck {
         let coverBURL = rootB.appending(path: "Same/\(NoteShelf.coverName)")
         _ = NoteStore.create(coverB.serialized(), at: coverBURL, root: rootB)
         let store = NoteStore(root: rootA)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         store.setCover("Same", fields: ["private": "true"])
         expect(store.notebook("Same")?.isPrivate == true, "Private at once in its own folder")
         var switched = false
         store.switchRoot(to: rootB) { switched = true }
-        settle(2)
-        store.reload()
-        settle(1.5)
+        wait { switched }
+        readAgain(store)
         let b = text(coverBURL).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) }
         expect(switched && b.map(NoteContract.isPrivate) == false && store.notebook("Same")?.isPrivate == false,
                "another folder's notebook of the same name: untouched, and not shown Private", text(coverBURL) ?? "nil")
         try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: coverAURL.path)
         store.switchRoot(to: rootA) {}
-        let until = Date().addingTimeInterval(8)
-        while text(coverAURL).map({ NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) }) != true && Date() < until {
-            settle(0.2)
-            store.reload()
-        }
+        reading(store) { text(coverAURL).map({ NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) }) == true }
         expect(text(coverAURL).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } == true, "back in its own folder, it lands there")
         for r in [rootA, rootB] { try? fm.removeItem(at: r) }
     }
@@ -1765,17 +1796,14 @@ struct NoteStoreCheck {
         let copyURL = folder.appending(path: "About this notebook (conflicted copy).md")
         _ = NoteStore.create(chosen.serialized(), at: copyURL, root: root)
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         store.reload()
-        let readBy = Date().addingTimeInterval(8)
-        while store.notes.first(where: { $0.url.lastPathComponent == copyURL.lastPathComponent && $0.notebook == "Promote" }) == nil && Date() < readBy { settle(0.1) }
+        wait { store.notes.first(where: { $0.url.lastPathComponent == copyURL.lastPathComponent && $0.notebook == "Promote" }) != nil }
         guard let copyPaper = store.notes.first(where: { $0.url.lastPathComponent == copyURL.lastPathComponent && $0.notebook == "Promote" }) else {
             expect(false, "the conflict copy is read", "\(store.notes.filter { $0.notebook == "Promote" }.map(\.url.path))"); return
         }
         expect(store.conflict(of: copyPaper)?.count == 2, "a cover and its copy are one conflict")
         store.keep(copyPaper)
-        let until = Date().addingTimeInterval(5)
-        while fm.fileExists(atPath: copyURL.path) && Date() < until { settle(0.1) }
+        wait { !fm.fileExists(atPath: copyURL.path) }
         let landed = (try? String(contentsOf: coverURL, encoding: .utf8)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) }
         expect(landed?.body.contains("The side to keep") == true && landed.map(NoteContract.isPrivate) == true && !fm.fileExists(atPath: copyURL.path),
                "the kept copy is now the cover file itself, and only then the copy goes")
@@ -1807,11 +1835,9 @@ struct NoteStoreCheck {
         let recovered = make(c, "About this notebook (recovered).md", id: "C-TWO", body: "# About this notebook\nC, recovered", isPrivate: true)
         let beforeB = text(coverB)
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         func paper(_ url: URL) -> PaperNote? { store.notes.first { $0.url.lastPathComponent == url.lastPathComponent && $0.notebook == url.deletingLastPathComponent().lastPathComponent } }
         store.reload()
-        let readBy = Date().addingTimeInterval(8)
-        while paper(recovered) == nil && Date() < readBy { settle(0.1) }
+        wait { paper(recovered) != nil }
         guard let copyPaper = paper(copyA), let recoveredPaper = paper(recovered), let canonicalC = paper(coverC) else { expect(false, "the covers are read"); return }
         expect(store.conflict(of: copyPaper)?.map(\.notebook).allSatisfy { $0 == "Original" } == true && store.conflict(of: copyPaper)?.count == 2,
                "a duplicated notebook's covers never group with the original's")
@@ -1819,17 +1845,14 @@ struct NoteStoreCheck {
                "a recovered cover with another id joins its notebook's group, both read only with Keep this one")
         expect(store.notebook("Recovered")?.isPrivate == true, "and counts for privacy while unresolved")
         store.keep(copyPaper)
-        var until = Date().addingTimeInterval(5)
-        while fm.fileExists(atPath: copyA.path) && Date() < until { settle(0.1) }
+        wait { !fm.fileExists(atPath: copyA.path) }
         // (The duplicated notebook's cover gets its own id meanwhile: only its id changes, never its words.)
         let coverBNow = text(coverB).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) }
         expect(text(coverA)?.contains("A, kept") == true && coverBNow?.body == beforeB.map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).body }
                && fm.fileExists(atPath: coverB.path), "Keep writes only within its own notebook folder")
         store.keep(canonicalC)
-        until = Date().addingTimeInterval(5)
-        while fm.fileExists(atPath: recovered.path) && Date() < until { settle(0.1) }
-        store.reload()
-        settle(1.5)
+        wait { !fm.fileExists(atPath: recovered.path) }
+        readAgain(store)
         expect(!fm.fileExists(atPath: recovered.path) && store.notebook("Recovered")?.isPrivate == false, "resolved, the notebook is what its cover says")
         for folder in [a, b, c] { try? fm.removeItem(at: folder) }
     }
@@ -1846,12 +1869,10 @@ struct NoteStoreCheck {
         let zCanvas = z.appending(path: NoteStore.canvasName)
         try? fm.createDirectory(at: zCanvas, withIntermediateDirectories: true)   // Z's canvas can't be written for now
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         store.reload()
-        var until = Date().addingTimeInterval(8)
-        while store.notebook("Zeta") == nil && Date() < until { settle(0.05) }
+        wait { store.notebook("Zeta") != nil }
         store.editCanvas("Zeta", .move("z1", .init(x: 9, y: 9))) { _ in }
-        settle(0.5)
+        idle(store)
         let zInstance = store.notebook("Zeta")?.instance ?? ""
         // A duplicate named so it sorts first: Zeta's cover is the one renewed.
         try? fm.createDirectory(at: a, withIntermediateDirectories: true)
@@ -1861,23 +1882,18 @@ struct NoteStoreCheck {
         privately.set("private", "true")
         store.coverPending[privately.key] = privately
         store.reload()
-        until = Date().addingTimeInterval(8)
         let renewed = NoteLibrary.renewedID("SHARED-COVER", folder: "Zeta")
         func idOnDisk(_ folder: URL) -> String? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).id } }
-        while idOnDisk(z) != renewed && Date() < until { settle(0.1) }
-        store.reload()
-        settle(1)
-        NoteJournal.queue.sync {}
+        wait { idOnDisk(z) == renewed }
+        readAgain(store)
         let journaled = NoteJournal.readCanvas(NoteJournal.canvasFile(CanvasQueue.folderKey(zInstance)))
         expect(journaled?.binding?.coverID == renewed && store.canvasWaiting.values.allSatisfy { $0.bound.coverID == renewed },
                "the renewal moved the waiting canvas edit's binding to the new id, in memory and in the journal")
         func privateOnDisk(_ folder: URL) -> Bool { text(folder.appending(path: NoteShelf.coverName)).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } == true }
-        until = Date().addingTimeInterval(8)
-        while !privateOnDisk(z) && Date() < until { settle(0.2); store.reload() }
+        reading(store) { privateOnDisk(z) }
         expect(privateOnDisk(z) && !privateOnDisk(a), "the Private change lands on its own notebook, never on the duplicate that kept the old id")
         try? fm.removeItem(at: zCanvas)
-        until = Date().addingTimeInterval(10)
-        while NoteCanvas.decode(text(zCanvas))?.notes["z1"] == nil && Date() < until { settle(0.2) }
+        reading(store) { NoteCanvas.decode(text(zCanvas))?.notes["z1"] != nil }
         expect(idOnDisk(z) == renewed && idOnDisk(a) == "SHARED-COVER", "the later folder's cover was renewed")
         expect(NoteCanvas.decode(text(zCanvas))?.notes["z1"]?.x == 9 && !fm.fileExists(atPath: a.appending(path: NoteStore.canvasName).path),
                "its waiting canvas edit lands in its own notebook, never in the one that now has its old cover id")
@@ -1895,39 +1911,32 @@ struct NoteStoreCheck {
         _ = NoteStore.create(cover.serialized(), at: a.appending(path: NoteShelf.coverName), root: root)
         _ = NoteStore.create(cover.serialized(), at: b.appending(path: NoteShelf.coverName), root: root)
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         // The read first, then the files' queue held, so the new id's write waits while the notebook is checked.
         store.reload()
         let hold = DispatchSemaphore(value: 0)
         holdAfterFirstRead(hold)
-        var until = Date().addingTimeInterval(8)
-        while store.notebook("Trip copy") == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { store.notebook("Trip copy") != nil }
         let expected = NoteLibrary.renewedID("TRIP-COVER", folder: "Trip copy")
         expect(store.renewing["Trip copy"] == expected && store.notebook("Trip copy")?.isPrivate == true && store.notebook("Trip")?.isPrivate == false,
                "the later folder's cover is getting its new id, and that notebook is Private until it lands")
         expect(store.coverID("Trip copy") == nil, "while its new id is being written, the renewed notebook's cover id isn't used as a key")
         hold.signal()
-        until = Date().addingTimeInterval(8)
         func idOnDisk(_ folder: URL) -> String? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).id } }
-        while idOnDisk(b) != expected && Date() < until { settle(0.1) }
-        until = Date().addingTimeInterval(5)
-        while store.renewing["Trip copy"] != nil && Date() < until { settle(0.1) }
-        store.reload()
-        settle(1.5)
+        wait { idOnDisk(b) == expected }
+        wait { store.renewing["Trip copy"] == nil }
+        readAgain(store)
         expect(idOnDisk(b) == expected && idOnDisk(a) == "TRIP-COVER" && text(b.appending(path: NoteShelf.coverName))?.contains("Trips") == true,
                "written: the later cover has its new id (its words kept), the first keeps its own")
         expect(store.coverID("Trip copy") == expected && store.coverID("Trip") == "TRIP-COVER" && store.notebook("Trip copy")?.isPrivate == false,
                "landed: each notebook's own id, and it's no longer Private")
         // Then everything kept by cover id stays separate.
         store.editCanvas("Trip copy", .move("n1", .init(x: 3, y: 3))) { _ in }
-        until = Date().addingTimeInterval(5)
-        while NoteCanvas.decode(text(b.appending(path: NoteStore.canvasName)))?.notes["n1"] == nil && Date() < until { settle(0.1) }
+        wait { NoteCanvas.decode(text(b.appending(path: NoteStore.canvasName)))?.notes["n1"] != nil }
         expect(NoteCanvas.decode(text(b.appending(path: NoteStore.canvasName)))?.notes["n1"]?.x == 3 && !fm.fileExists(atPath: a.appending(path: NoteStore.canvasName).path),
                "a canvas edit lands only in its own notebook")
         store.setCover("Trip copy", fields: ["private": "true"])
-        until = Date().addingTimeInterval(5)
         func privateOnDisk(_ folder: URL) -> Bool? { text(folder.appending(path: NoteShelf.coverName)).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } }
-        while privateOnDisk(b) != true && Date() < until { settle(0.1); store.reload() }
+        reading(store) { privateOnDisk(b) == true }
         expect(privateOnDisk(b) == true && privateOnDisk(a) == false, "a cover field lands only on its own notebook's cover")
         for folder in [a, b] { try? fm.removeItem(at: folder) }
     }
@@ -1986,23 +1995,19 @@ struct NoteStoreCheck {
         let coverB = b.appending(path: NoteShelf.coverName)
         _ = NoteStore.create(cover.serialized(), at: coverB, root: root)
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         store.reload()
         let hold = DispatchSemaphore(value: 0)
         holdAfterFirstRead(hold)
-        var until = Date().addingTimeInterval(8)
-        while store.renewing["Rec copy"] == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { store.renewing["Rec copy"] != nil }
         let renewed = NoteLibrary.renewedID("REC-COVER", folder: "Rec copy")
         // Meanwhile the file changes elsewhere: the renewal's write is kept beside it.
         var elsewhere = cover
         elsewhere.body = "# About this notebook\nRec, edited elsewhere"
         try? Data(elsewhere.serialized().utf8).write(to: coverB)
         hold.signal()
-        until = Date().addingTimeInterval(8)
         let copyB = b.appending(path: "About this notebook (conflicted copy).md")
-        while !fm.fileExists(atPath: copyB.path) && Date() < until { settle(0.1) }
-        store.reload()
-        settle(1.5)
+        wait { fm.fileExists(atPath: copyB.path) }
+        readAgain(store)
         expect(fm.fileExists(atPath: copyB.path) && !store.pendingIDs.contains(renewed) && store.renewing["Rec copy"] == nil,
                "a renewal kept beside the file: reconciled after a read, nothing left waiting for it")
         guard let canonical = store.notes.first(where: { $0.notebook == "Rec copy" && NoteLibrary.isCanonicalCover($0.url.lastPathComponent) && $0.version == nil }) else {
@@ -2010,10 +2015,9 @@ struct NoteStoreCheck {
         }
         expect(store.conflict(of: canonical)?.count == 2, "the copy shows as the cover's conflict")
         store.keep(canonical)
-        until = Date().addingTimeInterval(10)
         func idOnDisk() -> String? { text(coverB).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).id } }
-        while (fm.fileExists(atPath: copyB.path) || idOnDisk() != renewed) && Date() < until { settle(0.2); store.reload() }
-        settle(1)
+        reading(store) { !fm.fileExists(atPath: copyB.path) && idOnDisk() == renewed }
+        idle(store)
         expect(!fm.fileExists(atPath: copyB.path) && idOnDisk() == renewed && text(coverB)?.contains("edited elsewhere") == true
                && !store.pendingIDs.contains(renewed) && store.coverID("Rec copy") == renewed,
                "after Keep, the cover gets its own id cleanly (its words kept) and nothing waits", "\(idOnDisk() ?? "nil")")
@@ -2068,9 +2072,7 @@ struct NoteStoreCheck {
         let canvasFile = folder.appending(path: NoteStore.canvasName)
         try? fm.createDirectory(at: canvasFile, withIntermediateDirectories: true)   // writes fail for now
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         let instance = store.notebook("Downloading")?.instance ?? ""
         expect(store.coverID("Downloading") == nil && !instance.isEmpty && store.canvasEditable("Downloading"), "a cover not read: no cover id, but its folder is known")
         store.editCanvas("Downloading", .move("n1", .init(x: 7, y: 7))) { _ in }
@@ -2078,14 +2080,11 @@ struct NoteStoreCheck {
         let byFolder = NoteJournal.readCanvas(NoteJournal.canvasFile(CanvasQueue.folderKey(instance)))
         expect(byFolder?.edits.count == 1, "journaled at once by the notebook's folder")
         try? fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: coverURL.path)
-        store.reload()
-        settle(1.5)
-        NoteJournal.queue.sync {}
+        readAgain(store)
         expect(store.coverID("Downloading") == "COVER-DL" && NoteJournal.readCanvas(NoteJournal.canvasFile(CanvasQueue.folderKey(instance)))?.edits.count == 1
                && !fm.fileExists(atPath: NoteJournal.canvasFile("COVER-DL").path), "its cover id known, the edit stays keyed by its own folder")
         try? fm.removeItem(at: canvasFile)
-        let until = Date().addingTimeInterval(10)
-        while NoteCanvas.decode(text(canvasFile))?.notes["n1"] == nil && Date() < until { settle(0.2) }
+        reading(store) { NoteCanvas.decode(text(canvasFile))?.notes["n1"] != nil }
         NoteJournal.queue.sync {}
         expect(NoteCanvas.decode(text(canvasFile))?.notes["n1"]?.x == 7 && !fm.fileExists(atPath: NoteJournal.canvasFile(CanvasQueue.folderKey(instance)).path), "and lands")
         try? fm.removeItem(at: folder)
@@ -2103,12 +2102,10 @@ struct NoteStoreCheck {
         let canvasFile = folder.appending(path: NoteStore.canvasName)
         try? fm.createDirectory(at: canvasFile, withIntermediateDirectories: true)   // writes fail for now
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         let before = store.notebook("Replaced")?.instance ?? ""
         store.editCanvas("Replaced", .move("r1", .init(x: 4, y: 4))) { _ in }
-        settle(0.3)
+        idle(store)
         // The folder replaced: a new one (new inode) at the same path, its cover and a canvas of its own.
         let aside = root.appending(path: "Replaced-old")
         try? fm.moveItem(at: folder, to: aside)
@@ -2118,8 +2115,7 @@ struct NoteStoreCheck {
         try? Data(held.encoded().utf8).write(to: canvasFile)
         try? fm.removeItem(at: aside)
         store.reload()
-        let until = Date().addingTimeInterval(12)
-        while NoteCanvas.decode(text(canvasFile))?.notes["r1"] == nil && Date() < until { settle(0.2) }
+        reading(store) { NoteCanvas.decode(text(canvasFile))?.notes["r1"] != nil }
         NoteJournal.queue.sync {}
         let landed = NoteCanvas.decode(text(canvasFile))
         expect(store.notebook("Replaced")?.instance != before && landed?.notes["r1"]?.x == 4 && landed?.areas.first?.id == "kept"
@@ -2141,17 +2137,15 @@ struct NoteStoreCheck {
         let held = NoteCanvas().applying(.area(.init(id: "kept", label: "Kept", x: 0, y: 0, w: 10, h: 10)), at: 1)
         try? Data(held.encoded().utf8).write(to: canvasFile)
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         var read: NoteCanvas?
         store.canvas("Deleted") { read = $0 }
-        settle(0.5)
+        wait { read != nil }
         expect(read?.areas.first?.id == "kept", "the canvas read")
         try? fm.removeItem(at: canvasFile)
         try? fm.createDirectory(at: canvasFile, withIntermediateDirectories: true)   // writes fail for now
         store.editCanvas("Deleted", .move("d1", .init(x: 3, y: 3))) { _ in }
-        settle(0.3)
+        idle(store)
         try? fm.removeItem(at: folder)
         store.reload()
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
@@ -2162,8 +2156,7 @@ struct NoteStoreCheck {
             }
             return nil
         }
-        let until = Date().addingTimeInterval(10)
-        while rescued() == nil && Date() < until { settle(0.2) }
+        wait { rescued() != nil }
         let kept = rescued()
         expect(kept?.notes["d1"]?.x == 3 && kept?.areas.first?.id == "kept", "a notebook really deleted: rescued with the whole canvas, its areas and the edit",
                kept.map { $0.encoded() } ?? "nil")
@@ -2184,17 +2177,15 @@ struct NoteStoreCheck {
         let held = NoteCanvas().applying(.area(.init(id: "kept", label: "Kept", x: 0, y: 0, w: 10, h: 10)), at: 1)
         try? Data(held.encoded().utf8).write(to: canvasFile)
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         var read: NoteCanvas?
         store.canvas("Unsure") { read = $0 }
-        settle(0.5)
+        wait { read != nil }
         expect(read?.areas.first?.id == "kept", "the canvas read")
         try? fm.removeItem(at: canvasFile)
         try? fm.createDirectory(at: canvasFile, withIntermediateDirectories: true)   // writes fail for now
         store.editCanvas("Unsure", .move("u1", .init(x: 6, y: 6))) { _ in }
-        settle(0.3)
+        idle(store)
         let key = store.canvasWaiting.keys.first ?? ""
         // Replaced by a different notebook at the same path, and a copy elsewhere keeping the old cover id.
         try? fm.removeItem(at: folder)
@@ -2204,8 +2195,7 @@ struct NoteStoreCheck {
         _ = NoteStore.create(other.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
         try? fm.createDirectory(at: copy, withIntermediateDirectories: true)
         _ = NoteStore.create(cover.serialized(), at: copy.appending(path: NoteShelf.coverName), root: root)
-        store.reload()
-        settle(2)
+        readAgain(store)
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
         func rescued(_ name: String) -> NoteCanvas? {
             for dir in (try? fm.contentsOfDirectory(at: unsaved, includingPropertiesForKeys: nil)) ?? [] {
@@ -2221,8 +2211,7 @@ struct NoteStoreCheck {
         // Ten minutes of complete reads later.
         store.canvasAmbiguousSince[key] = Date().addingTimeInterval(-NoteShelf.ambiguityLimit - 1)
         store.reload()
-        let until = Date().addingTimeInterval(10)
-        while rescued("Unsure") == nil && Date() < until { settle(0.2) }
+        wait { rescued("Unsure") != nil }
         NoteJournal.queue.sync {}
         let kept = rescued("Unsure")
         expect(kept?.notes["u1"]?.x == 6 && kept?.areas.first?.id == "kept" && untouched() && store.canvasWaiting[key] == nil
@@ -2256,9 +2245,7 @@ struct NoteStoreCheck {
         let store = NoteStore(root: root)
         var said: [String] = []
         store.onProblem = { said.append($0) }
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         expect(store.notebook("Locked")?.isPrivate == true && store.notebook("Maybe")?.isPrivate == false, "the covers as written")
         // Made for a notebook whose folder is gone: another notebook now at its path, its cover id in a copy elsewhere.
         var privately = CoverFields(notebook: "Maybe", root: store.root.path, coverID: "COVER-LOST", folderID: "0:1", path: "Maybe")
@@ -2269,8 +2256,7 @@ struct NoteStoreCheck {
         var publicly = CoverFields(notebook: "Locked", root: store.root.path, coverID: "COVER-LOCKED-OLD", folderID: "0:2", path: "Locked")
         publicly.set("private", "")
         store.coverPending[publicly.key] = publicly
-        store.reload()
-        settle(1.5)
+        readAgain(store)
         let books = store.privateBooks
         expect(store.notebook("Maybe")?.isPrivate == true && store.notebook("Maybe elsewhere")?.isPrivate == true
                && books.contains("Maybe") && books.contains("Maybe elsewhere")
@@ -2283,9 +2269,7 @@ struct NoteStoreCheck {
                "an ambiguous change making one public waits and changes nothing")
         // Ten minutes of complete reads later: dropped, said plainly, out of the journal, and the candidates as written.
         store.coverAmbiguousSince[privately.key] = Date().addingTimeInterval(-NoteShelf.ambiguityLimit - 1)
-        store.reload()
-        settle(1.5)
-        NoteJournal.queue.sync {}
+        readAgain(store)
         expect(store.coverPending[privately.key] == nil && said.contains("Petal couldn't tell which notebook to make Private. Set it again.")
                && !fm.fileExists(atPath: NoteJournal.coverFile(privately.key).path)
                && store.notebook("Maybe")?.isPrivate == false && store.notebook("Maybe elsewhere")?.isPrivate == false && !privateOnDisk(here),
@@ -2293,7 +2277,7 @@ struct NoteStoreCheck {
         // A launch recovering one that's still ambiguous: dropped on its first complete read, and its copy goes.
         said = []
         let waiting = store.recoverCovers([privately])
-        settle(1)
+        idle(store)
         expect(store.coverPending[privately.key] == nil && said.contains("Petal couldn't tell which notebook to make Private. Set it again.")
                && waiting.allSatisfy(\.isEmpty), "recovered at launch and still ambiguous: dropped and said at once", "\(said)")
         store.coverPending[publicly.key] = nil
@@ -2317,9 +2301,7 @@ struct NoteStoreCheck {
         let old = NoteStore.bindingNow(folder, root: root)
         expect(NoteStore.writeCanvas(.move("p", .init(x: 1, y: 1)), binding: old, in: folder, root: root)?.notes["p"] != nil, "its own folder: written")
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         // The files' queue held: the write is queued, and the folder is replaced by another notebook meanwhile.
         let hold = DispatchSemaphore(value: 0)
         NoteStore.io.async { hold.wait() }
@@ -2327,8 +2309,7 @@ struct NoteStoreCheck {
         try? fm.removeItem(at: folder)
         makeNotebook("COVER-SOMEONE-ELSE")
         hold.signal()
-        settle(1)
-        NoteJournal.queue.sync {}
+        idle(store)
         let key = store.canvasWaiting.keys.first ?? ""
         expect(NoteCanvas.decode(text(canvasFile))?.notes["q1"] == nil && store.canvasWaiting[key]?.edits.count == 1
                && NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.edits.count == 1,
@@ -2357,33 +2338,26 @@ struct NoteStoreCheck {
         let canvasB = rootB.appending(path: "Shared").appending(path: NoteStore.canvasName)
         try? fm.createDirectory(at: canvasA, withIntermediateDirectories: true)   // A's writes fail for now
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         store.editCanvas("Shared", .move("s1", .init(x: 5, y: 5))) { _ in }
-        settle(0.3)
+        idle(store)
         let key = store.canvasWaiting.keys.first ?? ""
         var switched = false
         store.switchRoot(to: rootB) { switched = true }
-        var until = Date().addingTimeInterval(8)
-        while (!switched || !store.loaded) && Date() < until { settle(0.1) }
-        store.reload()
-        settle(1.5)
-        NoteJournal.queue.sync {}
+        wait { switched && store.loaded }
+        readAgain(store)
         expect(store.canvasWaiting[key] == nil && NoteCanvas.decode(text(canvasB))?.notes["s1"] == nil
                && NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.edits.count == 1,
                "after a switch: the old folder's session is gone, the edit waits in the journal, never written into the other folder's notebook of the same name and cover")
         // Back in its own folder: a fresh session takes it from the journal, and it lands once the canvas can be written.
         var home = false
         store.switchRoot(to: root) { home = true }
-        until = Date().addingTimeInterval(8)
-        while (!home || !store.loaded) && Date() < until { settle(0.1) }
-        settle(0.5)
+        wait { home && store.loaded }
+        idle(store)
         expect(store.canvasWaiting[key]?.edits.count == 1, "back in its folder: a fresh session takes it from the journal")
         try? fm.removeItem(at: canvasA)
         store.reload()
-        until = Date().addingTimeInterval(10)
-        while NoteCanvas.decode(text(canvasA))?.notes["s1"] == nil && Date() < until { settle(0.2) }
+        reading(store) { NoteCanvas.decode(text(canvasA))?.notes["s1"] != nil }
         NoteJournal.queue.sync {}
         expect(NoteCanvas.decode(text(canvasA))?.notes["s1"]?.x == 5 && !fm.fileExists(atPath: NoteJournal.canvasFile(key).path)
                && NoteCanvas.decode(text(canvasB))?.notes["s1"] == nil, "and lands in its own notebook, never the other folder's")
@@ -2418,16 +2392,13 @@ struct NoteStoreCheck {
         cover.cover = true
         _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         func switchTo(_ next: URL) {
             var done = false
             store.switchRoot(to: next) { done = true }
-            let until = Date().addingTimeInterval(8)
-            while (!done || !store.loaded) && Date() < until { settle(0.05) }
-            settle(1)
+            wait { done && store.loaded }
+            idle(store)
         }
-        store.reload()
-        settle(1)
+        readAgain(store)
         // A color change in flight when the folder switches.
         store.setCover("Roundtrip", fields: ["color": "#336699"])
         expect(!store.coverLanding.isEmpty, "a cover write in flight")
@@ -2436,8 +2407,7 @@ struct NoteStoreCheck {
         switchTo(root)
         store.setCover("Roundtrip", fields: ["private": "true"])
         func onDisk() -> NoteFile? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) } }
-        let until = Date().addingTimeInterval(8)
-        while onDisk().map(NoteContract.isPrivate) != true && Date() < until { settle(0.2); store.reload() }
+        reading(store) { onDisk().map(NoteContract.isPrivate) == true }
         expect(onDisk().map(NoteContract.isPrivate) == true && onDisk()?.color == "#336699" && store.coverPending.isEmpty,
                "back in its folder: the Private change saves, and the change from before lands too", text(folder.appending(path: NoteShelf.coverName)) ?? "nil")
         try? fm.removeItem(at: folder)
@@ -2463,29 +2433,23 @@ struct NoteStoreCheck {
         let canvasA = root.appending(path: "Twin").appending(path: NoteStore.canvasName)
         try? fm.createDirectory(at: canvasA, withIntermediateDirectories: true)   // A's writes fail for now
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         store.editCanvas("Twin", .move("t1", .init(x: 3, y: 3))) { _ in }
-        settle(0.3)
+        idle(store)
         let key = store.canvasWaiting.keys.first ?? ""
         var done = false
         store.switchRoot(to: rootB) { done = true }
-        var until = Date().addingTimeInterval(8)
-        while (!done || !store.loaded) && Date() < until { settle(0.05) }
+        wait { done && store.loaded }
         let renewed = NoteLibrary.renewedID("COVER-TWIN", folder: "Twin")
         func idOnDisk(_ folder: URL) -> String? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).id } }
-        until = Date().addingTimeInterval(8)
-        while idOnDisk(rootB.appending(path: "Twin")) != renewed && Date() < until { settle(0.1); store.reload() }
-        settle(0.5)
-        NoteJournal.queue.sync {}
+        reading(store) { idOnDisk(rootB.appending(path: "Twin")) == renewed }
+        idle(store)
         expect(idOnDisk(rootB.appending(path: "Twin")) == renewed && store.canvasWaiting[key] == nil
                && NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.binding?.coverID == "COVER-TWIN",
                "a root A entry is never renewed by a notebook in root B: not in B's session, and unchanged in the journal")
         var back = false
         store.switchRoot(to: root) { back = true }
-        until = Date().addingTimeInterval(8)
-        while !back && Date() < until { settle(0.05) }
+        wait { back }
         store.drainCanvas()
         NoteJournal.ackCanvas(key, wrote: Set(NoteJournal.readCanvas(NoteJournal.canvasFile(key))?.edits.map(\.id) ?? []))
         try? fm.removeItem(at: root.appending(path: "Twin"))
@@ -2509,21 +2473,18 @@ struct NoteStoreCheck {
         let store = NoteStore(root: root)
         var said: [String] = []
         store.onProblem = { said.append($0) }
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
-        store.reload()
-        settle(1)
+        readAgain(store)
         // Confirmed in A: what NotesModel captures before asking and waiting.
         let session = store.session
         guard let binding = store.binding("Doomed") else { return expect(false, "the notebook's binding") }
         var done = false
         store.switchRoot(to: rootB) { done = true }
-        var until = Date().addingTimeInterval(8)
-        while (!done || !store.loaded) && Date() < until { settle(0.05) }
-        settle(0.5)
+        wait { done && store.loaded }
+        idle(store)
         expect(!store.current(session) && store.notebook("Doomed") != nil, "after the switch: the session it was confirmed in is over")
         var trashed: Bool?
         store.trashNotebook("Doomed", binding: binding) { trashed = $0 }
-        settle(0.5)
+        wait { trashed != nil }
         expect(trashed == false && fm.fileExists(atPath: rootB.appending(path: "Doomed/Kept.md").path) && fm.fileExists(atPath: root.appending(path: "Doomed/Kept.md").path),
                "the other folder's notebook of the same name is untouched, and so is the one confirmed (in a folder not in use)", "\(said)")
         // Replaced on disk between the request and the Trash: the binding is checked inside the coordinated step.
@@ -2540,14 +2501,12 @@ struct NoteStoreCheck {
         _ = NoteStore.create(other.serialized(), at: doomedB.appending(path: NoteShelf.coverName), root: rootB)
         _ = NoteStore.create("someone else's", at: doomedB.appending(path: "Theirs.md"), root: rootB)
         hold.signal()
-        until = Date().addingTimeInterval(5)
-        while trashed == nil && Date() < until { settle(0.05) }
+        wait { trashed != nil }
         expect(trashed == false && fm.fileExists(atPath: doomedB.appending(path: "Theirs.md").path),
                "another notebook there by the time the Trash runs: untouched")
         var back = false
         store.switchRoot(to: root) { back = true }
-        until = Date().addingTimeInterval(8)
-        while !back && Date() < until { settle(0.05) }
+        wait { back }
         try? fm.removeItem(at: root.appending(path: "Doomed"))
         try? fm.removeItem(at: rootB)
     }
@@ -2566,13 +2525,11 @@ struct NoteStoreCheck {
             _ = NoteStore.create(cover.serialized(), at: folder.appending(path: NoteShelf.coverName), root: root)
         }
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         func switchTo(_ next: URL) {
             var done = false
             store.switchRoot(to: next) { done = true }
-            let until = Date().addingTimeInterval(8)
-            while (!done || !store.loaded) && Date() < until { settle(0.05) }
-            settle(1)
+            wait { done && store.loaded }
+            idle(store)
         }
         // The folder switches in the same turn the read starts the renewal: its write's completion never comes back.
         var underWay = false, done = false
@@ -2582,24 +2539,20 @@ struct NoteStoreCheck {
             store.switchRoot(to: rootB) { done = true }
         }
         store.reload()
-        var until = Date().addingTimeInterval(5)
-        while !underWay && Date() < until { settle(0.05) }
+        wait { underWay }
         store.onChange = {}
         expect(underWay, "a renewal under way when the folder switches")
-        until = Date().addingTimeInterval(8)
-        while (!done || !store.loaded) && Date() < until { settle(0.05) }
+        wait { done && store.loaded }
         expect(store.renewing.isEmpty && store.pendingIDs.isEmpty && store.coverLanding.isEmpty, "the new folder's session starts with nothing in flight")
         switchTo(root)
         let renewed = NoteLibrary.renewedID("COVER-ROUND-DUP", folder: "Zed round")
         func onDisk(_ name: String) -> NoteFile? {
             text(root.appending(path: name).appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) }
         }
-        until = Date().addingTimeInterval(8)
-        while onDisk("Zed round")?.id != renewed && Date() < until { settle(0.2); store.reload() }
+        reading(store) { onDisk("Zed round")?.id == renewed }
         store.setCover("Zed round", fields: ["private": "true"])
         store.setCover("Aaa round", fields: ["color": "#112233"])
-        until = Date().addingTimeInterval(10)
-        while (onDisk("Zed round").map(NoteContract.isPrivate) != true || onDisk("Aaa round")?.color != "#112233") && Date() < until { settle(0.2); store.reload() }
+        reading(store) { onDisk("Zed round").map(NoteContract.isPrivate) == true && onDisk("Aaa round")?.color == "#112233" }
         expect(onDisk("Zed round")?.id == renewed && onDisk("Zed round").map(NoteContract.isPrivate) == true
                && onDisk("Aaa round")?.id == "COVER-ROUND-DUP" && onDisk("Aaa round")?.color == "#112233" && !onDisk("Aaa round").map(NoteContract.isPrivate)!,
                "back after a switch during a renewal: the renewal is on disk, and cover changes save on the right notebooks")
@@ -2623,23 +2576,19 @@ struct NoteStoreCheck {
         try? fm.createDirectory(at: blocker.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? Data("not a folder".utf8).write(to: blocker)
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         func switchTo(_ next: URL) {
             var done = false
             store.switchRoot(to: next) { done = true }
-            let until = Date().addingTimeInterval(10)
-            while (!done || !store.loaded) && Date() < until { settle(0.05) }
-            settle(0.5)
+            wait { done && store.loaded }
+            idle(store)
         }
-        store.reload()
-        settle(1)
+        readAgain(store)
         let bytes = Data("px-switch-bytes".utf8)
         guard let paper = store.notes.first(where: { $0.noteID == "PX-SWITCH" }),
               let refs = store.acceptPictures(paper.key, [("png", bytes, "")]) else { return expect(false, "the picture accepted") }
         let name = refs[0].file.lastPathComponent
         _ = store.change(paper.key) { $0.body += "\n![](\(refs[0].path))" }
-        var until = Date().addingTimeInterval(6)
-        while store.pictureTrouble[paper.key] == nil && Date() < until { settle(0.05) }
+        wait { store.pictureTrouble[paper.key] != nil }
         NoteJournal.queue.sync {}
         expect(store.pictureTrouble[paper.key] != nil && NoteJournal.read(NoteJournal.file("PX-SWITCH"))?.pictures.contains { $0.data == bytes } == true,
                "the picture couldn't be saved: set aside, its bytes in the journal")
@@ -2648,8 +2597,7 @@ struct NoteStoreCheck {
         // Edited after coming back.
         guard let back = store.notes.first(where: { $0.noteID == "PX-SWITCH" && $0.version == nil }) else { return expect(false, "the note is back") }
         _ = store.change(back.key) { $0.body += "\nmore words" }
-        settle(1)
-        NoteJournal.queue.sync {}
+        idle(store)
         // Where its bytes are now: in Unsaved notes with the note, in the journal (live or being recovered), or landed.
         let unsaved = Config.supportFolder.appending(path: "Unsaved notes")
         func rescuedWithNote() -> Bool {
@@ -2680,8 +2628,7 @@ struct NoteStoreCheck {
             let leftovers = NoteJournal.queue.sync { NoteJournal.leftovers() }
             for holding in leftovers { NoteJournal.recover(holding, root: root) }
         }
-        until = Date().addingTimeInterval(4)
-        while !(rescuedWithNote() || (try? Data(contentsOf: landed)) == bytes) && Date() < until { settle(0.1) }
+        wait { rescuedWithNote() || (try? Data(contentsOf: landed)) == bytes }
         expect(rescuedWithNote() || (try? Data(contentsOf: landed)) == bytes,
                "the picture's bytes land once writable, or the note is in Unsaved notes with its picture")
         try? fm.removeItem(at: folder)
@@ -2699,7 +2646,6 @@ struct NoteStoreCheck {
         let folder = root.appending(path: "Ready")
         try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
         _ = NoteStore.create(NoteFile(id: "READY-1", body: "there").serialized(), at: folder.appending(path: "There.md"), root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         func files() -> [String] { ((try? fm.contentsOfDirectory(atPath: folder.path)) ?? []).sorted() }
         // Everything from outside tried while the folder isn't entered: all refused, nothing on disk, and it's said.
         func refusedAll(_ store: NoteStore) -> Bool {
@@ -2722,13 +2668,12 @@ struct NoteStoreCheck {
         NoteJournal.queue.async { [hold] in hold.wait() }
         var launched = false
         launching.switchRoot(to: root, launch: true) { launched = true }
-        settle(0.5)
+        turnBeforeJournal()
         expect(!launched && refusedAll(launching) && saidAtLaunch.contains(NoteStore.gettingReady) && launching.notes.isEmpty,
                "at launch, the resolved folder the same as the first: nothing from outside until its recovery and first read are done",
                "\(saidAtLaunch)")
         hold.signal()
-        var until = Date().addingTimeInterval(8)
-        while !(launched && launching.notesReady) && Date() < until { settle(0.05) }
+        wait { launched && launching.notesReady }
         expect(launched && launching.notesReady && launching.notes.contains { $0.noteID == "READY-1" }, "recovery done and the first read in: ready")
 
         // On a switch back: the same.
@@ -2737,23 +2682,20 @@ struct NoteStoreCheck {
         store.onProblem = { said.append($0) }
         var away = false
         store.switchRoot(to: rootB) { away = true }
-        until = Date().addingTimeInterval(8)
-        while !away && Date() < until { settle(0.05) }
+        wait { away }
         hold = DispatchSemaphore(value: 0)
         NoteJournal.queue.async { [hold] in hold.wait() }
         var back = false
         store.switchRoot(to: root) { back = true }
-        settle(0.5)
+        turnBeforeJournal()
         expect(!back && store.root == root && refusedAll(store) && said.contains(NoteStore.gettingReady),
                "a switch back, its recovery not done: notes aren't ready; nothing is made or changed, and it's said", "\(said)")
         hold.signal()
-        until = Date().addingTimeInterval(8)
-        while !(back && store.notesReady) && Date() < until { settle(0.05) }
+        wait { back && store.notesReady }
         expect(store.notesReady, "recovery done and the first read in: ready")
         var landed: PaperNote?
         _ = store.make(NoteFile(body: "made once ready"), in: "Ready") { landed = $0 }
-        until = Date().addingTimeInterval(5)
-        while landed == nil && Date() < until { settle(0.05) }
+        wait { landed != nil }
         expect(landed.map { (text($0.url) ?? "").contains("made once ready") } == true, "once ready, a new note is made")
         try? fm.removeItem(at: folder)
         try? fm.removeItem(at: rootB)
@@ -2764,7 +2706,6 @@ struct NoteStoreCheck {
     /// path, with no other file event or read needed.
     @MainActor static func recoveredCoverLands(root: URL) {
         let fm = FileManager.default
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         func privateOnDisk(_ folder: URL) -> Bool {
             text(folder.appending(path: NoteShelf.coverName)).map { NoteContract.isPrivate(NoteFile.parse($0, fallbackID: "", fallbackDate: Date())) } == true
         }
@@ -2784,13 +2725,11 @@ struct NoteStoreCheck {
         let store = NoteStore(root: root)
         var startedByEntering = false
         store.switchRoot(to: root, launch: true) { startedByEntering = store.reads == 1 && !store.coverLanding.isEmpty }
-        var until = Date().addingTimeInterval(8)
-        while !privateOnDisk(atLaunch) && Date() < until { settle(0.05) }
+        wait { privateOnDisk(atLaunch) }
         NoteJournal.queue.sync {}
         expect(startedByEntering && privateOnDisk(atLaunch) && store.reads == 1,
                "a recovered Private change lands on its existing cover with the folder's first read, no other file event", "reads \(store.reads)")
-        settle(0.3)
-        NoteJournal.queue.sync {}
+        idle(store)
         expect(!fm.fileExists(atPath: NoteJournal.coverFile(kept.key).path), "and leaves the journal once written")
         // One recovered at launch that's ambiguous is dropped inside the folder's entering (and asks for a read
         // there): the folder is still entered once, by the one sequence.
@@ -2804,8 +2743,8 @@ struct NoteStoreCheck {
         var entered = 0
         var enteredSession: RootSession?
         again.switchRoot(to: root, launch: true) { entered += 1; enteredSession = again.session }
-        settle(1.5)
-        NoteJournal.queue.sync {}
+        wait { entered > 0 }
+        idle(again)
         expect(entered == 1 && again.session === enteredSession && again.notesReady && again.coverPending[unsure.key] == nil
                && saidAgain.contains(unsure.droppedWords) && !privateOnDisk(confused) && !fm.fileExists(atPath: NoteJournal.coverFile(unsure.key).path),
                "a change dropped while its folder is entered: the folder is entered once, and the read it asks for comes after",
@@ -2817,16 +2756,14 @@ struct NoteStoreCheck {
         let onSwitch = notebook("Stalled too", "COVER-STALLED-2")
         var away = false
         store.switchRoot(to: rootB) { away = true }
-        until = Date().addingTimeInterval(8)
-        while !away && Date() < until { settle(0.05) }
+        wait { away }
         var second = CoverFields(notebook: "Stalled too", root: root.path, coverID: "COVER-STALLED-2", folderID: NoteStore.instance(of: onSwitch), path: "Stalled too")
         second.set("private", "true")
         NoteJournal.queue.sync { _ = NoteJournal.keepCover(second) }
         var back = false
         let readsBefore = store.reads
         store.switchRoot(to: root) { back = true }
-        until = Date().addingTimeInterval(8)
-        while !(back && privateOnDisk(onSwitch)) && Date() < until { settle(0.05) }
+        wait { back && privateOnDisk(onSwitch) }
         expect(back && privateOnDisk(onSwitch) && store.reads == 1 && readsBefore >= 1,
                "and on a switch back: replayed with that folder's first read", "reads \(store.reads)")
         for folder in [atLaunch, onSwitch] { try? fm.removeItem(at: folder) }
@@ -2845,10 +2782,8 @@ struct NoteStoreCheck {
         _ = NoteStore.create(NoteFile(id: "LATE-1", body: "typed before").serialized(), at: landsFile, root: root)
         _ = NoteStore.create(NoteFile(id: "LATE-2", body: "typed before too").serialized(), at: blockedFile, root: root)
         let store = NoteStore(root: root)
-        func settle(_ seconds: Double) { let until = Date().addingTimeInterval(seconds); while Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) } }
         store.reload()
-        var until = Date().addingTimeInterval(8)
-        while !store.notesReady && Date() < until { settle(0.05) }
+        wait { store.notesReady }
         guard let lands = store.notes.first(where: { $0.noteID == "LATE-1" }), let blocked = store.notes.first(where: { $0.noteID == "LATE-2" }) else {
             return expect(false, "the notes are read")
         }
@@ -2868,16 +2803,14 @@ struct NoteStoreCheck {
         func rescued(_ words: String) -> Bool {
             ((fm.enumerator(atPath: unsaved.path)?.allObjects as? [String]) ?? []).contains { $0.hasSuffix(".md") && (text(unsaved.appending(path: $0)) ?? "").contains(words) }
         }
-        until = Date().addingTimeInterval(8)
-        while !(away && (text(landsFile) ?? "").contains("late words") && rescued("late and blocked")) && Date() < until { settle(0.1) }
+        wait { away && (text(landsFile) ?? "").contains("late words") && rescued("late and blocked") }
         NoteJournal.queue.sync {}
         expect((text(landsFile) ?? "").contains("late words") && !fm.fileExists(atPath: NoteJournal.file("LATE-1").path),
                "its text is stored in its note, in the folder it was typed in")
         expect(rescued("late and blocked"), "one that can't land there is in Unsaved notes")
         var back = false
         store.switchRoot(to: root) { back = true }
-        until = Date().addingTimeInterval(8)
-        while !back && Date() < until { settle(0.05) }
+        wait { back }
         try? fm.removeItem(at: folder)
         try? fm.removeItem(at: rootB)
     }
@@ -2894,18 +2827,13 @@ struct NoteStoreCheck {
         try? Data("# About this notebook\nWritten by hand, no front matter.".utf8).write(to: plain.appending(path: NoteShelf.coverName))
         let store = NoteStore(root: root)
         store.reload()
-        var until = Date().addingTimeInterval(5)
-        while store.notebook("Plain") == nil && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        wait { store.notebook("Plain") != nil }
         expect(store.notebook("Plain")?.cover != nil && store.notebook("Bare")?.cover == nil, "a cover with no front matter is its notebook's cover")
         store.setCover("Bare", fields: ["private": "true"])
         store.setCover("Plain", fields: ["private": "true"])
         expect(store.notebook("Bare")?.isPrivate == true && store.notebook("Plain")?.isPrivate == true, "Private at once, in memory")
-        until = Date().addingTimeInterval(8)
         func onDisk(_ folder: URL) -> NoteFile? { text(folder.appending(path: NoteShelf.coverName)).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()) } }
-        while (onDisk(bare).map(NoteContract.isPrivate) != true || onDisk(plain).map(NoteContract.isPrivate) != true) && Date() < until {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-            store.reload()
-        }
+        reading(store) { onDisk(bare).map(NoteContract.isPrivate) == true && onDisk(plain).map(NoteContract.isPrivate) == true }
         expect(onDisk(bare).map(NoteContract.isPrivate) == true && onDisk(bare)?.cover == true, "no cover: one made, and it says private", text(bare.appending(path: NoteShelf.coverName)) ?? "nil")
         let written = onDisk(plain)
         expect(written.map(NoteContract.isPrivate) == true && written?.cover == true && !NoteShelf.needsID(written?.id ?? "file:")

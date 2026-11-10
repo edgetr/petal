@@ -23,7 +23,7 @@ struct PetalProcessCheck {
             [petal, "--bench-windows", "--runs", "20", "--only", "Chat, 60 messages", "--json", "/tmp/a.json"],
             [petal, "--bench-windows-child", "settings"], [petal, "--bench-windows-idle", "Chat, 60 messages"],
             [petal, "--snapshot", "/tmp/snap"], [petal, "--routines-check", "--ai"], [petal, "--restore-dock"],
-            [petal, "--helpers-check"], [petal, "--helpers-check", "--ai"], [petal, "--viewer-check", "/tmp/a.pdf"],
+            [petal, "--helpers-check"], [petal, "--helpers-check", "--ai"], [petal, "--viewer-check", "/tmp/a.pdf"], [petal, "--viewer-check"],
             [petal, "mode", "social"], [petal, "doctor"], [petal, "report"], [petal, "run", "--key", "x", "--", "env"],
             [petal, "no-such-command"], [petal, "-psn_0_1", "--mcp"],
         ]
