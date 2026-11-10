@@ -494,12 +494,27 @@ final class ComputerUse {
     /// (unless the reply may use the browser already). False when the reply ended while they were asked.
     /// `asked`: the Buy card's number (endBuys); a newer card asked in that window since means no Buy. `revision`: the
     /// card as shown on the Buy card (`Vault.revision`); only that version of it fills.
-    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, map: Map, card: String, revision: Int, asked: Int) -> Bool {
-        guard live(caller, token), let current = sessions[caller], let window = map.windowID, buyCards[window] == asked,
+    /// `map`: the window petal_ui read, watched while the Buy lasts; nil for a page of the run's own browser, which
+    /// says itself when it moves on (RunBrowser.onLeft).
+    func allowCheckout(_ caller: String, token: Acting.Cancel, place: Vault.Place, window: CGWindowID, watching map: Map?, card: String, revision: Int, asked: Int) -> Bool {
+        guard live(caller, token), let current = sessions[caller], buyCards[window] == asked,
               let bought = Vault.Checkout(place: place, window: window, card: card, revision: revision, turn: Self.turnName(current)) else { return false }
         sessions[caller]?.checkouts.removeAll { $0.window == window }
         sessions[caller]?.checkouts.append(bought)
-        watchBuy(map)
+        if let map { watchBuy(map) }
+        return true
+    }
+
+    /// The reply `token` came from may use `app` already (the person said so on its card, this reply): for what a
+    /// reply uses another way than a window petal_ui read (a browser of its own, RunBrowserTool.swift).
+    func allowed(_ caller: String, token: Acting.Cancel, app: String) -> Bool {
+        live(caller, token) && sessions[caller]?.apps.contains(app) == true
+    }
+
+    /// The person just let the reply use `app`. False when the reply ended while they were asked.
+    func allow(_ caller: String, token: Acting.Cancel, app: String) -> Bool {
+        guard live(caller, token) else { return false }
+        sessions[caller]?.apps.insert(app)
         return true
     }
 

@@ -280,7 +280,8 @@ final class DockController {
 
     nonisolated static func runningApps() -> [String: NSRunningApplication] {
         var running: [String: NSRunningApplication] = [:]
-        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular {
+        // Never a browser Petal started for a run (the same app as the person's, as a second process).
+        for app in NSWorkspace.shared.personsApplications where app.activationPolicy == .regular {
             if let id = app.bundleIdentifier, running[id] == nil { running[id] = app }
         }
         return running
@@ -506,7 +507,7 @@ final class DockController {
         Windows.focusing.cancel()   // first, whatever this click turns out to be: an earlier one's focus stands down
         if Sites.isWeb(item.id) { Sites.open(item.id); return }
         if app.claude.openReady(app: item.id) { return }   // its note is done: its window, and the note on it
-        guard item.running, let running = NSRunningApplication.runningApplications(withBundleIdentifier: item.id).first else {
+        guard item.running, let running = NSRunningApplication.persons(withBundleIdentifier: item.id).first else {
             launch(item.id)
             return
         }
@@ -548,6 +549,9 @@ final class DockController {
         setPolling()   // once a second until its window shows
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
+        // While a run has a browser of its own going, macOS would take that copy for the app: the person's own is
+        // opened as a new one.
+        if RunBrowsers.running(bundle: id) { configuration.createsNewApplicationInstance = true }
         if files.isEmpty {
             NSWorkspace.shared.openApplication(at: url, configuration: configuration)
         } else {
@@ -559,7 +563,7 @@ final class DockController {
     func newWindow(_ id: String) {
         Windows.focusing.cancel()   // an earlier click's focus still on its way would come in front of the new window
         if Sites.isWeb(id) { Sites.open(id); return }
-        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: id).first else { launch(id); return }
+        guard let running = NSRunningApplication.persons(withBundleIdentifier: id).first else { launch(id); return }
         Windows.bringForward(running)
         let pid = running.processIdentifier
         // The app's own menu item for ⌘N (File › New Window, in any language), pressed through Accessibility; an
@@ -578,11 +582,11 @@ final class DockController {
     }
 
     func quit(_ id: String) {
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: id) { app.terminate() }
+        for app in NSRunningApplication.persons(withBundleIdentifier: id) { app.terminate() }
     }
 
     func minimizeAll(_ id: String) {
-        let pids = NSRunningApplication.runningApplications(withBundleIdentifier: id).map(\.processIdentifier)
+        let pids = NSRunningApplication.persons(withBundleIdentifier: id).map(\.processIdentifier)
         DispatchQueue.global(qos: .userInitiated).async {   // listing the windows waits on the app too
             for pid in pids {
                 for window in Windows.windows(of: pid) where !window.minimized { Windows.minimize(window) }
@@ -591,7 +595,7 @@ final class DockController {
     }
 
     func hide(_ id: String) {
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: id) { app.hide() }
+        for app in NSRunningApplication.persons(withBundleIdentifier: id) { app.hide() }
     }
 
     // MARK: Reordering
@@ -625,7 +629,7 @@ struct WindowList {
         var ids: [pid_t: String] = [:]
         for window in info.reversed() {
             guard window[kCGWindowLayer as String] as? Int == 0,
-                  let pid = window[kCGWindowOwnerPID as String] as? pid_t, pid != me,
+                  let pid = window[kCGWindowOwnerPID as String] as? pid_t, pid != me, !RunBrowsers.isRun(pid),
                   let boundsInfo = window[kCGWindowBounds as String] as? NSDictionary,
                   let bounds = CGRect(dictionaryRepresentation: boundsInfo),
                   bounds.width > 60, bounds.height > 60,

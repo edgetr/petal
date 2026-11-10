@@ -436,8 +436,14 @@ final class Routines {
         return now >= start && now < start.addingTimeInterval(7200) && (last ?? .distantPast) < start
     }
 
+    /// An app opening or coming forward is the person's doing: never Petal's own process, never a browser Petal
+    /// started for a run (the same app as the person's, as a second process, from the moment it's started).
+    nonisolated static func personsEvent(pid: pid_t) -> Bool {
+        pid != ProcessInfo.processInfo.processIdentifier && !RunApps.isRun(pid)
+    }
+
     private func appEvent(_ running: NSRunningApplication?, _ event: String) {
-        guard isOn, let running, running.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        guard isOn, let running, Self.personsEvent(pid: running.processIdentifier) else { return }
         let id = running.bundleIdentifier ?? ""
         for routine in list where routine.on && routine.trigger.on == "app" && routine.trigger.when == event {
             let wanted = routine.trigger.app
@@ -613,7 +619,7 @@ final class Routines {
                 } else if item.hasPrefix("/") || item.hasPrefix("~") {
                     urls.append(URL(fileURLWithPath: (item as NSString).expandingTildeInPath))
                     opened.append((item as NSString).lastPathComponent)
-                } else if !NSWorkspace.shared.runningApplications.contains(where: { $0.bundleIdentifier == item }) {
+                } else if !NSWorkspace.shared.personsApplications.contains(where: { $0.bundleIdentifier == item }) {
                     app.docks.launch(item)   // Launch Services' own asynchronous open (and the dock's launch pulse)
                     launched.append(item)
                     opened.append(Apps.name(item))
@@ -628,12 +634,12 @@ final class Routines {
                     NSWorkspace.shared.open(url)
                 }
                 let end = Date().addingTimeInterval(30)
-                while Date() < end, !stop.isStopped, !launched.allSatisfy({ !NSRunningApplication.runningApplications(withBundleIdentifier: $0).isEmpty }) {
+                while Date() < end, !stop.isStopped, !launched.allSatisfy({ !NSRunningApplication.persons(withBundleIdentifier: $0).isEmpty }) {
                     Thread.sleep(forTimeInterval: 0.25)
                 }
             }) { ran in done(ran || !launched.isEmpty ? said : nil) }
         case "hide":
-            let running = NSWorkspace.shared.runningApplications.filter { r in action.apps.contains { $0 == r.bundleIdentifier } && !r.isHidden }
+            let running = NSWorkspace.shared.personsApplications.filter { r in action.apps.contains { $0 == r.bundleIdentifier } && !r.isHidden }
             guard !running.isEmpty else { return done(nil) }
             let said = "hid " + Apps.listed(running.compactMap(\.localizedName))
             Assist.off({ !stop.isStopped }, {

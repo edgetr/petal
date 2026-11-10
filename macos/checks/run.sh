@@ -39,7 +39,7 @@ swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift So
 "$out/papernotes"
 # The Petal Notes window, canvas, dock and people: the contract's fields, views, search, the grid and cover, Private
 # notebooks, one person or none, the canvas's based write, the fan and a note dropped on an app (no file, no window).
-swiftc -parse-as-library -O -o "$out/notelibrary" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteTasks.swift Sources/Petal/ViewerFile.swift checks/NoteLibraryCheck.swift
+swiftc -parse-as-library -O -o "$out/notelibrary" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteTasks.swift Sources/Petal/RunApps.swift Sources/Petal/ViewerFile.swift checks/NoteLibraryCheck.swift
 "$out/notelibrary"
 # A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
 swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/Screens.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift checks/NoteRichCheck.swift
@@ -51,7 +51,7 @@ swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/Screens.swift Sourc
 # chain) read back exactly, times and models in words, prices on a page, a notebook's memory, plain arithmetic,
 # chained notes' loops and the person's checkouts (no window, no AI), and Open all never launching an app or a script
 # (NoteTasks: real files, a link and a Finder alias in a throwaway folder in the temporary folder; nothing is opened).
-swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteTasks.swift Sources/Petal/ViewerFile.swift checks/NoteHelpCheck.swift
+swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteTasks.swift Sources/Petal/RunApps.swift Sources/Petal/ViewerFile.swift checks/NoteHelpCheck.swift
 "$out/notehelp"
 # The Shielded boundary is the compiler's: what a helper tells an AI can't be made from a raw string. Each of these
 # must fail to compile (a raw string interpolated into a prompt, put into what a helper is told, or made Shielded
@@ -627,6 +627,25 @@ swiftc -parse-as-library -O -o "$out/background" Sources/Petal/Background.swift 
 # where one goes, which displays are the person's, what a run leaves behind (RunDisplayPlan; no display is ever made).
 swiftc -parse-as-library -O -o "$out/rundisplay" Sources/Petal/RunDisplayPlan.swift checks/RunDisplayCheck.swift
 "$out/rundisplay"
+# A run's own browser: the DevTools pipe's messages cut out whole and matched to their requests, which browser a run
+# gets and what it's started with, a profile folder's name and what's swept after a crash, which addresses open, how a
+# page reads to an AI (ids, caps, what's hidden, as petal_ui hides it), the vault's decisions fed with what the
+# browser says of a page's frames, and what goes into a page going in as a value, never as code (RunBrowserPlan,
+# RunBrowserScript; no browser is ever started: Petal --browser-check does that, headless).
+swiftc -parse-as-library -O -o "$out/runbrowser" Sources/Petal/RunBrowserPlan.swift Sources/Petal/RunBrowserScript.swift Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/RunBrowserCheck.swift
+"$out/runbrowser"
+# A run's browser is never taken for one of the person's apps: nothing in the sources asks macOS for the running
+# copies of an app by its id, or for every running app, but through the person's own lists (RunApps.swift's
+# `persons(withBundleIdentifier:)` and `personsApplications`), apart from the places that mean every process: Petal's
+# own copies (main, Doctor), macOS's Dock (Signals, Windows, MissionControl), the music players, the apps kept private
+# (AssistMore), the events every app is listened to for (Windows), a bench, and the lists themselves.
+perl -ne '
+    next if $ARGV =~ m{/(RunApps|BrowserCheck|DisplayCheck|main|Signals|Windows|MissionControl|Doctor|AssistMore|Bench)\.swift$};
+    if (/NSRunningApplication\.runningApplications\(withBundleIdentifier|NSWorkspace\.shared\.runningApplications/) { print "$ARGV:$.: asks for running apps without leaving out a run\x27s browser\n"; $bad = 1 }
+    close ARGV if eof;
+    END { exit($bad ? 1 : 0) }
+' Sources/Petal/*.swift
+echo "run browser: the dock, the tools and routines list only the person's own apps"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift
 "$out/vault"
 swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/AgentAccessCheck.swift

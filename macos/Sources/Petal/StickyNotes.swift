@@ -13,8 +13,9 @@ extension NotePlace {
     /// apps open and quit: never a question to Launch Services on the main thread.
     @MainActor static func running(_ bundleID: String) -> NSRunningApplication? {
         guard !bundleID.isEmpty else { return nil }
-        if let front = NSWorkspace.shared.frontmostApplication, front.bundleIdentifier == bundleID, !front.isTerminated { return front }
-        return NSWorkspace.shared.runningApplications.first { $0.bundleIdentifier == bundleID && !$0.isTerminated }
+        if let front = NSWorkspace.shared.frontmostApplication, front.bundleIdentifier == bundleID, !front.isTerminated,
+           !RunBrowsers.isRun(front.processIdentifier) { return front }
+        return NSWorkspace.shared.personsApplications.first { $0.bundleIdentifier == bundleID && !$0.isTerminated }
     }
 
     /// As it may be kept or shown: a private app's (`aiNeverLook`) without its titles and addresses.

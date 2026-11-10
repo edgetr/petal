@@ -169,7 +169,7 @@ enum MCP {
             return done
         case "petal_list_apps":
             return apps(matching: args["query"] as? String ?? "")
-        case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories", "petal_show", "petal_vault", "petal_ui", "petal_act",
+        case "petal_look", "petal_apps", "petal_windows", "petal_trash", "petal_remember", "petal_forget", "petal_memories", "petal_show", "petal_vault", "petal_ui", "petal_act", "petal_browser",
              "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete",
              "petal_notes", "petal_note_read", "petal_note_write", "petal_note_move", "petal_note_stick",
              "petal_view", "petal_view_versions", "petal_view_pick", "petal_note_pdf_comments":

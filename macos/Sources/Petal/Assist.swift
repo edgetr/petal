@@ -94,6 +94,8 @@ final class Assist {
         if let owner, app.paper.helpers.owns(owner) {
             // A helper in a note asks on the note itself.
             app.paper.helpers.asking(owner)
+        } else if Headless.on {
+            // A headless run (a check) never orders a window in: its question waits to be answered, shown nowhere.
         } else if !app.claude.isOpen || !showsInChat(request) {
             // Over the dock; with no Petal dock showing (macOS's in use), in the chat asking, which shows the question.
             if app.docks.focusedDock?.panel != nil { app.popups.showAsk() }
@@ -235,6 +237,7 @@ final class Assist {
                 send(["opened": file.path])
             } catch { fail(error.localizedDescription) }
         case "petal_vault": vault(args, caller: note, who: who, gone: request == nil ? nil : gone, send, fail)
+        case "petal_browser": browser(args, caller: note, who: who, gone: request == nil ? nil : gone, send, fail)
         case "petal_ui", "petal_act": computer.handle(name, args, note: note, gone: request == nil ? nil : gone, send: send, fail: fail)
         case "petal_routines", "petal_routine_save", "petal_routine_run", "petal_routine_undo", "petal_routine_delete":
             // Its asker hanging up stops a tidy's moves under way off the main thread, not only what comes next.
@@ -304,7 +307,7 @@ final class Assist {
                 ? "This note is stuck to all of \(place.appName): this is its window in front; the user may be looking at something else now (front: true shows that)."
                 : "This is the window the note is stuck to; the user may be looking at something else now (front: true shows that)."
         }
-        result["onScreen"] = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isHidden }
+        result["onScreen"] = Set(NSWorkspace.shared.personsApplications.filter { $0.activationPolicy == .regular && !$0.isHidden }
             .compactMap(\.localizedName)).sorted()
         // The clipboard only once the privacy checks below have passed, and never something private. Read here,
         // and told only with the vault's secrets taken out (off the main thread: that may read the Keychain).
@@ -515,12 +518,12 @@ final class Assist {
     func frontApp(named name: String?) -> NSRunningApplication? {
         if let name, !name.isEmpty { return running(name) }
         let me = ProcessInfo.processInfo.processIdentifier
-        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != me { return front }
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != me, !RunBrowsers.isRun(front.processIdentifier) { return front }
         return nil
     }
 
     func running(_ name: String) -> NSRunningApplication? {
-        let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+        let apps = NSWorkspace.shared.personsApplications.filter { $0.activationPolicy == .regular }
         return apps.first { $0.bundleIdentifier?.caseInsensitiveCompare(name) == .orderedSame }
             ?? apps.first { $0.localizedName?.caseInsensitiveCompare(name) == .orderedSame }
             ?? apps.first { $0.localizedName?.localizedCaseInsensitiveContains(name) == true }
@@ -911,7 +914,7 @@ final class Assist {
             guard let running = running(appName) else { return fail("\(appName) isn't open.") }
             pids = [running.processIdentifier]
         } else {
-            pids = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier)
+            pids = NSWorkspace.shared.personsApplications.filter { $0.activationPolicy == .regular }.map(\.processIdentifier)
         }
         Self.queue.async {
             var found: [AppWindow] = []

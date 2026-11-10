@@ -518,6 +518,11 @@ enum Vault {
         var unverified = false
         /// The address that page gives for itself, unverified: said on the card, never trusted.
         var claimedURL: String?
+        /// The page is isolated from its site: the browser keeps its document apart from the site its address names
+        /// (a sandboxed document or frame: an origin of its own, nobody's), or couldn't say whose it is. Its address
+        /// still names a site, but the page isn't that site's: nothing fills there by itself, payment info never, and
+        /// nothing is saved for the site from it. Only a browser Petal drives itself can tell (RunBrowser.swift).
+        var isolated = false
 
         /// The host shown to the person: the page's (or frame's). Only a web address (http or https) names a site:
         /// an app's or browser's own page (t3code://, chrome://, about:, file:) never does.
@@ -618,6 +623,9 @@ enum Vault {
             guard let why = keyMismatch(item, place) else { return .fill }
             return .ask(title: question(item, [field], place: place), detail: why)
         case .card:
+            if place.web, place.isolated {
+                return .refuse("Petal fills no payment info into a page that's isolated from its site (the browser keeps it apart from \(place.shop ?? "the shop"): it's sandboxed).")
+            }
             guard place.web, let frame = place.frameURL, VaultSite.scheme(frame) == "https",
                   VaultSite.scheme(place.topURL ?? frame) == "https", let shop = place.shop else {
                 return .refuse("Petal fills payment info only on secure web pages (https).")
@@ -650,8 +658,16 @@ enum Vault {
         }
     }
 
-    /// What's wrong with a web page's address, or nil: unreadable, not secure, or the tab says another page.
+    /// Why a page isolated from its site gets nothing by itself, in plain words.
+    static func isolatedWhy(_ place: Place) -> String {
+        let site = place.host ?? "the site its address names"
+        return "This page is isolated from its site: the browser keeps it apart from the rest of \(site) (it's sandboxed), so it isn't \(site)'s own page, and what's typed there can be sent anywhere. Fill only if you're sure."
+    }
+
+    /// What's wrong with a web page's address, or nil: isolated from its site, unreadable, not secure, or the tab
+    /// says another page.
     private static func pageProblem(_ place: Place) -> String? {
+        if place.isolated { return isolatedWhy(place) }
         guard let frame = place.frameURL, let host = VaultSite.host(frame) else { return "Petal couldn't read which page this field is on." }
         guard secure(frame) else { return "\(host) isn't a secure page (it's not https): what's typed there can be read on the way." }
         if let top = place.topURL {
@@ -666,6 +682,8 @@ enum Vault {
     /// Why a login's place isn't one it's saved for, in plain words, or nil when it is.
     static func mismatch(_ item: VaultItem, _ place: Place) -> String? {
         if place.unverified { return unverifiedWhy(place) }
+        // A page isolated from its site is never the login's own site, whatever its address says.
+        if place.web, place.isolated { return isolatedWhy(place) }
         if item.sites.isEmpty && item.apps.isEmpty { return "This login isn't saved for any site yet, so Petal can't tell it's the right place." }
         if place.web {
             if let problem = pageProblem(place) { return problem }
@@ -689,6 +707,8 @@ enum Vault {
     /// onto its service's site.
     static func keyMismatch(_ item: VaultItem, _ place: Place) -> String? {
         guard place.web else { return place.unverified ? unverifiedWhy(place) : nil }
+        // Not even on this Mac's own pages: an isolated page is nobody's.
+        if place.isolated { return isolatedWhy(place) }
         // Only a web page on this Mac (http or https), never a file:// or other address naming localhost.
         let local = { (url: String?) in
             url.map { ["http", "https"].contains(VaultSite.scheme($0) ?? "") && (VaultSite.host($0).map(VaultSite.isLocal) ?? false) } ?? false
@@ -927,7 +947,7 @@ enum Vault {
     /// nil: read again right before filling, so a page that moved on meanwhile never gets it. `samePage`: the tab's
     /// page must also still be at the same path (payment info: the checkout page Buy was said on).
     static func moved(from then: Place, to now: Place, samePage: Bool = false) -> String? {
-        if then.web != now.web || then.bundle != now.bundle || then.unverified != now.unverified {
+        if then.web != now.web || then.bundle != now.bundle || then.unverified != now.unverified || then.isolated != now.isolated {
             return "That field isn't in the same app or page anymore; nothing was filled. Call petal_ui again."
         }
         func origin(_ url: String?) -> String { url.map { "\(VaultSite.scheme($0) ?? "")://\(VaultSite.host($0) ?? "")" } ?? "" }
@@ -1006,7 +1026,8 @@ enum Vault {
     /// signed it. Never a browser (or a page it can't verify): a login there is for no app at all.
     static func bind(_ item: inout VaultItem, to place: Place) {
         if place.web {
-            if let host = place.host { item.sites = [host] }
+            // A page isolated from its site isn't the site's: nothing is saved for the site from it.
+            if !place.isolated, let host = place.host { item.sites = [host] }
         } else if !place.unverified, place.signed, let team = place.team {
             item.apps = [place.bundle]
             item.appSigners = [place.bundle: team]
@@ -1103,7 +1124,7 @@ enum Vault {
 
         /// The Buy for `place`, or nil when Petal can't tell which tab and page it is.
         init?(place: Place, window: UInt32, card: String, revision: Int? = nil, turn: String) {
-            guard place.web, let host = place.shop, place.tab.page != nil else { return nil }
+            guard place.web, !place.isolated, let host = place.shop, place.tab.page != nil else { return nil }
             self.init(host: host, path: Vault.path(place.topURL ?? place.frameURL), window: window, tab: place.tab, card: card,
                       revision: revision, turn: turn)
         }
@@ -1111,7 +1132,7 @@ enum Vault {
         /// `place` is still the tab and page Buy was said on: its page the same (and the browser's id for the tab,
         /// when it gave one then), on the same host and path, the browser's own answer agreeing.
         func same(_ place: Place) -> Bool {
-            guard place.web, place.shop == host, Vault.path(place.topURL ?? place.frameURL) == path else { return false }
+            guard place.web, !place.isolated, place.shop == host, Vault.path(place.topURL ?? place.frameURL) == path else { return false }
             if let tabHost = place.tabURL.flatMap(VaultSite.host), tabHost != host { return false }
             if tab.id != nil, place.tab.id != tab.id { return false }
             guard let page = tab.page, let now = place.tab.page else { return false }

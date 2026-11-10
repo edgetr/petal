@@ -24,12 +24,26 @@ struct PetalProcessCheck {
             [petal, "--bench-windows-child", "settings"], [petal, "--bench-windows-idle", "Chat, 60 messages"],
             [petal, "--snapshot", "/tmp/snap"], [petal, "--routines-check", "--ai"], [petal, "--restore-dock"],
             [petal, "--display-check", "/tmp/shots"], [petal, "--display-check"],
+            [petal, "--browser-check"], [petal, "--browser-check", "--live", "/tmp/shots"], [petal, "--browser-check", "--live"],
             [petal, "--helpers-check"], [petal, "--helpers-check", "--ai"], [petal, "--viewer-check", "/tmp/a.pdf"], [petal, "--viewer-check"],
             [petal, "--bench-notes"], [petal, "--bench-notes", "--json", "/tmp/n.json"],
             [petal, "dock", "macos"], [petal, "doctor"], [petal, "report"], [petal, "run", "--key", "x", "--", "env"],
             [petal, "no-such-command"], [petal, "-psn_0_1", "--mcp"],
+            // A flag this Petal has never heard of (a newer Petal's check, run beside this one): never a dock.
+            [petal, "--something-check"], [petal, "--future-check", "--live", "/tmp/x"], [petal, "--flag", "value"],
+            [petal, "-psn_0_1", "--something-check"], [petal, "--live", "/tmp/x"], [petal, "--ai"], [petal, "--"],
         ]
         for argv in others { expect(!PetalProcess.isDock(arguments: argv), "not a dock: \(argv)") }
+        // The real launches still are: nothing, and macOS's own arguments (one dash, with their values).
+        let real: [[String]] = [
+            [petal], [petal, "-psn_0_98765"], [petal, "-NSDocumentRevisionsDebugMode", "YES"], [petal, "-AppleLanguages", "(tr)"],
+            [petal, "-ApplePersistenceIgnoreState", "YES"], [petal, "-psn_0_1", "-NSDocumentRevisionsDebugMode", "YES"],
+        ]
+        for argv in real { expect(PetalProcess.isDock(arguments: argv), "a real dock launch: \(argv)") }
+        for argv in [[petal, "--something-check"], [petal, "--flag", "value"]] {
+            guard case .usage(let message) = PetalProcess.parse(argv) else { expect(false, "\(argv) says it doesn't know the flag: \(PetalProcess.parse(argv))"); continue }
+            expect(message.contains(argv[1]), "an unknown flag is named: \(message)")
+        }
 
         // What main.swift starts each as: the same parser, so a process is a dock exactly when it starts as one.
         typealias L = PetalProcess.Launch
@@ -42,6 +56,7 @@ struct PetalProcessCheck {
             ([petal, "--restore-dock"], .restoreDock),
             ([petal, "--snapshot", "/tmp/snap"], .snapshot("/tmp/snap")),
             ([petal, "--display-check", "/tmp/shots"], .displayCheck("/tmp/shots")),
+            ([petal, "--browser-check"], .browserCheck(live: nil)), ([petal, "--browser-check", "--live", "/tmp/shots"], .browserCheck(live: "/tmp/shots")),
             ([petal, "--bench-windows-idle", "Settings: AI"], .benchWindowsIdle("Settings: AI")),
             ([petal, "--bench-windows-child", "settings"], .benchWindowsChild(settingsOnly: true)),
             ([petal, "--bench-windows-child"], .benchWindowsChild(settingsOnly: false)),
@@ -61,7 +76,7 @@ struct PetalProcessCheck {
             [petal, "--snapshot"], [petal, "--snapshot", "--ai"], [petal, "--bench-windows-idle"],
             [petal, "--bench-windows-idle", "--runs"], [petal, "--bench-nope"], [petal, "--benchmark"], [petal, "-psn_0_1", "--bench-x"],
             [petal, "--bench-windows", "--runs"], [petal, "--bench-windows", "--runs", "many"], [petal, "--bench-settings", "--json"],
-            [petal, "--bench-windows", "--only"], [petal, "--bench-notes", "--json"],
+            [petal, "--bench-windows", "--only"], [petal, "--bench-notes", "--json"], [petal, "--browser-check", "--live"],
         ]
         for argv in malformed {
             guard case .usage(let message) = PetalProcess.parse(argv) else { expect(false, "\(argv) is written wrong: \(PetalProcess.parse(argv))"); continue }
@@ -97,7 +112,16 @@ struct PetalProcessCheck {
             ([[petal, "--bench-windows-idle"]], false),
             ([[petal, "--bench-nope"]], false),
             ([[petal, "-h"]], false),
-            ([[petal, "-psn_0_1", "--help"]], true),
+            ([[petal, "-psn_0_1", "--help"]], false),   // two dashes: a tool's flag, never a dock
+            // A flag only another version of Petal knows: its check is running, not a dock.
+            ([[petal, "--something-check"]], false),
+            ([[petal, "--flag", "value"]], false),
+            ([[spaced, "--future-check", "--live", "/tmp/x"]], false),
+            ([[petal, "-psn_0_1", "--something-check"]], false),
+            ([[petal, "--browser-check"], [petal, "--browser-check", "--live", "/tmp/x"]], false),
+            ([[petal, "--something-check"], [petal]], true),   // beside a real dock: the dock still counts
+            ([[petal, "-NSDocumentRevisionsDebugMode", "YES"], [petal, "--flag", "value"]], true),
+            ([[petal, "-AppleLanguages", "(tr)"]], true),
         ]
         for (processes, running) in cases {
             func quoted(_ text: String) -> String { "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'" }

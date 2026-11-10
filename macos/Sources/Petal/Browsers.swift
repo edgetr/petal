@@ -43,7 +43,10 @@ final class Browsers {
     /// running browser can say: asking about one that isn't running waits for it, so that's never done. Called off
     /// the main thread: a busy browser can take a while.
     nonisolated static func access(_ bundleID: String, ask: Bool = false) -> Access {
-        guard let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first,
+        // While a run has a browser of this very app going (RunBrowser.swift), a script sent to the app by its id
+        // could be answered by that copy instead of the person's: neither is asked anything until it's gone.
+        if !ask, RunBrowsers.running(bundle: bundleID) { return .notRunning }
+        guard let running = NSRunningApplication.persons(withBundleIdentifier: bundleID).first,
               let desc = NSAppleEventDescriptor(processIdentifier: running.processIdentifier).aeDesc else { return .notRunning }
         switch AEDeterminePermissionToAutomateTarget(desc, typeWildCard, typeWildCard, ask) {
         case noErr: return .allowed
@@ -75,7 +78,7 @@ final class Browsers {
         let list = Self.installed().map(\.id)
         Task {
             for id in list where states[id] != .allowed && states[id] != .denied {
-                if NSRunningApplication.runningApplications(withBundleIdentifier: id).isEmpty, let url = Apps.url(id) {
+                if NSRunningApplication.persons(withBundleIdentifier: id).isEmpty, let url = Apps.url(id) {
                     let configuration = NSWorkspace.OpenConfiguration()
                     configuration.activates = false
                     configuration.hides = true

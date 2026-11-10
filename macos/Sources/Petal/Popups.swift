@@ -553,7 +553,7 @@ final class Previews {
 
     /// Every window of an app, through Accessibility (empty without it).
     nonisolated static func windows(of bundleID: String) -> [AppWindow] {
-        NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).flatMap { Windows.windows(of: $0.processIdentifier) }
+        NSRunningApplication.persons(withBundleIdentifier: bundleID).flatMap { Windows.windows(of: $0.processIdentifier) }
     }
 
     private func scheduleHide() {

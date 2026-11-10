@@ -549,6 +549,7 @@ final class RunDisplays {
     func quit() {
         timer?.invalidate()
         timer = nil
+        app.runBrowsers.quit()   // each run's own browser ends first: its window never lands on the person's screen
         stopFrontWatch()
         if let frontToken { NSWorkspace.shared.notificationCenter.removeObserver(frontToken) }
         frontToken = nil
@@ -650,6 +651,7 @@ final class RunDisplays {
     /// A display that couldn't be made or placed: removed, its runs told, the next group's turn.
     private func failed(_ group: String, _ display: Display, _ why: Failure) {
         guard displays[group] === display else { return }
+        app.runBrowsers.displayGoing(group)
         displays[group] = nil
         release(display)
         for waiter in waiters.removeValue(forKey: group) ?? [] { waiter.done(.failure(why)) }
@@ -659,6 +661,7 @@ final class RunDisplays {
     /// macOS took a display away by itself: its windows are wherever macOS put them; the group has none now.
     private func lost(_ group: String, _ display: Display) {
         guard displays[group] === display else { return }
+        app.runBrowsers.displayGoing(group)
         displays[group] = nil
         release(display)
         for waiter in waiters.removeValue(forKey: group) ?? [] { waiter.done(.failure(.ended)) }
@@ -668,6 +671,8 @@ final class RunDisplays {
     /// A group's display goes: what's left on it is settled first, off the main thread (a few seconds at most), then
     /// the display is removed.
     private func remove(_ group: String) {
+        // The run's own browser ends before its display goes, so its window is never left to land on the person's screen.
+        app.runBrowsers.displayGoing(group)
         guard let display = displays.removeValue(forKey: group) else { return }
         for waiter in waiters.removeValue(forKey: group) ?? [] { waiter.done(.failure(.ended)) }
         let leaving = Leaving(windows: Array(display.windows.values), apps: Array(display.launched.values),
@@ -1026,11 +1031,11 @@ final class RunDisplays {
         opened.app = appURL.deletingPathExtension().lastPathComponent
         opened.bundle = bundle
         let web = ["http", "https"].contains(url?.scheme?.lowercased() ?? "")
-        let running = !NSRunningApplication.runningApplications(withBundleIdentifier: bundle).isEmpty
+        let running = !NSRunningApplication.persons(withBundleIdentifier: bundle).isEmpty
         let before = Set(windowNumbers(bundle: bundle).keys)
         switch RunDisplayRules.opening(running: running, windows: before.count, address: web, browser: Browsers.kind(bundle) != nil, bare: url == nil) {
         case .tabInTheirs:
-            opened.problem = "\(opened.app) is open with the person's own windows, and an address opens there as a tab in one of them, in front of them. Nothing was opened. Read the page with your own web tools, or pass on: \"screen\" if the person would want it opened on their screen."
+            opened.problem = "\(opened.app) is open with the person's own windows, and an address opens there as a tab in one of them, in front of them. Nothing was opened. petal_browser open opens it in a browser of your own, on your display; or pass on: \"screen\" if the person would want it opened on their screen."
             return opened
         case .nothingNew:
             opened.problem = "\(opened.app) is already open with the person's own windows, and Petal never moves those to your display. Nothing was opened. Open a file or an address in it (that makes a window of your own), or pass on: \"screen\" to use it on their screen."
@@ -1060,7 +1065,7 @@ final class RunDisplays {
         }
         // It wasn't running before this open, so this open started it: the run's own, to put away when it ends.
         if !running {
-            opened.launched = answer.pid ?? NSRunningApplication.runningApplications(withBundleIdentifier: bundle).first?.processIdentifier
+            opened.launched = answer.pid ?? NSRunningApplication.persons(withBundleIdentifier: bundle).first?.processIdentifier
         }
         // What it made: an app still starting takes a while to show its window.
         let made = newWindows(bundle: bundle, before: before, timeout: running ? 5 : 15, anyKind: !running, live: live)

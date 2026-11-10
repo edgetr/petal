@@ -610,7 +610,7 @@ struct VaultEditor: View {
                     .glassEffect(.clear, in: .capsule)
                 }
                 Menu("Add an app") {
-                    ForEach(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !item.apps.contains($0.bundleIdentifier ?? "") }
+                    ForEach(NSWorkspace.shared.personsApplications.filter { $0.activationPolicy == .regular && !item.apps.contains($0.bundleIdentifier ?? "") }
                         .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0, app.processIdentifier) } }.sorted { $0.1 < $1.1 }, id: \.0) { id, name, pid in
                         Button(name) {
                             item.apps.append(id)
