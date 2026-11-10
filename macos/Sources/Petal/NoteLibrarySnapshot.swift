@@ -84,8 +84,8 @@ extension Snapshot {
             // small window) is cut at the window's bottom, as the window cuts it.
             let view = NotesWindowView(model: model, now: now, rootPath: rootWords)
                 .frame(width: size.width, height: size.height, alignment: .top)
-                .clipShape(.rect(cornerRadius: 14))
-                .overlay { RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+                .clipShape(.rect(cornerRadius: Radius.card))
+                .overlay { RoundedRectangle(cornerRadius: Radius.card).stroke(.black.opacity(0.25), lineWidth: 0.5) }
                 .overlay(alignment: .topLeading) { TrafficLights().padding(.leading, 16).padding(.top, 15) }
                 .padding(30)
                 .background(Self.desk)
@@ -140,19 +140,19 @@ extension Snapshot {
             NotebookFanView(book: garden, papers: app.paper.fanned(garden)) {}
                 .padding(.leading, 12 + 5 * 60 + 25 - NoteFan.width(count: app.paper.fanned(garden).count) / 2 - 6)
             HStack(spacing: 10) {
-                Image(systemName: "sparkle").font(.system(size: 22)).foregroundStyle(Color(red: 0.85, green: 0.21, blue: 0.5))
+                Image(systemName: "sparkle").font(.system(size: TextSize.title)).foregroundStyle(Color(red: 0.85, green: 0.21, blue: 0.5))
                     .frame(width: 50, height: 50).glassEffect(.clear, in: .circle)
                 ForEach(["#4f8ef7", "#2fb36d", "#f2a33a", "#222222"], id: \.self) { hex in
-                    RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: NSColor(hex: hex) ?? .gray)).frame(width: 50, height: 50)
+                    RoundedRectangle(cornerRadius: Radius.tile).fill(Color(nsColor: NSColor(hex: hex) ?? .gray)).frame(width: 50, height: 50)
                 }
                 NotebookPile(color: NSColor(hex: green) ?? .green, icon: 50)
                     .overlay(alignment: .bottom) { Circle().fill(Color(red: 0.85, green: 0.21, blue: 0.5)).frame(width: 4, height: 4).offset(y: 9) }
                 ForEach(["#a550a7", "#ff5f57"], id: \.self) { hex in
-                    RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: NSColor(hex: hex) ?? .gray)).frame(width: 50, height: 50)
+                    RoundedRectangle(cornerRadius: Radius.tile).fill(Color(nsColor: NSColor(hex: hex) ?? .gray)).frame(width: 50, height: 50)
                 }
             }
             .padding(.horizontal, 12).frame(height: 72)
-            .glassEffect(.regular, in: .rect(cornerRadius: 24))
+            .glassEffect(.regular, in: .rect(cornerRadius: Radius.window))
         }
         .padding(40)
         .background(Self.desk)
@@ -163,27 +163,27 @@ extension Snapshot {
         let head = app.paper.letterhead(alexNote)
         let tabs = EdgeLayout.tabs([EdgeNote(id: alexNote.key, line: 90, color: pink, faded: false)], height: 520)
         let chat = ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 14).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
-                .overlay { RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+            RoundedRectangle(cornerRadius: Radius.card).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
+                .overlay { RoundedRectangle(cornerRadius: Radius.card).stroke(.black.opacity(0.25), lineWidth: 0.5) }
                 .frame(width: 560, height: 520)
             VStack(alignment: .leading, spacing: 0) {
-                Text("Alex").font(.system(size: 13, weight: .semibold)).padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(nsColor: NSColor(hex: pink) ?? .systemPink).opacity(0.2), in: .rect(cornerRadius: 8))
-                Text("Sam").font(.system(size: 13)).foregroundStyle(Color(white: 0.4)).padding(8)
-                Text("Robin").font(.system(size: 13)).foregroundStyle(Color(white: 0.4)).padding(8)
+                Text("Alex").font(.system(size: TextSize.body, weight: .semibold)).padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: NSColor(hex: pink) ?? .systemPink).opacity(0.2), in: .rect(cornerRadius: Radius.control))
+                Text("Sam").font(.system(size: TextSize.body)).foregroundStyle(Color(white: 0.4)).padding(8)
+                Text("Robin").font(.system(size: TextSize.body)).foregroundStyle(Color(white: 0.4)).padding(8)
                 Spacer()
             }
             .padding(.top, 52).padding(.horizontal, 10)
             .frame(width: 170, height: 520, alignment: .top)
             .background(Color(.sRGB, red: 0.953, green: 0.953, blue: 0.965))
-            .clipShape(UnevenRoundedRectangle(topLeadingRadius: 14, bottomLeadingRadius: 14))
+            .clipShape(UnevenRoundedRectangle(topLeadingRadius: Radius.card, bottomLeadingRadius: Radius.card))
             TrafficLights().padding(.leading, 16).padding(.top, 15)
-            Text("are we still on for the market saturday?").font(.system(size: 13.5)).padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color(white: 0.92), in: .rect(cornerRadius: 16)).offset(x: 200, y: 70)
-            Text("yes! I'll bring the bags").font(.system(size: 13.5)).foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color(nsColor: NSColor(hex: pink) ?? .systemPink), in: .rect(cornerRadius: 16)).offset(x: 330, y: 120)
-            Text("perfect").font(.system(size: 13.5)).padding(.horizontal, 12).padding(.vertical, 8)
-                .background(Color(white: 0.92), in: .rect(cornerRadius: 16)).offset(x: 200, y: 170)
+            Text("are we still on for the market saturday?").font(.system(size: TextSize.body)).padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color(white: 0.92), in: .rect(cornerRadius: Radius.card)).offset(x: 200, y: 70)
+            Text("yes! I'll bring the bags").font(.system(size: TextSize.body)).foregroundStyle(.white).padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color(nsColor: NSColor(hex: pink) ?? .systemPink), in: .rect(cornerRadius: Radius.card)).offset(x: 330, y: 120)
+            Text("perfect").font(.system(size: TextSize.body)).padding(.horizontal, 12).padding(.vertical, 8)
+                .background(Color(white: 0.92), in: .rect(cornerRadius: Radius.card)).offset(x: 200, y: 170)
             ForEach(Array(tabs.enumerated()), id: \.offset) { _, tab in
                 EdgeTabView(tab: tab, colors: [:], outside: false).frame(width: 300, alignment: .trailing).offset(x: 560 - 300, y: tab.y)
             }

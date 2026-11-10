@@ -20,7 +20,7 @@ final class MentionState {
 let mentionChipKey = NSAttributedString.Key("petal.mentionChip")
 
 extension NoteTextView {
-    static let chipFont = NSFont.systemFont(ofSize: 10, weight: .medium)
+    static let chipFont = NSFont.systemFont(ofSize: TextSize.caption, weight: .medium)
 
     private func color(_ amount: Double, _ other: NoteInk.RGB) -> NSColor {
         let c = NoteInk.mix(tint, amount, other)
@@ -223,10 +223,10 @@ struct MentionMenuView: View {
                         Spacer(minLength: 6)
                         Text(hint(choice.kind)).opacity(0.6)
                     }
-                    .font(.system(size: 12.5))
+                    .font(.system(size: TextSize.callout))
                     .foregroundStyle(index == selected ? Color.white : Color(white: 0.11))
                     .padding(.vertical, 5).padding(.horizontal, 8)
-                    .background(index == selected ? Color(nsColor: accent) : .clear, in: .rect(cornerRadius: 6))
+                    .background(index == selected ? Color(nsColor: accent) : .clear, in: .rect(cornerRadius: Radius.control))
                     .contentShape(.rect)
                 }
                 .buttonStyle(.plain)
@@ -234,8 +234,8 @@ struct MentionMenuView: View {
         }
         .padding(5)
         .frame(width: 250)
-        .background(Color(.sRGB, red: 250 / 255, green: 250 / 255, blue: 252 / 255, opacity: 0.97), in: .rect(cornerRadius: 11))
-        .overlay { RoundedRectangle(cornerRadius: 11).stroke(.black.opacity(0.2), lineWidth: 0.5) }
+        .background(Color(.sRGB, red: 250 / 255, green: 250 / 255, blue: 252 / 255, opacity: 0.97), in: .rect(cornerRadius: Radius.tile))
+        .overlay { RoundedRectangle(cornerRadius: Radius.tile).stroke(.black.opacity(0.2), lineWidth: 0.5) }
         .shadow(color: .black.opacity(0.22), radius: 16, y: 12)
         .environment(\.colorScheme, .light)
     }

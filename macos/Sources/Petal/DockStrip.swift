@@ -891,7 +891,7 @@ final class Tile {
     static func badgeImage(_ text: String, icon: CGFloat, scale: CGFloat) -> (image: CGImage, size: CGSize)? {
         let height = icon * 0.42
         let label = (Int(text) ?? 0) > 99 ? "99+" : text
-        let font = NSFont.systemFont(ofSize: height * 0.62, weight: .bold)
+        let font = NSFont.systemFont(ofSize: height * 0.62, weight: .semibold)
         let words = NSAttributedString(string: label, attributes: [.font: font, .foregroundColor: NSColor.white])
         let width = max(height, ceil(words.size().width) + 8)
         let size = CGSize(width: width, height: height)

@@ -38,12 +38,16 @@ enum Snapshot {
             .init(kind: .claude, text: "Done — icons are now **44 pt**, up from 36. Say *smaller* if it's too much."),
             .init(kind: .ask, text: "defaults write com.apple.finder AppleShowAllFiles -bool true"),
         ])
+        // "+" with something typed: a row for each result over the field, up to eight.
+        let typed = AppSearch()
+        typed.query = "ca"
         var views: [(String, AnyView, CGSize?)] = [
             ("dock", AnyView(DockView(dock: dock)), nil),
             ("welcome", AnyView(WelcomeView {}), CGSize(width: 640, height: WelcomeView.height)),
             ("claude-empty", AnyView(ClaudePanelView(panel: ClaudePanel())), nil),
             ("claude-chat", AnyView(ClaudePanelView(panel: app.claude)), nil),
             ("search", AnyView(AppSearchView(search: app.search)), nil),
+            ("search-results", AnyView(AppSearchView(search: typed)), nil),
             ("stack", AnyView(StackView(contents: StackContents(folder: "~/Downloads", entries: Stacks.entries("~/Downloads", limit: 12))) {}), nil),
         ]
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
@@ -100,11 +104,11 @@ enum Snapshot {
         // one waiting its turn for a display, and an AI session outside Petal on its own. The picture is made up.
         let display = NSImage(size: NSSize(width: 240, height: 150), flipped: false) { rect in
             NSColor(red: 0.16, green: 0.2, blue: 0.3, alpha: 1).setFill(); rect.fill()
-            NSColor(white: 0.97, alpha: 1).setFill(); NSBezierPath(roundedRect: NSRect(x: 14, y: 20, width: 150, height: 110), xRadius: 6, yRadius: 6).fill()
+            NSColor(white: 0.97, alpha: 1).setFill(); NSBezierPath(roundedRect: NSRect(x: 14, y: 20, width: 150, height: 110), xRadius: Radius.control, yRadius: Radius.control).fill()
             NSColor(white: 0.86, alpha: 1).setFill(); NSRect(x: 14, y: 116, width: 150, height: 14).fill()
             NSColor(white: 0.7, alpha: 1).setFill()
             for row in 0..<5 { NSRect(x: 26, y: 98 - CGFloat(row) * 15, width: CGFloat(120 - row * 14), height: 6).fill() }
-            NSColor(white: 0.2, alpha: 1).setFill(); NSBezierPath(roundedRect: NSRect(x: 120, y: 34, width: 106, height: 70), xRadius: 6, yRadius: 6).fill()
+            NSColor(white: 0.2, alpha: 1).setFill(); NSBezierPath(roundedRect: NSRect(x: 120, y: 34, width: 106, height: 70), xRadius: Radius.control, yRadius: Radius.control).fill()
             return true
         }
         let shown = (0..<3).map { _ in UUID() }

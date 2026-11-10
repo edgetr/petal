@@ -2914,13 +2914,13 @@ struct ActingPill: View {
         HStack(spacing: 9) {
             Circle().fill(Color(nsColor: FakeCursor.tint)).frame(width: 7, height: 7)
             if let caption {
-                Text(caption).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                Text(caption).font(.system(size: TextSize.callout, weight: .medium)).lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: 260, alignment: .leading).fixedSize()
             }
             Button(action: stop) {
                 HStack(spacing: 5) {
-                    Text("Stop").font(.system(size: 12, weight: .semibold))
-                    Text("esc").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                    Text("Stop").font(.system(size: TextSize.callout, weight: .semibold))
+                    Text("esc").font(.system(size: TextSize.caption, weight: .medium)).foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)

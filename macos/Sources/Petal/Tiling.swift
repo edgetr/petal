@@ -280,14 +280,14 @@ struct WindowsCard: View {
                 ForEach(Tiling.legend, id: \.keys) { row in
                     HStack(spacing: 10) {
                         KeyCaps(text: row.keys).frame(width: 104, alignment: .leading)
-                        Text(row.what).font(.system(size: 12))
+                        Text(row.what).font(.system(size: TextSize.callout))
                         Spacer()
                         if row.ids.allSatisfy(Tiling.taken.contains) && !row.ids.isEmpty {
-                            Text("In use elsewhere").font(.system(size: 11)).foregroundStyle(.secondary)
+                            Text("In use elsewhere").font(.system(size: TextSize.small)).foregroundStyle(.secondary)
                         }
                     }
                 }
-                Text("Drag a window onto another to swap them.").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("Drag a window onto another to swap them.").font(.system(size: TextSize.small)).foregroundStyle(.secondary)
             }
         }
     }

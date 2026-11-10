@@ -22,6 +22,12 @@ enum PaperLook {
     static func nsColor(_ c: NoteInk.RGB) -> NSColor { NSColor(srgbRed: c.r, green: c.g, blue: c.b, alpha: 1) }
 
     /// The words on paper: #222. On glass: the system's own.
+    /// A paper's words keep the sketch's line pitch at any size: 1.37 of the size (13-point words every 17.8 points,
+    /// 12-point ones every 16.4), as extra spacing over the font's own 1.193.
+    static func lineSpacing(_ size: CGFloat) -> CGFloat { size * (1.37 - 1.193) }
+    /// The open note's words: a line every 19.1 points, in the read-only body as in the editor (`NoteRich.paragraph`).
+    static let openSpacing: CGFloat = 19.1 - TextSize.body * 1.193
+
     static let words = Color(.sRGB, red: 0x22 / 255.0, green: 0x22 / 255.0, blue: 0x22 / 255.0)
     static let footer = Color(.sRGB, red: 0x6b / 255.0, green: 0x6b / 255.0, blue: 0x70 / 255.0)
 }
@@ -83,15 +89,15 @@ struct PaperView: View {
             // The strip is the paper's width, whatever room the paper is offered (and part of what's picked up).
             .overlay(alignment: .top) { strip.allowsHitTesting(false) }
         .overlay(alignment: .bottomTrailing) { corner }
-        .clipShape(.rect(cornerRadius: 12))
+        .clipShape(.rect(cornerRadius: Radius.tile))
         // The shadow is the paper's alone: on the whole view SwiftUI would give every letter one too.
-        .background { surface.clipShape(.rect(cornerRadius: 12)).modifier(PaperShadow(glass: glass)) }
+        .background { surface.clipShape(.rect(cornerRadius: Radius.tile)).modifier(PaperShadow(glass: glass)) }
         .modifier(PaperScheme(glass: glass))
     }
 
     @ViewBuilder private var surface: some View {
         if glass {
-            Color.clear.glassEffect(.regular, in: .rect(cornerRadius: 12))
+            Color.clear.glassEffect(.regular, in: .rect(cornerRadius: Radius.tile))
         } else {
             PaperLook.color(face == .back ? NoteInk.mix(tint, 0.09, NoteInk.paper) : NoteInk.paper(tint))
         }
@@ -109,7 +115,7 @@ struct PaperView: View {
     private var corner: some View {
         HStack(alignment: .bottom, spacing: 0) {
             // A folded watcher's line takes the room (the sketch's watchers carry no @).
-            Text("@").font(.system(size: 13, weight: .semibold)).foregroundStyle(glass ? Color.primary.opacity(0.22) : Color.black.opacity(0.22))
+            Text("@").font(.system(size: TextSize.body, weight: .semibold)).foregroundStyle(glass ? Color.primary.opacity(0.22) : Color.black.opacity(0.22))
                 .padding(.trailing, 8).padding(.bottom, 9)
                 .opacity(face == .folded && paper.file.watch != nil ? 0 : 1)
                 .help("@ for a helper, a note or a notebook; Return on the line asks it")
@@ -142,12 +148,12 @@ struct PaperView: View {
                 let titled = NoteBlock.blocks(paper.file.body).first { !$0.words.trimmingCharacters(in: .whitespaces).isEmpty }.map { if case .heading = $0 { true } else { false } } ?? false
                 let title = paper.file.title
                 let preview = paper.file.preview
-                // The sketch's folded note: a 14-point bold title, 3 points above 13.5-point medium words at a 1.32 line height.
+                // The sketch's folded note: a title, 3 points above medium words at the paper's line pitch.
                 VStack(alignment: .leading, spacing: 3) {
-                    if titled { Text(title).font(.system(size: 14, weight: .bold)).lineLimit(2) }
+                    if titled { Text(title).font(.system(size: TextSize.heading, weight: .semibold)).lineLimit(2) }
                     Text(titled ? preview : [title, preview].filter { !$0.isEmpty }.joined(separator: " "))
-                        .font(.system(size: 13.5, weight: .medium))
-                        .lineSpacing(13.5 * 1.32 - 16.1)
+                        .font(.system(size: TextSize.body, weight: .medium))
+                        .lineSpacing(PaperLook.lineSpacing(TextSize.body))
                 }
                     .foregroundStyle(paper.file.fromPetal && !glass ? HelperLook.ink(tint) : words)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -157,7 +163,7 @@ struct PaperView: View {
             .allowsHitTesting(grab == nil)
             if conflict {
                 Button("Keep this one") { desk?.keep(paper.key) }.buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+                    .font(.system(size: TextSize.small, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
                     .padding(.bottom, 4)
             }
             HStack(spacing: paper.file.watch != nil ? 4 : 6) {
@@ -165,15 +171,15 @@ struct PaperView: View {
                 if !unsaved, paper.file.back != nil || paper.file.helper.map({ $0.state == .working || $0.state == .waiting }) == true {
                     PulseDot(color: Color(nsColor: color), pulsing: paper.file.helper?.state == .working)
                 }
-                Text(unsaved ? "Not saved yet: trying again" : footer).font(.system(size: 11))
+                Text(unsaved ? "Not saved yet: trying again" : footer).font(.system(size: TextSize.small))
                     .foregroundStyle(unsaved ? Color(red: 0.7, green: 0.15, blue: 0.12) : glass ? .secondary : PaperLook.footer).lineLimit(1)
                     .minimumScaleFactor(0.85)
                     .allowsHitTesting(grab == nil)
                 // A watcher's Pause (or Go on), on the folded note.
                 if !unsaved, let watch = paper.file.watch {
-                    Text("·").font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer).padding(.horizontal, -2)
+                    Text("·").font(.system(size: TextSize.small)).foregroundStyle(glass ? .secondary : PaperLook.footer).padding(.horizontal, -2)
                     Button(watch.paused ? "Go on" : "Pause") { desk?.helpers.pause(paper.noteID) }.buttonStyle(.plain)
-                        .font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer).underline(watch.paused)
+                        .font(.system(size: TextSize.small)).foregroundStyle(glass ? .secondary : PaperLook.footer).underline(watch.paused)
                 }
             }
             .padding(.trailing, paper.file.watch != nil ? 0 : 44)
@@ -209,24 +215,24 @@ struct PaperView: View {
         if pictureTrouble > 0, let desk {
             HStack(spacing: 10) {
                 Text(pictureTrouble == 1 ? "Picture couldn't be saved" : "\(pictureTrouble) pictures couldn't be saved")
-                    .font(.system(size: 11)).foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
+                    .font(.system(size: TextSize.small)).foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
                 Spacer()
-                Button("Try again") { desk.retryPictures(paper.key) }.buttonStyle(.plain).font(.system(size: 11, weight: .semibold))
-                Button("Remove") { desk.dropPictures(paper.key) }.buttonStyle(.plain).font(.system(size: 11))
+                Button("Try again") { desk.retryPictures(paper.key) }.buttonStyle(.plain).font(.system(size: TextSize.small, weight: .semibold))
+                Button("Remove") { desk.dropPictures(paper.key) }.buttonStyle(.plain).font(.system(size: TextSize.small))
             }
             .foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
             .padding(.bottom, 6)
         }
         if unsaved {
-            Text("Not saved yet: Petal keeps it here and tries again.").font(.system(size: 11)).foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
+            Text("Not saved yet: Petal keeps it here and tries again.").font(.system(size: TextSize.small)).foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
                 .padding(.bottom, 6)
         }
         if conflict {
             HStack {
-                Text("Changed on two Macs at once").font(.system(size: 11)).foregroundStyle(glass ? .secondary : PaperLook.footer)
+                Text("Changed on two Macs at once").font(.system(size: TextSize.small)).foregroundStyle(glass ? .secondary : PaperLook.footer)
                 Spacer()
                 Button("Keep this one") { desk?.keep(paper.key) }.buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+                    .font(.system(size: TextSize.small, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
             }
             .padding(.bottom, 6)
         }
@@ -263,26 +269,26 @@ struct PaperView: View {
 
     private var back: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("The back of this note").font(.system(size: 12.5, weight: .semibold)).foregroundStyle(words)
+            Text("The back of this note").font(.system(size: TextSize.callout, weight: .semibold)).foregroundStyle(words)
                 .allowsHitTesting(grab == nil)
             // What a helper did, and what was allowed (tap a stamp to take it back).
             HelperBack(paper: paper, tint: tint, glass: glass, desk: desk)
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(paper.file.places.enumerated()), id: \.offset) { _, stick in
-                    Text(NoteDesk.describe(stick)).font(.system(size: 12.5)).foregroundStyle(words).lineLimit(2)
+                    Text(NoteDesk.describe(stick)).font(.system(size: TextSize.callout)).foregroundStyle(words).lineLimit(2)
                 }
                 if paper.file.places.isEmpty {
-                    Text("Not stuck anywhere yet.").font(.system(size: 12.5)).foregroundStyle(glass ? .secondary : PaperLook.footer)
+                    Text("Not stuck anywhere yet.").font(.system(size: TextSize.callout)).foregroundStyle(glass ? .secondary : PaperLook.footer)
                 }
             }
             // (On the desk, the back's own words are part of what's picked up, as the folded paper's are.)
             .allowsHitTesting(grab == nil)
-            Text("In \(notebook)").font(.system(size: 12.5)).foregroundStyle(words).allowsHitTesting(grab == nil)
+            Text("In \(notebook)").font(.system(size: TextSize.callout)).foregroundStyle(words).allowsHitTesting(grab == nil)
             Text("Made \(NoteDesk.when(paper.file.created)) · changed \(NoteDesk.when(paper.file.modified))")
-                .font(.system(size: 11)).foregroundStyle(glass ? .secondary : Color(white: 0.53)).allowsHitTesting(grab == nil)
+                .font(.system(size: TextSize.small)).foregroundStyle(glass ? .secondary : Color(white: 0.53)).allowsHitTesting(grab == nil)
             if let desk {
                 Button("Show the file") { desk.reveal(paper.key) }.buttonStyle(.plain)
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+                    .font(.system(size: TextSize.small, weight: .medium)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
             }
             Spacer(minLength: 18)
         }
@@ -311,7 +317,7 @@ struct Letterhead: View {
             .buttonStyle(.plain).opacity(0.7)
             .help("Change its notebook")
         }
-        .font(.system(size: 10.5))
+        .font(.system(size: TextSize.small))
         .tracking(0.1)
         .foregroundStyle(ink)
         .lineLimit(1)
@@ -367,30 +373,30 @@ struct NoteBodyView: View {
                 let above: CGFloat = index > 0 && boxed[index - 1] ? 0 : 8
                 switch block {
                 case .heading(let level, let text):
-                    Text(text).font(.system(size: level == 1 ? 17 : level == 2 ? 15 : 14, weight: .bold)).tracking(-0.17).foregroundStyle(words)
+                    Text(text).font(.system(size: NoteRich.Style.headingSize(level), weight: .semibold)).tracking(-0.17).foregroundStyle(words)
                         .padding(.bottom, 4)
                 case .check(let done, let text):
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Image(systemName: done ? "checkmark.square.fill" : "square").font(.system(size: 13))
+                        Image(systemName: done ? "checkmark.square.fill" : "square").font(.system(size: TextSize.body))
                             .foregroundStyle(done ? Color(nsColor: accent) : words.opacity(0.4))
-                        Text(NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(words)
+                        Text(NoteText.plain(text)).font(.system(size: TextSize.body)).foregroundStyle(words)
                     }
-                    .lineSpacing(3)
+                    .lineSpacing(PaperLook.openSpacing)
                 case .link(let url):
                     LinkCardView(url: url).padding(.top, above).padding(.bottom, 8)
                 case .image(let path, let caption):
                     PictureView(link: path, folder: paper.url.deletingLastPathComponent(), caption: caption).padding(.top, above).padding(.bottom, 8)
                 case .ink(let text):
-                    Text(NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(glass ? .primary : PaperLook.color(NoteInk.ink(tint)))
+                    Text(NoteText.plain(text)).font(.system(size: TextSize.body)).foregroundStyle(glass ? .primary : PaperLook.color(NoteInk.ink(tint)))
                         .padding(.leading, 9)
                         .overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: accent).opacity(0.4)).frame(width: 2) }
                         .padding(.vertical, 4)
                 case .bullet(let text):
-                    Text("• " + NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(words).lineSpacing(3)
+                    Text("• " + NoteText.plain(text)).font(.system(size: TextSize.body)).foregroundStyle(words).lineSpacing(PaperLook.openSpacing)
                 case .text(let text) where text.contains("@"):
-                    Text(MentionLine.attributed(text, tint: tint, names: names)).font(.system(size: 13.5)).foregroundStyle(words).lineSpacing(3)
+                    Text(MentionLine.attributed(text, tint: tint, names: names)).font(.system(size: TextSize.body)).foregroundStyle(words).lineSpacing(PaperLook.openSpacing)
                 case .text(let text):
-                    Text(NoteText.plain(text).isEmpty ? " " : NoteText.plain(text)).font(.system(size: 13.5)).foregroundStyle(words).lineSpacing(3)
+                    Text(NoteText.plain(text).isEmpty ? " " : NoteText.plain(text)).font(.system(size: TextSize.body)).foregroundStyle(words).lineSpacing(PaperLook.openSpacing)
                 }
             }
         }
@@ -408,17 +414,17 @@ struct LinkCardView: View {
                 // Cache only: a card never fetches (NoteShelf.linkFetch decides, when the person adds a link).
                 if let icon = Sites.shared.cachedIcon(url) { Image(nsImage: icon).resizable().padding(3).background(.white) } else { Color(white: 0.85) }
             }
-            .frame(width: 30, height: 30).clipShape(.rect(cornerRadius: 7))
+            .frame(width: 30, height: 30).clipShape(.rect(cornerRadius: Radius.chip))   // inside the card's corner
             VStack(alignment: .leading, spacing: 1) {
-                Text(LinkPreviews.shared.title(url) ?? NoteText.shortAddress(url)).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                Text(LinkPreviews.shared.title(url) ?? NoteText.shortAddress(url)).font(.system(size: TextSize.callout, weight: .medium)).lineLimit(1)
                     .foregroundStyle(Color(white: 0.13))
-                Text(NoteText.host(url)).font(.system(size: 12)).foregroundStyle(Color(white: 0.53)).lineLimit(1)
+                Text(NoteText.host(url)).font(.system(size: TextSize.callout)).foregroundStyle(Color(white: 0.53)).lineLimit(1)
             }
             Spacer(minLength: 0)
         }
         .padding(.vertical, 7).padding(.horizontal, 9)
-        .background(.white.opacity(0.75), in: .rect(cornerRadius: 9))
-        .overlay { RoundedRectangle(cornerRadius: 9).stroke(.black.opacity(0.12), lineWidth: 0.5) }
+        .background(.white.opacity(0.75), in: .rect(cornerRadius: Radius.control))
+        .overlay { RoundedRectangle(cornerRadius: Radius.control).stroke(.black.opacity(0.12), lineWidth: 0.5) }
         .onTapGesture { if let address = URL(string: url) { NSWorkspace.shared.open(address) } }
     }
 }
@@ -436,7 +442,7 @@ struct PictureView: View {
                 Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
             } else if NotePictures.shared.isBroken(link, in: folder) {
                 Color.black.opacity(0.06).overlay {
-                    Image(systemName: "photo.badge.exclamationmark").font(.system(size: 18)).foregroundStyle(.black.opacity(0.35))
+                    Image(systemName: "photo.badge.exclamationmark").font(.system(size: TextSize.subtitle)).foregroundStyle(.black.opacity(0.35))
                         .accessibilityLabel("Picture can't be shown")
                 }
             } else {
@@ -444,15 +450,15 @@ struct PictureView: View {
             }
         }
         .frame(height: 96).frame(maxWidth: .infinity).clipped()
-        .clipShape(.rect(cornerRadius: 9))
+        .clipShape(.rect(cornerRadius: Radius.control))
         // Dragged out of the note: the picture's bytes, read (when dropped) from the file NoteStore.pictureFile allows
         // (inside the notes' root, through no link), never a path.
         .onDrag { PictureView.provider(link: link, folder: folder, caption: caption) }
-        .overlay { RoundedRectangle(cornerRadius: 9).stroke(.black.opacity(0.15), lineWidth: 0.5) }
+        .overlay { RoundedRectangle(cornerRadius: Radius.control).stroke(.black.opacity(0.15), lineWidth: 0.5) }
         .overlay(alignment: .bottomLeading) {
             if !caption.isEmpty {
-                Text(caption).font(.system(size: 10.5)).foregroundStyle(.white).lineLimit(1)
-                    .padding(.vertical, 1).padding(.horizontal, 6).background(.black.opacity(0.38), in: .rect(cornerRadius: 4))
+                Text(caption).font(.system(size: TextSize.caption)).foregroundStyle(.white).lineLimit(1)
+                    .padding(.vertical, 1).padding(.horizontal, 6).background(.black.opacity(0.38), in: .rect(cornerRadius: Radius.chip))
                     .padding(.leading, 8).padding(.bottom, 6)
             }
         }
@@ -524,11 +530,11 @@ struct EdgeTabView: View {
 
     var body: some View {
         let color = colors[tab.color] ?? NSColor(hex: tab.color) ?? .systemBlue
-        let shape = UnevenRoundedRectangle(topLeadingRadius: outside ? 0 : 7, bottomLeadingRadius: outside ? 0 : 7,
-                                           bottomTrailingRadius: outside ? 7 : 0, topTrailingRadius: outside ? 7 : 0)
+        let shape = UnevenRoundedRectangle(topLeadingRadius: outside ? 0 : Radius.control, bottomLeadingRadius: outside ? 0 : Radius.control,
+                                           bottomTrailingRadius: outside ? Radius.control : 0, topTrailingRadius: outside ? Radius.control : 0)
         Group {
             if hovering && !label.isEmpty {
-                Text(label).font(.system(size: 12, weight: .medium)).foregroundStyle(PaperLook.words).lineLimit(1)
+                Text(label).font(.system(size: TextSize.callout, weight: .medium)).foregroundStyle(PaperLook.words).lineLimit(1)
                     .padding(.leading, outside ? 10 : 10).padding(.trailing, 12)
                     .frame(height: 30)
                     .background(PaperLook.color(NoteInk.tabPaper(PaperLook.rgb(color))), in: shape)
@@ -543,7 +549,7 @@ struct EdgeTabView: View {
         .opacity(tab.faded ? 0.45 : 1)
         .overlay(alignment: outside ? .topTrailing : .topLeading) {
             if tab.count > 1 && !(hovering && !label.isEmpty) {
-                Text("\(tab.count)").font(.system(size: 9.5, weight: .bold)).foregroundStyle(.white)
+                Text("\(tab.count)").font(.system(size: TextSize.micro, weight: .semibold)).foregroundStyle(.white)
                     .frame(width: 16, height: 16).background(Color(white: 0.114), in: .circle)
                     .offset(x: outside ? 7 : -7, y: -6)
             }
