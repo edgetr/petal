@@ -35,12 +35,11 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/Petal"
 # The icon: Assets.car holds every appearance (light, dark, tinted, clear); Petal.icns is the fallback.
 cp "$ROOT/brand/macos/Assets.car" "$ROOT/brand/macos/Petal.icns" "$APP/Contents/Resources/"
-cp "$ROOT/defaults/modes-macos.json" "$APP/Contents/Resources/modes.json"
 cp "$ROOT/plugin/assets/claude.svg" "$ROOT/plugin/assets/openai.svg" "$APP/Contents/Resources/"
 # Which names anyone can register under (co.uk, github.io): the vault fills a login only on its own site (VaultSite).
 cp "$ROOT/macos/Resources/public_suffix_list.dat" "$APP/Contents/Resources/"
 # Claude's Petal tools run inside Petal (`Petal --mcp`); their names, descriptions and settings come from
-# petal-mcp.py, so Omarchy and the Mac describe them the same way.
+# petal-mcp.py (on a Mac it leaves out Omarchy's modes), so Omarchy and the Mac describe the rest the same way.
 mkdir -p "$APP/Contents/Resources/mcp"
 python3 -I "$ROOT/plugin/mcp/petal-mcp.py" --describe > "$APP/Contents/Resources/mcp/tools.json"
 # The person's own changes to Petal's code, kept through updates (`petal personal`; Personal.swift runs it).
@@ -89,28 +88,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
       <key>NSRequiredContext</key><dict/>
     </dict>
   </array>
-  <key>CFBundleDocumentTypes</key>
-  <array>
-    <dict>
-      <key>CFBundleTypeName</key><string>Petal Dock</string>
-      <key>CFBundleTypeRole</key><string>Viewer</string>
-      <key>LSHandlerRank</key><string>Owner</string>
-      <key>LSItemContentTypes</key><array><string>tech.edgetr.petal.recipe</string></array>
-      <key>CFBundleTypeIconSystemGenerated</key><true/>
-    </dict>
-  </array>
   <key>UTExportedTypeDeclarations</key>
   <array>
-    <dict>
-      <key>UTTypeIdentifier</key><string>tech.edgetr.petal.recipe</string>
-      <key>UTTypeDescription</key><string>Petal Dock</string>
-      <key>UTTypeConformsTo</key><array><string>public.json</string></array>
-      <key>UTTypeTagSpecification</key>
-      <dict>
-        <key>public.filename-extension</key><array><string>petal</string></array>
-        <key>public.mime-type</key><array><string>application/x-petal</string></array>
-      </dict>
-    </dict>
     <dict>
       <key>UTTypeIdentifier</key><string>tech.edgetr.petal.note</string>
       <key>UTTypeDescription</key><string>Petal Note</string>
@@ -118,7 +97,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     </dict>
   </array>
   <key>NSCalendarsWriteOnlyAccessUsageDescription</key><string>When you drop a note on Calendar in the dock, Petal adds it as an event, after asking you.</string>
-  <key>NSAppleEventsUsageDescription</key><string>Petal reads which site a browser tab is on, to keep distracting ones in their mode, and closes one when you choose Stay. It also shows what's playing in Music and Spotify, and opens and empties the Trash in Finder.</string>
+  <key>NSAppleEventsUsageDescription</key><string>Petal reads which site a browser tab is on, for notes stuck to a tab and for Petal AI. It also shows what's playing in Music and Spotify, and opens and empties the Trash in Finder.</string>
 </dict>
 </plist>
 PLIST

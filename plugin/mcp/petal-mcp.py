@@ -24,7 +24,9 @@ SETTINGS = os.path.join(CONFIG, "settings.json")
 MODES = os.path.join(CONFIG, "modes.json")
 INSTRUCTIONS = os.path.join(CONFIG, "instructions.md")
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-# Petal for macOS ships this same server inside Petal.app, and keeps the dock's place in dock.json.
+# Petal for macOS ships this same server inside Petal.app, and keeps the dock (its apps and its place) in dock.json.
+# The Mac has one dock and no modes: the mode tools, the mode settings and what's built on them (focus cards, held
+# notifications, the schedule, the activity history, recipes) are Omarchy's, and left out there (see MAC_LEAVES_OUT).
 MAC = sys.platform == "darwin"
 DOCK = os.path.join(CONFIG, "dock.json")
 SOCKET = os.environ.get("PETAL_SOCKET") or os.path.join(CONFIG, "petal.sock")
@@ -44,7 +46,7 @@ SETTINGS_SCHEMA = {
     "dockBorderColor": ("#ffffff", "Dock rim color, #rrggbb."),
     "dockBorderOpacity": (0.28, "Dock rim opacity, 0 to 1 (0 = no rim)."),
     "dockRadius": (-1, "Dock corner radius in points; -1 = fully rounded ends."),
-    "dockSheen": (True, "Soft top highlight and mode-colored wash on the dock."),
+    "dockSheen": (True, "Soft top highlight on the dock." if MAC else "Soft top highlight and mode-colored wash on the dock."),
     "dockMargin": (-1, "Gap between the dock and the screen edge in points; -1 = default."),
     "iconSize": (36, "App icon size in points."),
     "iconPadding": (-1, "Space around each icon in points; -1 = default."),
@@ -82,10 +84,11 @@ SETTINGS_SCHEMA = {
     "holdNotifications": (True, "In modes with hold=true, hold notifications from apps outside the mode; they wait on their mode with a count. On macOS this needs Full Disk Access (to read them) and Do Not Disturb (to keep macOS's banners away); Petal shows the mode's own ones itself."),
     "urgentNotifications": (True, "A held notification that can't wait (the AI decides) pops out of its mode's icon as a card: Later, or Go to <mode>."),
     "modeWindows": (False, "Each mode keeps its own windows and tabs, and switching mode swaps them. macOS: on one Desktop, other modes' windows wait just off-screen. Omarchy: each mode has its own workspace."),
-    "tiling": (False, "macOS: Petal tiles the windows of the mode in front, like a tiling window manager (Omarchy already tiles with Hyprland)."),
+    "tiling": (False, "macOS: Petal tiles the windows on each Desktop, like a tiling window manager (Omarchy already tiles with Hyprland)."),
     "tilingGaps": (8, "macOS: space between tiled windows and around them, in points."),
     "tilingFloat": ([], "macOS: bundle ids of apps whose windows never tile."),
-    "ai": (True, "Use Claude Haiku to sort unknown windows and notifications into modes."),
+    "ai": (True, "Small jobs for the chat AI's small model (Claude Haiku, Codex's Luna): routines that sort files by what they are, and notes' quick answers." if MAC
+           else "Use Claude Haiku to sort unknown windows and notifications into modes."),
     "claudeUsage": (True, "Claude usage ring around the Claude button."),
     "autoUpdate": (True, "Install new Petal releases automatically (then offer a restart)."),
     "chatModel": ("sonnet", "Claude panel model: haiku, sonnet, opus or fable."),
@@ -93,7 +96,8 @@ SETTINGS_SCHEMA = {
     "claudeAccess": ("auto", "Claude panel permissions: auto (safe actions run, risky ones ask) or full."),
     "aiProviders": (["claude"], "The AI apps Petal uses, each the user's own install and account: claude, codex, both, or none ([] = no AI; the dock still works)."),
     "otherAgents": (True, "Let the user's other AI sessions (T3 Code, Claude Code or Codex in a terminal) change Petal: its MCP server, skill and `petal` command are set up for them."),
-    "aiMemory": (True, "Petal AI remembers what helps, everywhere or per mode: what the user asks it to, and what it notices (memory.json). petal_remember / petal_forget / petal_memories."),
+    "aiMemory": (True, "Petal AI remembers what helps: what the user asks it to, and what it notices (memory.json). petal_remember / petal_forget / petal_memories." if MAC
+                 else "Petal AI remembers what helps, everywhere or per mode: what the user asks it to, and what it notices (memory.json). petal_remember / petal_forget / petal_memories."),
     "aiLearns": (True, "Once a day Petal AI learns from how each mode is used (its apps, how long) and remembers it; a quick call to the chat AI's small model."),
     "dailySummary": ("", "A card with the day in the user's modes at this time each day (\"HH:MM\"; empty for none), with a line from Petal AI."),
     "aiNeverLook": (["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"], "Apps Petal AI never looks into (bundle ids): petal_look gives only their name, window lists leave out their titles, and screenshots leave them out."),
@@ -104,42 +108,54 @@ SETTINGS_SCHEMA = {
     "notesFolder": ("", "macOS: where notes are kept (a folder path; empty: iCloud Drive's Petal Notes when iCloud Drive is on, else Petal's own folder in Application Support)."),
     "notesNotebook": ("Inbox", "macOS: the notebook new notes go to, unless one was last used on that site or app."),
     "chatWhileWorking": ("steer", "Writing in the AI chat while it works: steer (it stops where it is and carries on from the new message) or queue (sent once it's done)."),
-    "finderInDock": (True, "macOS: Finder as its own button next to the AI button, the same in every mode (never among the apps, so it never appears at the end and moves the rest)."),
+    "finderInDock": (True, "macOS: Finder as its own button next to the AI button (never among the apps, so it never appears at the end and moves the rest)."),
     "replyDrafts": (True, "Entering a mode with held messages that need an answer, Petal AI drafts replies in the user's own style (learned from the replies they edit), shown on a card; it never sends anything."),
     "aiAllowed": ([], "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash, tidy, computer:<bundle id> (using that app)."),
     "computerUse": (True, "macOS: Petal AI can use the user's apps for them (petal_ui, petal_act): it presses buttons, types and chooses menu items through Accessibility, with a pink pointer of its own; the user's pointer never moves. A sticky note works in its own window in the background (no pointer, nothing comes forward) and asks the user to bring the window forward for what can't be done there. It asks before it uses each app (once per reply), and Stop or Escape ends it. Never apps in aiNeverLook, never password fields. Off: both tools refuse."),
-    "routines": (True, "macOS: run the user's routines (routines.json): what Petal does by itself when a file lands in a folder, an app opens, a mode starts or at a time. Made with petal_routine_save."),
-    "shortcuts": (True, "Petal's keyboard shortcuts: switch mode (1-9), open the AI panel, open the + search. Never takes one already in use."),
+    "routines": (True, "macOS: run the user's routines (routines.json): what Petal does by itself when a file lands in a folder, an app opens or at a time. Made with petal_routine_save."),
+    "shortcuts": (True, "Petal's keyboard shortcuts (Control-Option): Space opens the AI panel, = the + search, N a new note. Never takes one already in use." if MAC
+                  else "Petal's keyboard shortcuts: switch mode (1-9), open the AI panel, open the + search. Never takes one already in use."),
     "schedule": ([], "Modes by time: [{mode, days: [1-7, 1 = Monday], from: \"HH:MM\", to: \"HH:MM\"}]. When a block starts, the focused workspace switches to that mode."),
     "activityLog": (True, "Keep a private, local history of which app is in front (never titles), for suggestions and the weekly summary."),
     "suggestModes": (True, "Suggest new modes, or apps to add to a mode, from the activity history."),
     "summary": (True, "A weekly summary card: time in each mode, top apps, focus cards."),
     "magnification": (False, "macOS: icons grow under the pointer."),
     "magnificationAmount": (0.5, "macOS: how much icons grow, 0.1 to 1 (1 = twice the size)."),
-    "menuBarIcon": (True, "macOS: Petal's icon in the menu bar (mode, updates)."),
-    "chatProvider": ("claude", "Which of aiProviders the chat panel, the usage ring and sorting use: claude or codex."),
+    "menuBarIcon": (True, "macOS: Petal's mark in the menu bar (Petal Notes, settings, updates)."),
+    "chatProvider": ("claude", "Which of aiProviders the chat panel, the usage ring and small jobs use: claude or codex." if MAC
+                     else "Which of aiProviders the chat panel, the usage ring and sorting use: claude or codex."),
     "codexModel": ("", "Codex chat model; empty = Codex's own default."),
     "codexEffort": ("medium", "Codex chat reasoning effort: low, medium, high or xhigh."),
     "claudeAuth": ("subscription", "macOS: how Petal's own Claude runs (chat, sorting) pay: subscription (the user's Claude Code sign-in) or api (an Anthropic API key the user pastes in Settings > AI; it stays in the Keychain, and only Petal's runs use it). Never ask for or handle a key yourself."),
     "codexAuth": ("subscription", "macOS: how Petal's own Codex runs pay: subscription (the user's ChatGPT sign-in) or api (an OpenAI API key the user pastes in Settings > AI; Keychain only, Petal's runs only). Never ask for or handle a key yourself."),
 }
 
+# What Omarchy has and the Mac doesn't: left out of the settings and tools a Mac lists (and of what build.sh writes
+# into Petal.app from --describe). Config.defaults in the Mac app lists the rest.
+MAC_LEAVES_OUT = {
+    "settings": ["modes", "countdown", "focusGuard", "blockDistractions", "peeks", "holdNotifications", "urgentNotifications",
+                 "modeWindows", "aiLearns", "dailySummary", "replyDrafts", "schedule", "activityLog", "suggestModes", "summary"],
+    "tools": ["petal_save_mode", "petal_delete_mode", "petal_set_default_mode", "petal_switch_mode", "petal_export_recipe",
+              "petal_import_recipe", "petal_suggestions", "petal_summary"],
+}
+if MAC:
+    for key in MAC_LEAVES_OUT["settings"]:
+        del SETTINGS_SCHEMA[key]
+
 MODE_FIELDS = {
     "id": "unique id, lowercase",
     "name": "display name",
-    "icon": "an SF Symbol name, like hammer" if MAC else "one Nerd Font glyph or emoji",
+    "icon": "one Nerd Font glyph or emoji",
     "color": "#rrggbb",
     "about": "what the mode is for (used to sort activity into it)",
-    "apps": ("bundle ids" if MAC else "desktop ids") + ", in dock order; an https:// address is a website shortcut (shown with a globe badge)",
+    "apps": "desktop ids, in dock order; an https:// address is a website shortcut (shown with a globe badge)",
     "sites": "domains (x.com) or words in tab titles that belong to this mode; the AI adds a domain when it sorts a new site here",
     "distracting": "true for modes that pull you away (Social, Gaming): entering one takes its wait, and in other modes its apps and sites are blocked. Missing = the AI decides once and saves it",
     "focusDelay": "a distracting mode's wait in seconds before you're in it (30 if 0 or missing); ignored for other modes",
     "hold": "hold notifications from apps outside the mode",
-    "allow": "apps (" + ("bundle ids" if MAC else "desktop ids") + ") and sites (domains or title words) that are fine in this mode without being in its dock; \"Keep it here\" on a card adds one, and their notifications come through",
-    "shortcut": "macOS: the name of a Shortcut (Shortcuts app) to run when a Desktop enters this mode, e.g. one that turns on a Focus",
+    "allow": "apps (desktop ids) and sites (domains or title words) that are fine in this mode without being in its dock; \"Keep it here\" on a card adds one, and their notifications come through",
     "hyprland": "Omarchy: this mode's look for its workspaces: {borderColor: \"#rrggbb\" or \"mode\", gapsIn, gapsOut, wallpaper}",
 }
-WORKSPACE = "Desktop" if MAC else "workspace"
 
 
 def read_json(path, fallback):
@@ -250,7 +266,7 @@ def installed_apps(query="", categories=False):
 def dock_config():
     if MAC:
         dock = read_json(DOCK, {})
-        return {"position": dock.get("position", "bottom"), "autohide": dock.get("autoHide", False),
+        return {"apps": dock.get("apps", []), "position": dock.get("position", "bottom"), "autohide": dock.get("autoHide", False),
                 "dock": dock.get("dock", "petal")}
     shell = read_json(os.path.join(HOME, ".config/omarchy/shell.json"), {})
     dock = shell.get("dock", {})
@@ -262,17 +278,25 @@ def dock_config():
 def t_get_state(_):
     settings = read_json(SETTINGS, {})
     effective = {k: settings.get(k, v[0]) for k, v in SETTINGS_SCHEMA.items()}
+    if MAC:   # one dock, no modes: its apps are in dock
+        return {
+            "settings": effective,
+            "settings_help": {k: v[1] for k, v in SETTINGS_SCHEMA.items()},
+            "dock": dock_config(),
+            "files": {"settings": SETTINGS, "dock": DOCK, "instructions": INSTRUCTIONS,
+                      "plugin_source": os.path.join(PERSONAL, "macos") if os.path.exists(os.path.join(PERSONAL, "macos", "Package.swift"))
+                      else os.environ.get("PETAL_SOURCE", ""),
+                      "app": os.environ.get("PETAL_APP", "")},
+            "personal": {"source": PERSONAL, "set_up": os.path.exists(os.path.join(PERSONAL, ".git", "petal-personal.json")), "how": PERSONAL_HOW},
+        }
     return {
         "settings": effective,
         "settings_help": {k: v[1] for k, v in SETTINGS_SCHEMA.items()},
         "modes": read_json(MODES, {}),
         "mode_fields": MODE_FIELDS,
-        "current_mode": petal("current") if MAC else run("omarchy-shell", "petal", "current"),
+        "current_mode": run("omarchy-shell", "petal", "current"),
         "dock": dock_config(),
-        "files": {"settings": SETTINGS, "modes": MODES, "instructions": INSTRUCTIONS,
-                  "plugin_source": (os.path.join(PERSONAL, "macos") if os.path.exists(os.path.join(PERSONAL, "macos", "Package.swift"))
-                                    else os.environ.get("PETAL_SOURCE", "")) if MAC else PLUGIN_DIR,
-                  **({"app": os.environ.get("PETAL_APP", "")} if MAC else {})},
+        "files": {"settings": SETTINGS, "modes": MODES, "instructions": INSTRUCTIONS, "plugin_source": PLUGIN_DIR},
         "personal": {"source": PERSONAL, "set_up": os.path.exists(os.path.join(PERSONAL, ".git", "petal-personal.json")), "how": PERSONAL_HOW},
     }
 
@@ -339,6 +363,16 @@ def mac_set_dock(args):
         dock["position"] = done["position"] = args["position"]
     if "autohide" in args:
         dock["autoHide"] = done["autohide"] = bool(args["autohide"])
+    # The dock's apps: the whole list in its order, or a few added at the end or taken out.
+    for key in ("apps", "add", "remove"):
+        if key in args and not (isinstance(args[key], list) and all(isinstance(a, str) for a in args[key])):
+            raise ValueError("%s is a list of bundle ids and https:// addresses" % key)
+    if any(key in args for key in ("apps", "add", "remove")):
+        apps = []
+        for app in [a.strip() for a in args.get("apps", dock.get("apps", [])) + args.get("add", [])]:
+            if app and app not in apps:
+                apps.append(app)
+        dock["apps"] = done["apps"] = [a for a in apps if a not in [r.strip() for r in args.get("remove", [])]]
     write_json(DOCK, dock)
     if "use" in args:
         if args["use"] not in ("petal", "macos"):
@@ -396,8 +430,6 @@ def t_set_default_mode(args):
 
 
 def t_switch_mode(args):
-    if MAC:
-        return {"result": petal("mode", args.get("id", ""))}
     return {"result": run("omarchy-shell", "petal", "mode", args.get("id", "")) or "ok"}
 
 
@@ -421,8 +453,7 @@ def t_reload(_):
 # and one per focus card answer: {"t", "card": "back" | "switch" | "close", "app", "mode"}.
 # Never titles, URLs or file names; 30 days kept; nothing leaves the machine.
 
-STATE = (os.path.join(HOME, "Library", "Application Support", "Petal") if MAC
-         else os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local", "state"), "petal"))
+STATE = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local", "state"), "petal")
 ACTIVITY = os.path.join(STATE, "activity.jsonl")
 SUGGESTIONS = os.path.join(CONFIG, "suggestions.json")
 KEEP_DAYS = 30
@@ -652,7 +683,8 @@ LOOK_KEYS = ["dockColor", "dockOpacity", "dockBorderColor", "dockBorderOpacity",
              "popupColor", "popupOpacity", "font", "tooltips", "hoverLift", "appGlow", "previews", "minimized", "badges",
              "bounce", "progress", "quickActions", "recentFiles", "dropToOpen", "nowPlaying", "stacks", "trash",
              "magnification", "magnificationAmount"]
-PLATFORM = "macos" if MAC else "omarchy"
+# Where a recipe was made. Petal for macOS made them too while it had modes ("macos": bundle ids, SF Symbol names).
+PLATFORM = "omarchy"
 
 
 def shareable_mode(mode):
@@ -737,12 +769,9 @@ def plan_import(recipe, look):
         for field in ("apps", "allow"):
             resolved = [resolve(a) for a in m.get(field, []) if isinstance(a, str)]
             m[field] = list(dict.fromkeys(a for a in resolved if a))
-        # Icons are Nerd Font glyphs on Omarchy and SF Symbol names on macOS.
+        # Icons are Nerd Font glyphs here; a recipe from a Mac has SF Symbol names instead.
         icon = str(m.get("icon") or "")
-        glyph = len(icon) <= 2 and not icon.isascii()
-        if MAC and glyph:
-            m["icon"] = "circle"
-        elif not MAC and not glyph:
+        if not (len(icon) <= 2 and not icon.isascii()):
             m["icon"] = "●"
         name, n = str(m.get("name") or mid.title()), 2
         while name.lower() in taken_names:
@@ -782,7 +811,7 @@ def t_import_recipe(args):
         write_json(SETTINGS, settings)
     if plan.get("dock"):
         position = plan["dock"].get("position")
-        if position and (position in ("bottom", "left", "right") or (position == "top" and not MAC)):
+        if position in ("bottom", "top", "left", "right"):
             t_set_dock({"position": position})
         if "autohide" in plan["dock"]:
             t_set_dock({"autohide": plan["dock"]["autohide"]})
@@ -870,7 +899,7 @@ def assist(name):
 
 # Petal AI on the Mac: seeing what's in front and acting on the Mac through Petal's permissions. (Omarchy: later.)
 ASSIST_TOOLS = {
-    "petal_look": (assist("petal_look"), "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text, the current mode and which apps are open. In a sticky note's chat it looks at the note's own window (a note on all of an app: that app's window in front; a note on a tab: its window, with the note's tab as noteTab, only while that tab is the one showing), even after the user has moved on (front: true looks at what's in front now instead). screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read; fields that may hold a password, card number, security code or key are blacked out, and a window Petal can't check isn't shown. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
+    "petal_look": (assist("petal_look"), "What the user is looking at now: the app and window in front, the browser tab's address and title, selected text and which apps are open. In a sticky note's chat it looks at the note's own window (a note on all of an app: that app's window in front; a note on a tab: its window, with the note's tab as noteTab, only while that tab is the one showing), even after the user has moved on (front: true looks at what's in front now instead). screenshot: \"window\" (the front window, or app's) or \"screen\" saves a PNG and returns its path to read; fields that may hold a password, card number, security code or key are blacked out, and a window Petal can't check isn't shown. clipboard: true adds the clipboard's text. Use it when the user says this, here, what I'm looking at.",
                    {"screenshot": {"type": "string", "enum": ["", "window", "screen"]}, "app": {"type": "string", "description": "look at this app instead of the one in front"},
                     "clipboard": {"type": "boolean"}, "front": {"type": "boolean", "description": "in a sticky note: what's in front now, not the note's window"}}),
     "petal_apps": (assist("petal_apps"), "Open, quit, hide or bring forward an app (by name or bundle id); open with `open` set opens that address or file (in `app` if given). Quitting asks the user first.",
@@ -880,8 +909,8 @@ ASSIST_TOOLS = {
                        "window": {"type": "string"}, "layout": {"type": "string", "enum": ["left", "right", "top", "bottom", "full", "center"]}}),
     "petal_trash": (assist("petal_trash"), "Move files or folders to the Trash (asks the user first); never delete files any other way. undo: true puts the last ones back.",
                     {"paths": {"type": "array", "items": {"type": "string"}}, "undo": {"type": "boolean"}}),
-    "petal_remember": (assist("petal_remember"), "Remember something that will help with this user later: a preference, a habit, how they like things done. mode: a mode id to keep it to that mode (\"\" for everywhere). learned: true when you noticed it yourself rather than being asked. Keep each one short.",
-                       {"text": {"type": "string"}, "mode": {"type": "string"}, "learned": {"type": "boolean"}}),
+    "petal_remember": (assist("petal_remember"), "Remember something that will help with this user later: a preference, a habit, how they like things done. learned: true when you noticed it yourself rather than being asked. Keep each one short.",
+                       {"text": {"type": "string"}, "learned": {"type": "boolean"}}),
     "petal_forget": (assist("petal_forget"), "Forget a memory: by its id, or every one containing `text`. Do it when the user says to, or when one turns out wrong or out of date.",
                      {"id": {"type": "string"}, "text": {"type": "string"}}),
     "petal_show": (assist("petal_show"), "Open a page in its own window, kept so it can be opened again: a summary of their month, a report, a table, a chart. markdown, or html (a whole page; charts as inline SVG, no outside scripts or images), or path to an .html file you wrote. Each call makes a new page; to change one you made, pass update: the path it returned. Say in one line what's on it.",
@@ -911,8 +940,7 @@ ASSIST_TOOLS = {
                      "symbols": {"type": "boolean"}, "allowed_symbols": {"type": "string"}, "length": {"type": "integer"},
                      "name": {"type": "string", "description": "use (older sessions): an item's title; it fills like fill, into id or the field petal_ui saw with the cursor"},
                      "task": {"type": "string", "description": "sessions outside Petal's own chat: the same few words for the task's acts"}}),
-    "petal_memories": (assist("petal_memories"), "What Petal AI remembers about the user (everywhere, and per mode); mode limits it to one mode's and the everywhere ones.",
-                       {"mode": {"type": "string"}}),
+    "petal_memories": (assist("petal_memories"), "What Petal AI remembers about the user, each with its id (for petal_forget).", {}),
     "petal_ui": (assist("petal_ui"), "The controls of the window in front (in a sticky note's chat, the note's own window; a note on a tab reads and acts only while its tab is the one showing), to use with petal_act: buttons, links, text fields, checkboxes, menus, tabs, rows and the like, visible ones first, up to 150. "
                  "Each has an id (e12), role, name, value (never a password field's; a secret saved in the vault shows as (hidden) wherever it appears) and frame [x, y, w, h] in screen points. The ids last until the next petal_ui or 5 minutes: call it again whenever the window changes. "
                  "app: another app's front window; front: true in a sticky note uses what's in front now; find: only controls whose name has this word (for a big window). Apps the user keeps private give only their name.",
@@ -934,10 +962,10 @@ ASSIST_TOOLS = {
     "petal_routine_save": (assist("petal_routine_save"),
                            "Make a routine from what the user asked, or change one (id). words: their own words. You fill trigger and actions from them, once; Petal runs it without AI except for sorting files by what they are. "
                            "trigger.on: \"file\" (a file lands in folder, e.g. ~/Downloads, ~/Desktop or screenshots; types: kinds pdf, image, video, audio, archive, installer, document, code or extensions; named: words in its name; both optional), "
-                           "\"app\" (app: name or bundle id; when: \"opens\" or \"front\"), \"mode\" (mode: a mode id), \"time\" (at: \"HH:MM\"; days: 1 = Monday … 7, empty = every day). "
+                           "\"app\" (app: name or bundle id; when: \"opens\" or \"front\"), \"time\" (at: \"HH:MM\"; days: 1 = Monday … 7, empty = every day). "
                            "actions, in order: {do: \"sort\", by: \"ai\" (by what each file is; the quick AI picks an existing subfolder or names a new one for similar files) or \"kind\" (Images, PDFs, …), into: where the subfolders go (the files' folder by default)}, "
-                           "{do: \"move\", to: a folder (a name alone is inside the files' folder)}, {do: \"mode\", mode}, {do: \"open\", apps: names, bundle ids or https:// addresses}, {do: \"hide\", apps}, {do: \"shortcut\", name}. "
-                           "sort and move act on the new file; with an app, mode or time trigger they take folder's files. Files are only moved, never deleted. It acts on new files only: when the answer says files are there now, offer petal_routine_run.",
+                           "{do: \"move\", to: a folder (a name alone is inside the files' folder)}, {do: \"open\", apps: names, bundle ids or https:// addresses}, {do: \"hide\", apps}, {do: \"shortcut\", name}. "
+                           "sort and move act on the new file; with an app or time trigger they take folder's files. Files are only moved, never deleted. It acts on new files only: when the answer says files are there now, offer petal_routine_run.",
                            {"id": {"type": "string"}, "name": {"type": "string", "description": "a short name"}, "words": {"type": "string"},
                             "trigger": {"type": "object"}, "actions": {"type": "array", "items": {"type": "object"}}, "on": {"type": "boolean"}}),
     "petal_routine_run": (assist("petal_routine_run"), "Run a routine now on the files already in its folder. dryRun: true says what it would move where, moving nothing; without it, it does it (Petal asks the user first when it's 10 files or more). A routine that moves no files just runs its actions.",
@@ -976,35 +1004,45 @@ ASSIST_TOOLS = {
 
 
 TOOLS = {
-    "petal_get_state": (t_get_state, "Everything about the user's Petal dock: all settings (with help text and current values), modes, current mode, position/auto-hide and file paths. Call this first.", {}),
+    "petal_get_state": (t_get_state, "Everything about the user's Petal dock: all settings (with help text and current values), the dock's apps in the order they show, its position/auto-hide and file paths. Call this first." if MAC
+                        else "Everything about the user's Petal dock: all settings (with help text and current values), modes, current mode, position/auto-hide and file paths. Call this first.", {}),
     "petal_set_settings": (t_set_settings, "Change one or more Petal settings (appearance like dockColor/dockOpacity/iconSize/accentColor, and feature switches like bounce/badges). Applies instantly.",
                            {"settings": {"type": "object", "description": "setting name -> new value"}}),
     "petal_reset_settings": (t_reset_settings, "Reset settings to their defaults (all, or just the given keys).",
                              {"keys": {"type": "array", "items": {"type": "string"}}}),
-    "petal_set_dock": (t_set_dock, "Move the dock (position: bottom, left, right) and/or turn auto-hide on or off; use: petal or macos picks Petal or macOS's own Dock (the other turns off)." if MAC
+    "petal_set_dock": (t_set_dock, "Change the dock's apps, or move the dock. Apps (the dock is one list, the same on every Desktop; ids are bundle ids from petal_list_apps, and an https:// address is a website shortcut): "
+                       "add puts these at the end, remove takes these out, and apps replaces the whole list with these in this order, which is how you reorder (send every app you want kept; petal_get_state gives the list as it is). "
+                       "position: bottom, left or right; autohide: on or off; use: petal or macos picks Petal or macOS's own Dock (the other turns off). Returns what changed, with the apps as they are now." if MAC
                        else "Move the dock (position: bottom, top, left, right) and/or turn auto-hide on or off.",
                        {"position": {"type": "string", "enum": ["bottom", "left", "right"] if MAC else ["bottom", "top", "left", "right"]},
-                        "autohide": {"type": "boolean"}, **({"use": {"type": "string", "enum": ["petal", "macos"]}} if MAC else {})}),
+                        "autohide": {"type": "boolean"},
+                        **({"use": {"type": "string", "enum": ["petal", "macos"]},
+                            "apps": {"type": "array", "items": {"type": "string"}, "description": "the whole dock, in the order it shows"},
+                            "add": {"type": "array", "items": {"type": "string"}, "description": "apps to put at the end"},
+                            "remove": {"type": "array", "items": {"type": "string"}, "description": "apps to take out"}} if MAC else {})}),
     "petal_save_mode": (t_save_mode, "Create a mode or update fields of an existing one (merges). Fields: " + "; ".join("%s: %s" % kv for kv in MODE_FIELDS.items()),
                         {"mode": {"type": "object", "description": "must include id"}}),
     "petal_delete_mode": (t_delete_mode, "Delete a mode.", {"id": {"type": "string"}}),
-    "petal_set_default_mode": (t_set_default_mode, "Set the mode new %ss start in." % WORKSPACE, {"id": {"type": "string"}}),
-    "petal_switch_mode": (t_switch_mode, "Switch the focused %s to a mode." % WORKSPACE, {"id": {"type": "string"}}),
-    "petal_list_apps": (t_list_apps, "Installed apps (%s and name), optionally filtered by a search word. Use the ids in a mode's apps." % ("bundle id" if MAC else "desktop id"),
+    "petal_set_default_mode": (t_set_default_mode, "Set the mode new workspaces start in.", {"id": {"type": "string"}}),
+    "petal_switch_mode": (t_switch_mode, "Switch the focused workspace to a mode.", {"id": {"type": "string"}}),
+    "petal_list_apps": (t_list_apps, "Installed apps (bundle id and name), optionally filtered by a search word. Use the ids in the dock's apps (petal_set_dock)." if MAC
+                        else "Installed apps (%s and name), optionally filtered by a search word. Use the ids in a mode's apps." % "desktop id",
                         {"query": {"type": "string"}}),
     "petal_export_recipe": (globals().get("t_export_recipe", not_yet), "Save the user's dock as a shareable recipe file (.petal): modes, apps, look and features, nothing personal. Returns its path.",
                             {"path": {"type": "string", "description": "where to save it; default ~/<name>.petal"}, "name": {"type": "string"}}),
     "petal_import_recipe": (globals().get("t_import_recipe", not_yet), "Add the modes from a recipe file (.petal) someone shared, and optionally its look. Apps are matched to what's installed; the rest are listed as missing.",
                             {"path": {"type": "string"}, "look": {"type": "boolean", "description": "also use its look and features"}}),
     "petal_suggestions": (globals().get("t_suggestions", not_yet), "Modes Petal would suggest from the user's activity (new modes, or apps to add to a mode).", {}),
-    "petal_summary": (globals().get("t_summary", not_yet), "The user's time in each mode (top apps, focus cards) over the last `days` (7 by default; up to 30, the history kept)" + (", or from/to (YYYY-MM-DD), with a day-by-day breakdown (byDay) for charts." if MAC else "."),
-                      {"days": {"type": "integer"}, **({"from": {"type": "string"}, "to": {"type": "string"}} if MAC else {})}),
-    "petal_reload": (t_reload, "Restart Petal to load a rebuilt Petal.app (settings and modes don't need this)." if MAC
+    "petal_summary": (globals().get("t_summary", not_yet), "The user's time in each mode (top apps, focus cards) over the last `days` (7 by default; up to 30, the history kept).",
+                      {"days": {"type": "integer"}}),
+    "petal_reload": (t_reload, "Restart Petal to load a rebuilt Petal.app (settings don't need this)." if MAC
                      else "Restart Omarchy's shell to load edits to Petal's own source code (settings and modes don't need this).", {}),
 }
 
 
 if MAC:
+    for name in MAC_LEAVES_OUT["tools"]:
+        del TOOLS[name]
     TOOLS.update(ASSIST_TOOLS)
 
 
@@ -1127,8 +1165,8 @@ def cli(argv):
 
 
 def main():
-    # Petal for macOS answers Claude itself (no python3 needed on the Mac); its build takes the tools, settings and
-    # mode fields from here, so both platforms describe them the same way.
+    # Petal for macOS answers Claude itself (no python3 needed on the Mac); its build takes the tools and settings
+    # from here (--describe, on a Mac: without Omarchy's modes), so both platforms describe the rest the same way.
     # `--tool <name> '<json args>'` runs one tool and prints its JSON (the dock and bin/petal use it, so there's one
     # implementation); `--cli …` is bin/petal's plain-words side of the same.
     if "--tool" in sys.argv[1:2]:
@@ -1152,7 +1190,7 @@ def main():
         return
     if "--describe" in sys.argv:
         json.dump({"tools": tool_list(), "settings": {k: list(v) for k, v in SETTINGS_SCHEMA.items()},
-                   "mode_fields": MODE_FIELDS}, sys.stdout, indent=1, ensure_ascii=False)
+                   **({} if MAC else {"mode_fields": MODE_FIELDS})}, sys.stdout, indent=1, ensure_ascii=False)
         return
     for line in sys.stdin:
         line = line.strip()
