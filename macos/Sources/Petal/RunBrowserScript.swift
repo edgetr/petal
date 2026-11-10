@@ -174,15 +174,22 @@ enum RunBrowserScript {
         var next = state;
         var heading = /^h[1-6]$/.test(tag) ? Number(tag.charAt(1)) : (role === 'heading' ? Number(el.getAttribute('aria-level')) || 2 : 0);
         if (heading && !state.quiet) {
-          var words = cut(el.innerText || el.textContent, 300);
-          if (words) { out.push({k: 'heading', t: words, lv: heading, pa: pa, sb: sb, r: rect(el)}); chars += words.length; }
+          // Headings are text like any other: past the budget they're left out (and said to be), their links still listed.
+          if (chars >= maxText) {
+            more = true;
+          } else {
+            var words = cut(el.innerText || el.textContent, 300);
+            if (words) { out.push({k: 'heading', t: words, lv: heading, pa: pa, sb: sb, r: rect(el)}); chars += words.length; }
+          }
           next = {block: me, quiet: true};
         } else if (tag === 'label' && el.control) {
           // Its words name its control: said there, not twice.
           next = {block: block, quiet: true};
         } else if (tag === 'img') {
           var alt = cut(el.getAttribute('alt'), 200);
-          if (alt && !state.quiet) out.push({k: 'text', t: '(image: ' + alt + ')', pa: pa, sb: sb, b: block, r: rect(el)});
+          if (alt && !state.quiet) {
+            if (chars >= maxText) { more = true; } else { out.push({k: 'text', t: '(image: ' + alt + ')', pa: pa, sb: sb, b: block, r: rect(el)}); chars += alt.length; }
+          }
           return;
         } else if (block !== state.block) {
           next = {block: block, quiet: state.quiet};
@@ -195,8 +202,11 @@ enum RunBrowserScript {
     """#
 
     /// `act(op, number, a)`: one thing done to a control `collect` listed (`a.gen`: the read its number came from).
-    /// What it answers: {stale} the page was read again or is another page, {gone} the control left the page, else
-    /// the op's own answer. A password field is typed into only by a fill (`a.secret`), and only while it's still
+    /// What it answers: {stale} the page was read again or is another page, {gone} the control left the page, {moved}
+    /// a vault's write was given up because the page moved on, else the op's own answer. A vault's write (`a.vault`,
+    /// with `a.at` and `a.top`: the addresses Petal decided on) is checked once more here, in the very call that
+    /// writes: after the field took the cursor (the only step before the write that the page can hook) and
+    /// immediately before the value is set, so no code of the page's runs between the last check and the write. A password field is typed into only by a fill (`a.secret`), and only while it's still
     /// the kind of field Petal decided on (`a.secure`); what a fill puts in is never read back, only counted.
     static let act = #"""
     (function(op, h, a){
@@ -219,6 +229,17 @@ enum RunBrowserScript {
       function setValue(text){
         var proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
         Object.getOwnPropertyDescriptor(proto, 'value').set.call(el, text);
+      }
+      // A vault write's own last check, made in the very call that writes and immediately before the value is set:
+      // this document is still at the address Petal decided on (and the tab's page, where it can be seen from here),
+      // and the element is still in it. Nothing of the page's runs between this and the write.
+      function placed(){
+        if (!a.vault) return true;
+        if (String(location.href).split('#')[0] !== a.at) return false;
+        if (a.top != null) {
+          try { if (top !== self && String(top.location.href).split('#')[0] !== a.top) return false; } catch (e) {}
+        }
+        return el.isConnected && el.ownerDocument === document;
       }
       function names(){
         var l = '';
@@ -274,7 +295,16 @@ enum RunBrowserScript {
             if (a.secret) return out({nofit: 1});
             next = next.slice(0, el.maxLength);
           }
+          // The field takes the cursor first: the one step here the page can hook (its focus handlers run now).
           try { el.focus({preventScroll: true}); } catch (e) {}
+          if (a.vault) {
+            // Checked again after it, and nothing of the page's runs from here to the write: the page may have moved
+            // on in that handler, or made the field another kind.
+            if (!placed()) return out({moved: 1});
+            if (tag === 'input' && String(el.getAttribute('type') || '').toLowerCase() === 'password') S.secure.add(el);
+            if ((a.secure ? true : false) !== S.secure.has(el)) return out({changed: 1});
+            if (el.disabled || el.readOnly) return out({off: 1});
+          }
           setValue(next);
           if (a.secret) S.filled.add(el);
           try { el.dispatchEvent(new InputEvent('input', {bubbles: true, composed: true, inputType: 'insertText', data: a.secret ? null : text})); }
@@ -310,6 +340,8 @@ enum RunBrowserScript {
           return out({nooption: 1, opts: Array.prototype.slice.call(el.options, 0, 40).map(function(o){ return clean(o.label || o.text).slice(0, 80); })});
         }
         if (a.secret) S.filled.add(el);
+        // A vault's pick: nothing of the page's has run in this call; its place is checked right before the choice is set.
+        if (!placed()) return out({moved: 1});
         el.selectedIndex = index;
         fire('input'); fire('change');
         return out({ok: 1, chose: a.secret ? '' : clean(el.options[index].label || el.options[index].text).slice(0, 120)});

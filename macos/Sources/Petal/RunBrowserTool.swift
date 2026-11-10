@@ -56,11 +56,21 @@ extension Assist {
             guard action == "open" else { return fail(Self.browserNone) }
             guard config.bool("runDisplays") else { return fail(RunBrowserRules.off) }
         }
+        // The control an id names is bound now, before anyone is asked anything: whatever the page is read as while a
+        // card waits, this call acts on this very element or not at all.
+        var bound: RunBrowser.Bound?
+        if !id.isEmpty, let browser = runBrowsers.browser(for: caller) {
+            guard let field = browser.bind([id])?.first else {
+                if case .failure(let problem) = browser.ref(id) { return fail(problem.words) }
+                return fail(RunBrowserRules.stale)
+            }
+            bound = field
+        }
         let label = who.map { $0.agent == .petal ? "" : $0.label } ?? ""
         browserAdmit(caller, token: token, send: send, fail: fail) { [weak self] in
             guard let self else { return }
             let ready: (RunBrowser) -> Void = { browser in
-                self.browserRun(action, args, address: address, key: key, id: id, direction: direction, browser: browser, caller: caller,
+                self.browserRun(action, args, address: address, key: key, id: id, bound: bound, direction: direction, browser: browser, caller: caller,
                                 token: token, send: send, fail: fail)
             }
             if let browser = self.runBrowsers.browser(for: caller) { return ready(browser) }
@@ -97,10 +107,10 @@ extension Assist {
 
     /// One action, on the browser's own queue; its answer back on the main thread, every word of it through the
     /// vault's redaction.
-    private func browserRun(_ action: String, _ args: [String: Any], address: String, key: RunBrowserRules.Key?, id: String, direction: String,
+    private func browserRun(_ action: String, _ args: [String: Any], address: String, key: RunBrowserRules.Key?, id: String, bound: RunBrowser.Bound?, direction: String,
                             browser: RunBrowser, caller: String, token: Acting.Cancel, send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
         browser.queue.async {
-            let outcome = BrowserActs.perform(action, args, address: address, key: key, id: id, direction: direction, browser: browser, cancel: token)
+            let outcome = BrowserActs.perform(action, args, address: address, key: key, id: id, bound: bound, direction: direction, browser: browser, cancel: token)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     if let line = outcome.did { self.did(line) }
@@ -116,8 +126,10 @@ extension Assist {
 
     /// The fields named by `ids` are a page's of the caller's own browser (ids from petal_browser read).
     func vaultPage(_ caller: String?, ids: [String]) -> VaultSurface? {
-        guard !ids.isEmpty, ids.allSatisfy(BrowserOutline.isID), let browser = runBrowsers.browser(for: caller), browser.has(ids) else { return nil }
-        return .page(browser: browser, ids: ids)
+        guard !ids.isEmpty, ids.allSatisfy(BrowserOutline.isID), let browser = runBrowsers.browser(for: caller),
+              let fields = browser.bind(ids) else { return nil }
+        // Bound now, to these very elements: what the ids mean later (after another read) no longer matters.
+        return .page(browser: browser, fields: fields)
     }
 
     /// Why the vault can't fill these fields now, or nil: a window petal_ui read needs Accessibility; a page of the
@@ -129,10 +141,10 @@ extension Assist {
 
     /// Where a page's fields are and what kind each is, asked of the browser itself (its frames' addresses, the tab's
     /// page, its own record of the tab), with the vault's items; handed back on the main thread.
-    func vaultPagePlaces(_ browser: RunBrowser, _ ids: [String], fail: @escaping (String) -> Void,
+    func vaultPagePlaces(_ browser: RunBrowser, _ fields: [RunBrowser.Bound], fail: @escaping (String) -> Void,
                          done: @escaping @MainActor (_ places: [Vault.Place], _ targets: [Vault.Target], _ items: [VaultItem]?) -> Void) {
         browser.queue.async {
-            let found = browser.places(ids)
+            let found = browser.places(fields)
             let items = try? VaultStore.items()
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -150,7 +162,7 @@ extension Assist {
     /// fill on the browser's queue (RunBrowser.fill), where the page is asked about again right before the value goes.
     /// `allowed`: the person just said yes to this very fill on its card, which lets it type; Return after it asks to
     /// use the browser as any act does.
-    func vaultPageFill(_ plan: VaultFillPlan, id: String, browser: RunBrowser, caller: String, token: Acting.Cancel, allowed: Bool,
+    func vaultPageFill(_ plan: VaultFillPlan, field: RunBrowser.Bound, browser: RunBrowser, caller: String, token: Acting.Cancel, allowed: Bool,
                        agent: (pass: AgentPass, item: String)?, send: @escaping (Any) -> Void, fail: @escaping (String) -> Void) {
         guard computer.live(caller, token) else { return fail(Self.browserOver) }
         if let agent, !AgentGrants.shared.still(agent.pass, item: agent.item) { return fail(AgentPass.revokedText) }
@@ -165,7 +177,7 @@ extension Assist {
         let cancel = Acting.Cancel(under: token, buy: buy, pass: agent?.pass)
         let go = {
             browser.queue.async {
-                let why = browser.fill(plan, id: id, cancel: cancel)
+                let why = browser.fill(plan, field: field, cancel: cancel)
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         if let why {
@@ -189,7 +201,8 @@ extension Assist {
 /// only who reads where a field is, and who puts the value in, differ.
 enum VaultSurface {
     case window(map: ComputerUse.Map, entries: [ComputerUse.Entry])
-    case page(browser: RunBrowser, ids: [String])
+    /// A page of the run's own browser: its fields bound when the call came in (RunBrowser.Bound).
+    case page(browser: RunBrowser, fields: [RunBrowser.Bound])
 
     var isPage: Bool {
         if case .page = self { return true }
@@ -220,7 +233,7 @@ enum VaultSurface {
     func picking(_ indices: [Int]) -> VaultSurface {
         switch self {
         case .window(let map, let entries): return .window(map: map, entries: indices.map { entries[$0] })
-        case .page(let browser, let ids): return .page(browser: browser, ids: indices.map { ids[$0] })
+        case .page(let browser, let fields): return .page(browser: browser, fields: indices.map { fields[$0] })
         }
     }
 }
@@ -237,7 +250,7 @@ enum BrowserActs {
 
     static let changed = "The page may have changed: call read again before using more ids."
 
-    static func perform(_ action: String, _ args: [String: Any], address: String, key: RunBrowserRules.Key?, id: String, direction: String,
+    static func perform(_ action: String, _ args: [String: Any], address: String, key: RunBrowserRules.Key?, id: String, bound: RunBrowser.Bound?, direction: String,
                         browser: RunBrowser, cancel: Acting.Cancel) -> Outcome {
         func failed(_ why: String, did: HistoryLine? = nil) -> Outcome { Outcome(error: why, did: did) }
         guard browser.alive else { return failed(RunBrowser.Problem.closed.words) }
@@ -271,10 +284,10 @@ enum BrowserActs {
             out.reply["next"] = changed
             now(browser, into: &out)
         case "click":
-            let name = controlName(browser, id)
+            let name = controlName(browser, id, bound)
             let at = site()
             guard !cancel.stopped else { return failed(ComputerUse.stoppedText) }
-            switch browser.act(id, "click", [:], gesture: true) {
+            switch browser.act(id, bound: bound, "click", [:], gesture: true) {
             case .failure(let problem): return failed(problem.words)
             case .success(let answer):
                 if answer["off"] != nil { return failed("\(id) is greyed out: it can't be pressed now.") }
@@ -286,12 +299,12 @@ enum BrowserActs {
             out.reply["next"] = changed
             now(browser, into: &out)
         case "type":
-            let name = controlName(browser, id)
+            let name = controlName(browser, id, bound)
             let at = site()
             let text = args["text"] as? String ?? ""
             guard !cancel.stopped else { return failed(ComputerUse.stoppedText) }
             let answer: [String: Any]
-            switch browser.act(id, "type", ["text": text, "replace": args["replace"] as? Bool ?? true, "secret": false]) {
+            switch browser.act(id, bound: bound, "type", ["text": text, "replace": args["replace"] as? Bool ?? true, "secret": false]) {
             case .failure(let problem): return failed(problem.words)
             case .success(let got): answer = got
             }
@@ -304,24 +317,24 @@ enum BrowserActs {
             out.did = "Typed into \(quoted: name, else: "a field") on \(named: at, else: "a page") (a browser of its own)"
             out.reply["done"] = "Typed into \(name.isEmpty ? id : "“\(name)”")"
             // What the field reads now: never one named for a secret, never text holding one.
-            if let value = answer["v"] as? String, case .success(let found) = browser.ref(id) {
-                let node = found.ref.node.ui(order: 0)
+            if let value = answer["v"] as? String, let typedInto = bound?.ref.node ?? (try? browser.ref(id).get())?.ref.node {
+                let node = typedInto.ui(order: 0)
                 out.reply["value"] = VaultIndex.settled { index in UIMap.typedValue(value, node: node, filled: false, secret: index.matches) } ?? UIMap.hidden
             }
             if args["submit"] as? Bool == true {
                 guard !cancel.stopped else { return failed("It was typed, not sent: " + ComputerUse.stoppedText, did: out.did) }
-                if case .failure(let problem) = browser.act(id, "submit", [:], gesture: true) { return failed("It was typed, not sent: " + problem.words, did: out.did) }
+                if case .failure(let problem) = browser.act(id, bound: bound, "submit", [:], gesture: true) { return failed("It was typed, not sent: " + problem.words, did: out.did) }
                 usleep(120_000)
                 browser.settle(8, cancel: cancel)
                 out.reply["next"] = changed
                 now(browser, into: &out)
             }
         case "select":
-            let name = controlName(browser, id)
+            let name = controlName(browser, id, bound)
             let at = site()
             guard !cancel.stopped else { return failed(ComputerUse.stoppedText) }
             let answer: [String: Any]
-            switch browser.act(id, "select", ["choice": args["choice"] as? String ?? args["text"] as? String ?? ""]) {
+            switch browser.act(id, bound: bound, "select", ["choice": args["choice"] as? String ?? args["text"] as? String ?? ""]) {
             case .failure(let problem): return failed(problem.words)
             case .success(let got): answer = got
             }
@@ -335,12 +348,12 @@ enum BrowserActs {
             out.reply["done"] = "Chose “\(answer["chose"] as? String ?? "")”" + (name.isEmpty ? "" : " in “\(name)”")
             browser.settle(3, cancel: cancel)
         case "check":
-            let name = controlName(browser, id)
+            let name = controlName(browser, id, bound)
             let at = site()
             let want = args["on"] as? Bool ?? true
             guard !cancel.stopped else { return failed(ComputerUse.stoppedText) }
             let answer: [String: Any]
-            switch browser.act(id, "check", ["on": want], gesture: true) {
+            switch browser.act(id, bound: bound, "check", ["on": want], gesture: true) {
             case .failure(let problem): return failed(problem.words)
             case .success(let got): answer = got
             }
@@ -356,7 +369,7 @@ enum BrowserActs {
             let at = site()
             if !id.isEmpty {
                 guard !cancel.stopped else { return failed(ComputerUse.stoppedText) }
-                switch browser.act(id, "focus", [:]) {
+                switch browser.act(id, bound: bound, "focus", [:]) {
                 case .failure(let problem): return failed(problem.words)
                 case .success(let answer):
                     guard (answer["focused"] as? NSNumber)?.intValue == 1 else { return failed("\(id) didn't take the cursor, so no key was pressed.") }
@@ -372,7 +385,7 @@ enum BrowserActs {
         case "scroll":
             if !id.isEmpty {
                 guard !cancel.stopped else { return failed(ComputerUse.stoppedText) }
-                if case .failure(let problem) = browser.act(id, "show", [:]) { return failed(problem.words) }
+                if case .failure(let problem) = browser.act(id, bound: bound, "show", [:]) { return failed(problem.words) }
                 out.reply["done"] = "Brought \(id) into view"
             } else {
                 switch browser.scroll(direction, cancel: cancel) {
@@ -421,8 +434,20 @@ enum BrowserActs {
         var out = outcome
         let notes = browser.notes()
         if !notes.isEmpty { out.reply["happened"] = notes }
-        guard let checked = shown(out.reply) else {
+        guard var checked = shown(out.reply) else {
             return Outcome(error: VaultStore.unreadableText + " Petal couldn't check its answer for your secrets, so it tells nothing. Call read once the vault can be read.", did: out.did)
+        }
+        // Checked whole first, then kept short: an address or a title is a page's to make as long as it likes.
+        for (key, most) in [("address", 2000), ("title", 300)] {
+            if let text = checked[key] as? String { checked[key] = UIMap.truncate(text, most) }
+        }
+        if let tabs = checked["tabs"] as? [[String: Any]] {
+            checked["tabs"] = tabs.prefix(40).map { tab -> [String: Any] in
+                var short = tab
+                if let address = tab["address"] as? String { short["address"] = UIMap.truncate(address, 500) }
+                if let title = tab["title"] as? String { short["title"] = UIMap.truncate(title, 200) }
+                return short
+            }
         }
         out.reply = checked
         return out
@@ -449,9 +474,8 @@ enum BrowserActs {
     }
 
     /// A control's name as it was read, for an answer and the history (both redacted before they're kept or told).
-    private static func controlName(_ browser: RunBrowser, _ id: String) -> String {
-        guard case .success(let found) = browser.ref(id) else { return "" }
-        let node = found.ref.node
+    private static func controlName(_ browser: RunBrowser, _ id: String, _ bound: RunBrowser.Bound?) -> String {
+        guard let node = bound?.ref.node ?? (try? browser.ref(id).get())?.ref.node else { return "" }
         guard !node.secure, !node.filled else { return node.secure ? "the password field" : "" }
         return UIMap.truncate([node.text, node.label, node.placeholder, node.hint].map(UIMap.tidy).first { !$0.isEmpty } ?? "", 80)
     }

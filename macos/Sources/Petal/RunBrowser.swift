@@ -58,7 +58,9 @@ final class BrowserPipe: @unchecked Sendable {
     /// Starts `executable` with the pipe on its descriptors 3 and 4 and nothing else of Petal's open in it, in a
     /// process group of its own (so it and everything it starts end together), with a bare environment. Never through
     /// Launch Services: it's Petal's child, not an app the person opened.
-    static func start(executable: String, arguments: [String]) -> BrowserPipe? {
+    /// `spawned`: called with the child's pid the moment it exists, before anything else is done with it;
+    /// `exited`: called once the process is gone, however it went.
+    static func start(executable: String, arguments: [String], spawned: ((pid_t) -> Void)? = nil, exited: (@Sendable (pid_t) -> Void)? = nil) -> BrowserPipe? {
         var down: [Int32] = [-1, -1], up: [Int32] = [-1, -1]
         guard pipe(&down) == 0 else { return nil }
         guard pipe(&up) == 0 else { close(down[0]); close(down[1]); return nil }
@@ -102,6 +104,7 @@ final class BrowserPipe: @unchecked Sendable {
         }
         var pid: pid_t = 0
         let status = posix_spawn(&pid, executable, &actions, &attributes, &argv, &envp)
+        if status == 0, pid > 0 { spawned?(pid) }
         close(childRead)
         close(childWrite)
         guard status == 0, pid > 0 else {
@@ -110,6 +113,7 @@ final class BrowserPipe: @unchecked Sendable {
             return nil
         }
         let made = BrowserPipe(pid: pid, writeFD: parentWrite, readFD: parentRead)
+        made.exitedHandler = exited
         let reader = Thread { made.read() }
         reader.name = "petal.browser.read"
         reader.stackSize = 1 << 20
@@ -143,10 +147,13 @@ final class BrowserPipe: @unchecked Sendable {
         shutDown()
     }
 
+    private var exitedHandler: (@Sendable (pid_t) -> Void)?
+
     private func reap() {
         var status: Int32 = 0
         while waitpid(pid, &status, 0) < 0, errno == EINTR {}
         lock.withLock { gone = true }
+        exitedHandler?(pid)
         exited.signal()
         shutDown()
     }
@@ -295,11 +302,56 @@ final class RunBrowser: @unchecked Sendable {
         var session: String
         var id: String
         var url: String
+        /// Whose the document is, as the browser's inspector gives it for the frame's own script context
+        /// ("https://example.com"; "://" for an origin that is nobody's: a sandboxed document, a data: page). Never
+        /// derived from its address: a sandboxed document at a site's address isn't the site's, and a frame with no
+        /// address of its own is the site's that made it. Empty: the browser didn't say.
+        var origin = ""
         var loader: String
         var parent: Int
         var context = 0
         /// The read (`collect`) its controls' numbers came from.
         var generation = 0
+    }
+
+    /// A field as it was when a fill was planned for it: the very element (its number in its frame's read), the
+    /// frame's document and Petal's world in it, the tab and how often its page had become another. A fill carries
+    /// this from the plan, through whatever card the person answers, to the write: never an id looked up again, which
+    /// a later read may have given to another element.
+    struct Bound {
+        var ref: BrowserOutline.Ref
+        var frame: FrameAt
+        var target: String
+        var stamp: Int
+    }
+
+    /// One browser being started for a run, so every ending of the run can end it: before it exists (nothing is
+    /// started), once its process exists (it's ended, and its profile goes with it), or as it finishes (thrown away).
+    final class Launch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stopped = false
+        private var pipe: BrowserPipe?
+
+        var cancelled: Bool { lock.withLock { stopped } }
+
+        /// The child exists. False: the launch was cancelled meanwhile, and the child is the caller's to end.
+        func started(_ pipe: BrowserPipe) -> Bool {
+            lock.withLock {
+                guard !stopped else { return false }
+                self.pipe = pipe
+                return true
+            }
+        }
+
+        /// Ends it, wherever it is: nothing more is started, and a browser already started is ended now (what waits
+        /// on it hears it closed, and the launch removes its profile).
+        func cancel() {
+            let running: BrowserPipe? = lock.withLock {
+                stopped = true
+                return pipe
+            }
+            running?.kill()
+        }
     }
 
     /// The last read of the tab worked in: what an id stands for.
@@ -344,6 +396,11 @@ final class RunBrowser: @unchecked Sendable {
     private var current: String?
     /// Counts every time a tab's page becomes another: a read from before is no use.
     private var stamp = 0
+    /// Counts every time a tab's page moved on in any way Petal heard of (another document, another address of the
+    /// same document, another tab picked): a write decided before isn't made after.
+    private var moves = 0
+    /// Each frame's origin as the browser's inspector reports it, while one session is being asked.
+    private var reported: [String: [String: String]] = [:]
     private var kept: Kept?
     private var over = false
     private var mine: Set<String> = []
@@ -378,21 +435,38 @@ final class RunBrowser: @unchecked Sendable {
     /// Starts the browser with `profile` (made here, for it alone) and gets its first tab ready: with a window, made
     /// at `frame` over the pipe and checked to be there. Off the main thread: a browser takes a moment to start.
     /// On any failure nothing is left: no process, no folder.
-    static func launch(spec: Spec, group: String, profile: String, frame: CGRect?) -> Result<RunBrowser, Problem> {
+    /// `launch`: lets the run's ending end it at any point (RunBrowsers); cancelled, nothing is started, or what was
+    /// started is ended here. The process is a run's (RunApps) from the moment it exists until it's gone, so nothing
+    /// ever takes it for one of the person's apps, not even while it starts.
+    static func launch(spec: Spec, group: String, profile: String, frame: CGRect?, launch: Launch? = nil) -> Result<RunBrowser, Problem> {
+        let ended = Problem(RunDisplays.Failure.ended.words)
+        if launch?.cancelled == true { return .failure(ended) }
         do {
             try FileManager.default.createDirectory(atPath: profile, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         } catch {
             return .failure(Problem("Petal couldn't make a folder for the browser's profile."))
         }
         let arguments = RunBrowserRules.arguments(profile: profile, frame: spec.headless ? nil : frame) + spec.extra
-        guard let pipe = BrowserPipe.start(executable: spec.executable, arguments: arguments) else {
-            try? FileManager.default.removeItem(atPath: profile)
+        let bundle = spec.bundle
+        let started = BrowserPipe.start(executable: spec.executable, arguments: arguments,
+                                        spawned: { RunApps.register($0, bundle: bundle) }, exited: { RunApps.forget($0) })
+        guard let pipe = started else {
+            RunBrowsers.removeProfile(profile)
             return .failure(Problem("\(spec.name) couldn't be started for a run."))
         }
         let browser = RunBrowser(spec: spec, group: group, profile: profile, pipe: pipe)
+        // Cancelled while it was being started: ended at once, its profile with it.
+        if let launch, !launch.started(pipe) {
+            browser.end(wait: 2)
+            return .failure(ended)
+        }
         if let problem = browser.open(frame: spec.headless ? nil : frame) {
             browser.end(wait: 2)
-            return .failure(problem)
+            return .failure(launch?.cancelled == true ? ended : problem)
+        }
+        if launch?.cancelled == true {
+            browser.end(wait: 2)
+            return .failure(ended)
         }
         return .success(browser)
     }
@@ -481,7 +555,7 @@ final class RunBrowser: @unchecked Sendable {
                     numbers += 1
                     tabs[id] = Tab(id: id, number: numbers)
                     // One a page opened by itself: said, and left where it is.
-                    if info["openerId"] != nil, !mine.contains(id) { happened.append("The page opened a new tab (t\(numbers)). tab switches to it.") }
+                    if info["openerId"] != nil, !mine.contains(id) { remember("The page opened a new tab (t\(numbers)). tab switches to it.") }
                 }
                 tabs[id]?.url = info["url"] as? String ?? ""
                 tabs[id]?.title = info["title"] as? String ?? ""
@@ -498,6 +572,7 @@ final class RunBrowser: @unchecked Sendable {
                     current = tabs.values.max { $0.number < $1.number }?.id
                     stamp += 1
                 }
+                moves += 1
                 return true
             }
             if was { onLeft?() }
@@ -531,6 +606,12 @@ final class RunBrowser: @unchecked Sendable {
             // on): this session hears no more of its loading.
             guard let session, let frame = params["frameId"] as? String else { return }
             lock.withLock { loading[session]?.remove(frame); activity = Date() }
+        case "Runtime.executionContextCreated":
+            // Asked for while a place is read (`origins`): each frame's own context, with whose it is.
+            guard let session, let context = params["context"] as? [String: Any], let aux = context["auxData"] as? [String: Any],
+                  (aux["isDefault"] as? NSNumber)?.boolValue == true, let frame = aux["frameId"] as? String else { return }
+            let origin = context["origin"] as? String ?? ""
+            lock.withLock { if reported[session] != nil { reported[session]?[frame] = origin } }
         case "Page.frameNavigated", "Page.navigatedWithinDocument":
             guard let session else { return }
             let top: Bool
@@ -543,6 +624,7 @@ final class RunBrowser: @unchecked Sendable {
                 activity = Date()
                 guard top, sessions.values.contains(session) else { return false }
                 if method == "Page.frameNavigated" { stamp += 1 }
+                moves += 1
                 return true
             }
             if page { onLeft?() }
@@ -553,15 +635,15 @@ final class RunBrowser: @unchecked Sendable {
             let accept = type == "alert" || type == "beforeunload"
             pipe.post("Page.handleJavaScriptDialog", ["accept": accept], session: session)
             if type != "beforeunload" {
-                lock.withLock { happened.append("The page showed a message\(said.isEmpty ? "" : ": “\(said)”") (\(accept ? "closed" : "answered Cancel")).") }
+                lock.withLock { remember("The page showed a message\(said.isEmpty ? "" : ": “\(said)”") (\(accept ? "closed" : "answered Cancel")).") }
             }
         case "Page.fileChooserOpened":
-            lock.withLock { happened.append("The page asked for a file to upload: choosing a file isn't built in a run's browser, so none was given.") }
+            lock.withLock { remember("The page asked for a file to upload: choosing a file isn't built in a run's browser, so none was given.") }
         case "Browser.downloadWillBegin":
             let note = RunBrowserRules.downloadRefused(params["suggestedFilename"] as? String ?? "", from: params["url"] as? String ?? "")
-            lock.withLock { happened.append(note) }
+            lock.withLock { remember(note) }
         case "Inspector.targetCrashed":
-            lock.withLock { happened.append("The page crashed. reload loads it again.") }
+            lock.withLock { remember("The page crashed. reload loads it again.") }
         default: onOther?(method, params, session)
         }
     }
@@ -569,11 +651,21 @@ final class RunBrowser: @unchecked Sendable {
     /// Anything else the browser says (a check's own conversation with it), on the reading thread.
     var onOther: ((_ method: String, _ params: [String: Any], _ session: String?) -> Void)?
 
+    /// Keeps one thing that happened by itself, for the next answer (called with the lock held). A page that keeps at
+    /// it (a message in a loop) never makes an answer long: a dozen are told, the rest counted.
+    private func remember(_ note: String) {
+        if happened.count < 12 { happened.append(UIMap.truncate(note, 500)) } else { unsaid += 1 }
+    }
+
+    private var unsaid = 0
+
     /// What happened by itself since this was last asked (a message closed, a download refused, a new tab), once.
     func notes() -> [String] {
         lock.withLock {
-            let list = happened
+            var list = happened
+            if unsaid > 0 { list.append("And \(unsaid) more like these.") }
             happened = []
+            unsaid = 0
             return list
         }
     }
@@ -622,6 +714,7 @@ final class RunBrowser: @unchecked Sendable {
         lock.withLock {
             if current != tab.id { stamp += 1 }
             current = tab.id
+            moves += 1
         }
         onLeft?()
         return nil
@@ -678,6 +771,7 @@ final class RunBrowser: @unchecked Sendable {
                 if tabs[target] == nil { numbers += 1; tabs[target] = Tab(id: target, number: numbers) }
                 current = target
                 stamp += 1
+                moves += 1
             }
             onLeft?()
         }
@@ -727,17 +821,22 @@ final class RunBrowser: @unchecked Sendable {
     // MARK: Reading a page
 
     /// The page's frames as the browser lists them now, the page's own first, each after the one that holds it.
-    private func frameList(_ session: String) -> [FrameAt]? {
+    /// `withOrigins`: each frame also with whose it is (asked only where the vault needs it).
+    private func frameList(_ session: String, withOrigins: Bool = false) -> [FrameAt]? {
         var out: [FrameAt] = []
         var index: [String: Int] = [:]
+        var whose: [String: [String: String]] = [:]
         func add(_ tree: [String: Any], session: String, parent: Int) {
             guard let frame = tree["frame"] as? [String: Any], let id = frame["id"] as? String else { return }
             let at = out.count
             index[id] = at
-            out.append(FrameAt(session: session, id: id, url: frame["url"] as? String ?? "", loader: frame["loaderId"] as? String ?? "", parent: parent))
+            var one = FrameAt(session: session, id: id, url: frame["url"] as? String ?? "", loader: frame["loaderId"] as? String ?? "", parent: parent)
+            one.origin = whose[session]?[id] ?? ""
+            out.append(one)
             for child in tree["childFrames"] as? [[String: Any]] ?? [] { add(child, session: session, parent: at) }
         }
         guard let tree = (try? pipe.call("Page.getFrameTree", session: session).get())?["frameTree"] as? [String: Any] else { return nil }
+        if withOrigins { whose[session] = origins(session) }
         add(tree, session: session, parent: -1)
         // Frames in processes of their own, each under the frame that holds it (asked of its own session).
         var waiting: [String] = lock.withLock { (children[session] ?? []).map(\.session) }
@@ -753,10 +852,22 @@ final class RunBrowser: @unchecked Sendable {
                 if rounds < 20 { waiting.append(child) }
                 continue
             }
+            if withOrigins { whose[child] = origins(child) }
             add(tree, session: child, parent: holder)
             for inner in lock.withLock({ (children[child] ?? []).map(\.session) }) where seen.insert(inner).inserted { waiting.append(inner) }
         }
         return out
+    }
+
+    /// Whose each frame of a session is: the origin the browser's inspector reports for the frame's own script
+    /// context. Nothing is run in the page for it: turning the inspector's runtime on makes it list every context
+    /// there is, each with its origin, before it answers; it's turned off again at once (a page's own chatter is none
+    /// of Petal's business). A frame it doesn't list has no origin Petal knows.
+    private func origins(_ session: String) -> [String: String] {
+        lock.withLock { reported[session] = [:] }
+        _ = pipe.call("Runtime.enable", session: session, timeout: 5)
+        _ = pipe.call("Runtime.disable", session: session, timeout: 5)
+        return lock.withLock { reported.removeValue(forKey: session) ?? [:] }
     }
 
     private enum Ran { case value(String), stale, failed(String) }
@@ -871,15 +982,36 @@ final class RunBrowser: @unchecked Sendable {
         }
     }
 
-    /// Whether the last read has these ids (for the vault: its fields are a page's).
-    func has(_ ids: [String]) -> Bool {
-        lock.withLock { ids.allSatisfy { kept?.outline.refs[$0] != nil } }
+    /// The fields these ids stand for in the last read, bound as they are now (for the vault: a fill is planned for
+    /// these very elements, whatever is read later). nil: one of them isn't in the last read, or that read is of a
+    /// page the tab no longer shows.
+    func bind(_ ids: [String]) -> [Bound]? {
+        lock.withLock { () -> [Bound]? in
+            guard let kept, kept.target == current, kept.stamp == stamp else { return nil }
+            var out: [Bound] = []
+            for id in ids {
+                guard let ref = kept.outline.refs[id] else { return nil }
+                out.append(Bound(ref: ref, frame: kept.frames[ref.frame], target: kept.target, stamp: kept.stamp))
+            }
+            return out
+        }
+    }
+
+    /// The tab still shows the page a field was bound on (the same tab worked in, not become another page since).
+    private func holds(_ bound: Bound) -> Bool {
+        alive && lock.withLock { current == bound.target && stamp == bound.stamp }
     }
 
     // MARK: Using a control
 
     /// One thing done to a control (RunBrowserScript.act): its answer, or why not.
-    func act(_ id: String, _ op: String, _ arguments: [String: Any] = [:], gesture: Bool = false) -> Result<[String: Any], Problem> {
+    /// `bound`: the control as it was bound when the call came in (before any card the person had to answer); with
+    /// it, the id is never looked up again, and a page read again since gets nothing done.
+    func act(_ id: String, bound: Bound? = nil, _ op: String, _ arguments: [String: Any] = [:], gesture: Bool = false) -> Result<[String: Any], Problem> {
+        if let bound {
+            guard holds(bound) else { return .failure(alive ? .stale : .closed) }
+            return act(bound.ref, in: bound.frame, op, arguments, gesture: gesture)
+        }
         switch ref(id) {
         case .failure(let problem): return .failure(problem)
         case .success(let found): return act(found.ref, in: found.frame, op, arguments, gesture: gesture)
@@ -973,67 +1105,75 @@ final class RunBrowser: @unchecked Sendable {
 
     // MARK: Where a field is, for the vault
 
-    /// Where the field of `ref` is now, as the browser itself says (never the AI, never the page's own script): its
-    /// frame's address, the tab's whole page's, and the browser's own record of the tab. nil: its frame is gone, or
-    /// shows another document than the one read. In a browser Petal couldn't verify, the page is unverified.
-    func place(_ ref: BrowserOutline.Ref, kept: Kept) -> Vault.Place? {
-        guard alive, let session = lock.withLock({ sessions[kept.target] }), let now = frameList(session), let top = now.first else { return nil }
-        let was = kept.frames[ref.frame]
+    /// Where a bound field is now, as the browser itself says (never the AI, never the page's own script): its
+    /// frame's document and the tab's whole page, each with its address and whose it is, and the browser's own record
+    /// of the tab. nil: the tab moved on, or the field's frame is gone or shows another document than the one bound.
+    /// In a browser Petal couldn't verify, the page is unverified.
+    private func spot(_ bound: Bound) -> (place: Vault.Place, frame: FrameAt, top: FrameAt)? {
+        guard holds(bound), let session = lock.withLock({ sessions[bound.target] }), let now = frameList(session, withOrigins: true),
+              let top = now.first else { return nil }
+        let was = bound.frame
         guard let frame = now.first(where: { $0.id == was.id && $0.session == was.session }), frame.loader == was.loader else { return nil }
-        let info = (try? pipe.call("Target.getTargetInfo", ["targetId": kept.target], timeout: 5).get())?["targetInfo"] as? [String: Any]
+        let info = (try? pipe.call("Target.getTargetInfo", ["targetId": bound.target], timeout: 5).get())?["targetInfo"] as? [String: Any]
         // The tab's page as it is now: another document in the tab is another page.
-        return RunBrowserRules.place(frame: frame.url, top: top.url, tab: info?["url"] as? String, target: kept.target, loader: top.loader,
-                                     trusted: verified, bundle: spec.bundle, name: spec.name)
+        let place = RunBrowserRules.place(frame: RunBrowserRules.Document(url: frame.url, origin: frame.origin),
+                                          top: RunBrowserRules.Document(url: top.url, origin: top.origin),
+                                          tab: info?["url"] as? String, target: bound.target, loader: top.loader,
+                                          trusted: verified, bundle: spec.bundle, name: spec.name)
+        return (place, frame, top)
     }
 
-    /// What kind of field `ref` is now (asked of the page again: a field may have changed since it was read), and
-    /// what it says of itself.
-    func target(_ ref: BrowserOutline.Ref, kept: Kept) -> (target: Vault.Target, info: [String: Any])? {
-        guard case .success(let info) = act(ref, in: kept.frames[ref.frame], "info", [:]) else { return nil }
+    func place(_ bound: Bound) -> Vault.Place? { spot(bound)?.place }
+
+    /// What kind of field a bound field is now (asked of the page again: a field may have changed since it was
+    /// read), and what it says of itself. nil: its read was replaced, or it left the page.
+    func target(_ bound: Bound) -> (target: Vault.Target, info: [String: Any])? {
+        guard holds(bound), case .success(let info) = act(bound.ref, in: bound.frame, "info", [:]) else { return nil }
         func flag(_ key: String) -> Bool { (info[key] as? NSNumber)?.intValue == 1 }
         return (Vault.Target(secure: flag("secure"), text: flag("text") && !flag("popup"), popup: flag("popup")), info)
     }
 
-    /// The places and kinds of the fields named by `ids`, in order; nil when one isn't in the last read, or its page
-    /// moved on.
-    func places(_ ids: [String]) -> Result<(places: [Vault.Place], targets: [Vault.Target]), Problem> {
+    /// The places and kinds of bound fields, in order; a problem when one's page moved on or was read again.
+    func places(_ fields: [Bound]) -> Result<(places: [Vault.Place], targets: [Vault.Target]), Problem> {
         var places: [Vault.Place] = [], targets: [Vault.Target] = []
-        for id in ids {
-            switch ref(id) {
-            case .failure(let problem): return .failure(problem)
-            case .success(let found):
-                guard let place = place(found.ref, kept: found.kept), let target = target(found.ref, kept: found.kept) else { return .failure(.stale) }
-                places.append(place)
-                targets.append(target.target)
-            }
+        for field in fields {
+            guard let place = place(field), let target = target(field) else { return .failure(.stale) }
+            places.append(place)
+            targets.append(target.target)
         }
         return .success((places, targets))
     }
 
-    /// Puts one vault value into the field `id`: only while the field is still in the document Petal decided on, at
-    /// the address it decided on, still the kind of field it was. The value is set in that very element, in Petal's
-    /// own world of the page: it can't land in another field, whatever has the cursor. Never the clipboard, never the
-    /// Mac's keyboard; what went in is counted, never read back. nil: filled. Off the main thread.
-    func fill(_ plan: VaultFillPlan, id: String, cancel: Acting.Cancel) -> String? {
+    /// Puts one vault value into a bound field: the very element the fill was planned for, only while it's still in
+    /// the document Petal decided on, at the address it decided on, still the kind of field it was. A field read
+    /// again since (its id may be another element's now), gone, or in a document that became another gets nothing.
+    /// The value is set in that element, in Petal's own world of the page: it can't land in another field, whatever
+    /// has the cursor. Never the clipboard, never the Mac's keyboard; what went in is counted, never read back.
+    ///
+    /// The last checks are in two places, so no code of the page's runs between them and the write: here, right
+    /// before the write is sent (not stopped, the page asked of the browser once more, and no word of the page
+    /// moving on come in since), and in the page itself, inside the very call that writes, after the one step the
+    /// page can hook (the field taking the cursor) and immediately before the value is set (RunBrowserScript.act).
+    /// nil: filled. Off the main thread.
+    func fill(_ plan: VaultFillPlan, field: Bound, cancel: Acting.Cancel) -> String? {
         func stopped() -> String { cancel.buyEnded ? Acting.buyEndedText : ComputerUse.stoppedText }
-        let found: (ref: BrowserOutline.Ref, frame: FrameAt, kept: Kept)
-        switch ref(id) {
-        case .failure(let problem): return problem.words + " Nothing was filled."
-        case .success(let got): found = got
-        }
+        let changed = RunBrowserRules.stale + " Nothing was filled."
         let card: Set<VaultField> = [.number, .securityCode, .expiry, .month, .year]
+        var at = "", top = ""
         // The same page as when Petal decided (payment info: the very page Buy was said on), asked of the browser now.
         func moved() -> String? {
-            guard let now = place(found.ref, kept: found.kept) else {
+            guard let now = spot(field) else {
                 if plan.payment { cancel.endBuy() }
-                return RunBrowserRules.stale + " Nothing was filled."
+                return changed
             }
-            guard let why = Vault.moved(from: plan.place, to: now, samePage: card.contains(plan.field)) else { return nil }
+            at = now.frame.url
+            top = now.top.url
+            guard let why = Vault.moved(from: plan.place, to: now.place, samePage: card.contains(plan.field)) else { return nil }
             if plan.payment { cancel.endBuy() }
             return RunBrowsers.words(why)
         }
         if let why = moved() { return why }
-        guard let kind = target(found.ref, kept: found.kept) else { return RunBrowserRules.stale + " Nothing was filled." }
+        guard let kind = target(field) else { return changed }
         guard kind.target == plan.target else { return "That field changed since it was read; nothing was filled. Call petal_browser read again." }
         // What to put in: from the vault now (the AI never holds it), or what the person just typed into the card.
         let saved: VaultItem?
@@ -1055,7 +1195,7 @@ final class RunBrowser: @unchecked Sendable {
         // Hidden from the AI before it goes in, saved in the vault or not: in everything Petal reads, for as long as
         // Petal runs.
         if plan.field.isSecret { VaultIndex.remember(Vault.secrets(plan.field, text)) }
-        var arguments: [String: Any] = ["secret": plan.field.isSecret, "secure": plan.target.secure]
+        var arguments: [String: Any] = ["vault": true, "secret": plan.field.isSecret, "secure": plan.target.secure]
         let op: String
         if plan.target.popup {
             let titles = kind.info["opts"] as? [String] ?? [], values = kind.info["vals"] as? [String] ?? []
@@ -1074,13 +1214,27 @@ final class RunBrowser: @unchecked Sendable {
             arguments["replace"] = true
             op = "type"
         }
-        // Right before it goes: not stopped, steered or past its Buy, and still the page Petal decided on.
+        // Right before it goes: still the page Petal decided on (asked once more), not stopped, steered or past its
+        // Buy, and nothing heard of the page moving on while that was asked. The write then checks its own document's
+        // address, and the tab's where it can see it, once more in the page, immediately before the value is set.
+        let heard = lock.withLock { moves }
         if let why = moved() { return why }
         guard !cancel.stopped else { return stopped() }
+        guard lock.withLock({ moves }) == heard else {
+            if plan.payment { cancel.endBuy() }
+            return changed
+        }
+        arguments["at"] = at
+        arguments["top"] = top
         let answer: [String: Any]
-        switch act(found.ref, in: found.frame, op, arguments) {
+        switch act(field.ref, in: field.frame, op, arguments) {
         case .failure(let problem): return problem.words + " Nothing was filled."
         case .success(let got): answer = got
+        }
+        if answer["moved"] != nil {
+            // The page moved on as the field took the cursor: nothing was written, and a Buy said on it is over.
+            if plan.payment { cancel.endBuy() }
+            return changed
         }
         if answer["changed"] != nil { return "That field changed since it was read; nothing was filled. Call petal_browser read again." }
         if answer["nofit"] != nil {
@@ -1101,7 +1255,7 @@ final class RunBrowser: @unchecked Sendable {
         if plan.submit {
             guard !cancel.stopped else { return stopped() }
             if let why = moved() { return "It was filled, not sent: " + why }
-            if case .failure(let problem) = act(found.ref, in: found.frame, "submit", [:], gesture: true) { return "It was filled, not sent: " + problem.words }
+            if case .failure(let problem) = act(field.ref, in: field.frame, "submit", [:], gesture: true) { return "It was filled, not sent: " + problem.words }
             usleep(120_000)
             settle(8, cancel: cancel)
         }
@@ -1143,7 +1297,15 @@ extension RunBrowser {
 @MainActor
 final class RunBrowsers {
     private var browsers: [String: RunBrowser] = [:]
-    private var starting: [String: [(Result<RunBrowser, RunBrowser.Problem>) -> Void]] = [:]
+    /// A browser being started for a group: the launch itself (so the run's ending can end it), the very display it
+    /// was started for, and who waits for it.
+    private struct Starting {
+        let launch: RunBrowser.Launch
+        let display: RunDisplays.Display
+        var waiters: [(Result<RunBrowser, RunBrowser.Problem>) -> Void]
+    }
+
+    private var starting: [String: Starting] = [:]
     /// Which installed browser a run gets (`setting`: `runBrowser`), off the main thread. A check hands in its own.
     var finder: @Sendable (_ setting: String) -> RunBrowser.Spec? = { RunBrowsers.find(setting: $0) }
     private var watching: NSObjectProtocol?
@@ -1164,10 +1326,6 @@ final class RunBrowsers {
 
     /// A run's browser of this app is going now (the person's own copy needs to be opened as a new one).
     nonisolated static func running(bundle: String) -> Bool { RunApps.running(bundle: bundle) }
-
-    /// From before it has a window until it's ended: a process Petal started for a run is never the person's app.
-    nonisolated static func register(_ pid: pid_t, bundle: String) { RunApps.register(pid, bundle: bundle) }
-    nonisolated static func forget(_ pid: pid_t) { RunApps.forget(pid) }
 
     // MARK: Folders
 
@@ -1257,40 +1415,64 @@ final class RunBrowsers {
 
     private func start(_ group: String, caller: String, display: RunDisplays.Display, _ done: @escaping (Result<RunBrowser, RunBrowser.Problem>) -> Void) {
         if let browser = browsers[group], browser.alive { return done(.success(browser)) }
-        if starting[group] != nil { starting[group]?.append(done); return }
-        starting[group] = [done]
+        if let now = starting[group] {
+            // One launch per run: another asker of the same run waits for the same one.
+            if now.display === display { starting[group]?.waiters.append(done); return }
+            // A launch for a display that's gone (its run ended, this is a new one): ended, never taken over.
+            cancelStart(group)
+        }
+        let launch = RunBrowser.Launch()
+        starting[group] = Starting(launch: launch, display: display, waiters: [done])
         let finder = self.finder, setting = app.config.string("runBrowser")
         let frame = RunBrowser.windowFrame(on: display.frame)
         let profile = (Self.root as NSString).appendingPathComponent(RunBrowserRules.folderName(group: group, nonce: UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()))
         watch()
-        Self.queue.async {
-            let result: Result<RunBrowser, RunBrowser.Problem>
-            if let spec = finder(setting) {
-                result = RunBrowser.launch(spec: spec, group: group, profile: profile, frame: frame)
-                // The person's from before it has a window: never listed as theirs.
-                if case .success(let browser) = result { Self.register(browser.pid, bundle: spec.bundle) }
-            } else {
-                result = .failure(.init(RunBrowserRules.none))
-            }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    let waiting = self.starting.removeValue(forKey: group) ?? []
-                    var answer = result
-                    if case .success(let browser) = result {
-                        // Its display went while it started (the run ended, hidden displays were turned off): it goes too.
-                        if self.app.displays.displays[group]?.ready == true, self.app.config.bool("runDisplays") {
-                            self.browsers[group] = browser
-                            self.adopt(browser, group: group, caller: caller)
-                        } else {
-                            Self.forget(browser.pid)
-                            browser.end()
-                            answer = .failure(.init(RunDisplays.Failure.ended.words))
-                        }
-                    }
-                    for waiter in waiting { waiter(answer) }
+        // Each launch on a thread of its own: one browser slow to start never holds another run's back.
+        DispatchQueue.global(qos: .userInitiated).async {
+            var result: Result<RunBrowser, RunBrowser.Problem> = .failure(.init(RunDisplays.Failure.ended.words))
+            if !launch.cancelled {
+                if let spec = finder(setting) {
+                    result = RunBrowser.launch(spec: spec, group: group, profile: profile, frame: frame, launch: launch)
+                } else {
+                    result = .failure(.init(RunBrowserRules.none))
                 }
             }
+            let finished = result
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self.started(finished, launch: launch, group: group, caller: caller) }
+            }
         }
+    }
+
+    /// A launch came back. Only the launch the group is still waiting for counts, and only for the very display it
+    /// was started for: one that was cancelled (its waiters heard then), or whose run ended and began again
+    /// meanwhile, is thrown away, its browser ended and its profile removed.
+    private func started(_ result: Result<RunBrowser, RunBrowser.Problem>, launch: RunBrowser.Launch, group: String, caller: String) {
+        guard let now = starting[group], now.launch === launch else {
+            if case .success(let browser) = result { browser.end() }
+            return
+        }
+        starting[group] = nil
+        var answer = result
+        if case .success(let browser) = result {
+            if app.displays.displays[group] === now.display, now.display.ready, app.config.bool("runDisplays"), !launch.cancelled {
+                browsers[group] = browser
+                adopt(browser, group: group, caller: caller)
+            } else {
+                browser.end()
+                answer = .failure(.init(RunDisplays.Failure.ended.words))
+            }
+        }
+        for waiter in now.waiters { waiter(answer) }
+        if browsers.isEmpty, starting.isEmpty { unwatch() }
+    }
+
+    /// Ends a launch under way for a group: nothing more of it is started, a browser it already started is ended (its
+    /// profile with it), and whoever waited hears the run's display went.
+    private func cancelStart(_ group: String) {
+        guard let now = starting.removeValue(forKey: group) else { return }
+        now.launch.cancel()
+        for waiter in now.waiters { waiter(.failure(.init(RunDisplays.Failure.ended.words))) }
     }
 
     /// A browser that just started: a Buy said in it ends when its page moves on, and its window is the run's own
@@ -1327,20 +1509,23 @@ final class RunBrowsers {
 
     private func ended(_ group: String) {
         guard let browser = browsers.removeValue(forKey: group) else { return }
-        Self.forget(browser.pid)
         app.assist.computer.seen([], window: browser.window)
         browser.end()
         if browsers.isEmpty, starting.isEmpty { unwatch() }
     }
 
     /// A run's display is going (its run ended: done, failed, stopped, paused, its note thrown away; or hidden
-    /// displays were turned off): its browser ends first, so its window is never left to land on the person's screen.
-    func displayGoing(_ group: String) { ended(group) }
+    /// displays were turned off): its browser ends first, so its window is never left to land on the person's screen,
+    /// and so does one still being started for it.
+    func displayGoing(_ group: String) {
+        cancelStart(group)
+        ended(group)
+    }
 
-    /// Petal is quitting: every run's browser ends now, and its profile goes before Petal does.
+    /// Petal is quitting: every run's browser ends now, started or still starting, and its profile goes before Petal does.
     func quit() {
+        for group in Array(starting.keys) { cancelStart(group) }
         for (group, browser) in browsers {
-            Self.forget(browser.pid)
             browser.end(wait: 1.5)
             browsers[group] = nil
         }
@@ -1421,4 +1606,5 @@ final class RunBrowsers {
     // MARK: For checks
 
     var count: Int { browsers.count }
+    var startingCount: Int { starting.count }
 }

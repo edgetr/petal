@@ -270,24 +270,70 @@ enum RunBrowserRules {
 
     // MARK: Where a field is, for the vault
 
-    /// Where a field of a page is, from what the browser itself said of it: `frame`, the address of the frame the
-    /// field is in; `top`, the address of the tab's whole page; `tab`, the browser's own record of the tab's address;
-    /// `target` and `loader`, which tab it is and which document that tab shows (another document is another page).
-    /// `trusted`: the running browser is one Petal knows, signed by its maker; anywhere else the page can't be
-    /// believed about its address (unverified), exactly as a page in a browser the person runs (Vault.surface).
-    static func place(frame: String, top: String, tab: String?, target: String, loader: String, trusted: Bool, bundle: String, name: String) -> Vault.Place {
+    /// A document as the browser reports it: its address, and its origin (whose it is). The two are different things:
+    /// a document served from a site's own address may be kept apart from that site (sandboxed: an origin of its own,
+    /// nobody's), and a frame with no address of its own (about:blank, srcdoc, a blob) is the site's that made it.
+    struct Document: Equatable {
+        var url: String
+        /// As the browser's inspector gives it for the document's own script context: "https://example.com", or
+        /// "://" or "null" for an origin that is nobody's. Empty: it didn't say.
+        var origin: String
+
+        init(url: String, origin: String) {
+            self.url = url
+            self.origin = origin
+        }
+    }
+
+    /// An origin as scheme, host and port, when it names a web site (http or https); nil for an origin that is
+    /// nobody's (opaque), one the browser didn't give, or anything that isn't a site.
+    static func site(ofOrigin origin: String) -> (scheme: String, host: String, port: Int)? {
+        let text = origin.trimmingCharacters(in: .whitespaces)
+        guard !text.isEmpty, text != "null", text != "://", let parts = URLComponents(string: text), let scheme = parts.scheme?.lowercased(),
+              ["http", "https"].contains(scheme), let host = parts.host?.lowercased(), !host.isEmpty,
+              parts.path.isEmpty || parts.path == "/", parts.query == nil, parts.user == nil else { return nil }
+        return (scheme, host, parts.port ?? (scheme == "https" ? 443 : 80))
+    }
+
+    /// The address the vault goes by for a document, and whether the document is isolated from the site that address
+    /// names. Its origin decides, never its address alone:
+    /// - an origin that is nobody's (a sandboxed document or frame, a data: page), or none given: isolated;
+    /// - a web address whose own scheme, host and port aren't the origin's: isolated (Petal can't say whose it is);
+    /// - no web address of its own (about:blank, srcdoc, a blob) with a site's origin: that site's, at its root.
+    static func effective(_ document: Document) -> (address: String, isolated: Bool) {
+        guard let origin = site(ofOrigin: document.origin) else { return (document.url, true) }
+        let root = origin.scheme + "://" + (origin.host.contains(":") ? "[" + origin.host + "]" : origin.host)
+            + (origin.port == (origin.scheme == "https" ? 443 : 80) ? "" : ":" + String(origin.port)) + "/"
+        guard let parts = URLComponents(string: document.url), let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme) else {
+            return (root, false)
+        }
+        let host = (parts.host ?? "").lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+        let port = parts.port ?? (scheme == "https" ? 443 : 80)
+        let same = scheme == origin.scheme && host == origin.host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")) && port == origin.port
+        return (document.url, !same)
+    }
+
+    /// Where a field of a page is, from what the browser itself said of it: `frame`, the document the field is in;
+    /// `top`, the tab's whole page; `tab`, the browser's own record of the tab's address; `target` and `loader`,
+    /// which tab it is and which document that tab shows (another document is another page). Each document goes by
+    /// its origin (`effective`): one isolated from its site makes the place isolated, which the vault never takes for
+    /// that site. `trusted`: the running browser is one Petal knows, signed by its maker; anywhere else the page
+    /// can't be believed about its address (unverified), exactly as a page in a browser the person runs (Vault.surface).
+    static func place(frame: Document, top: Document, tab: String?, target: String, loader: String, trusted: Bool, bundle: String, name: String) -> Vault.Place {
         var place = Vault.Place(bundle: bundle, appName: name)
         switch Vault.surface(webArea: true, trusted: trusted, browser: true) {
         case .web:
+            let field = effective(frame), page = effective(top)
             place.web = true
-            place.frameURL = frame
-            place.topURL = top
+            place.frameURL = field.address
+            place.topURL = page.address
             place.tabURL = tab
+            place.isolated = field.isolated || page.isolated
             place.tab.id = target
             place.tab.page = (target + "/" + loader) as NSString
         default:
             place.unverified = true
-            place.claimedURL = frame
+            place.claimedURL = frame.url
         }
         return place
     }
@@ -490,9 +536,11 @@ struct BrowserOutline {
     /// Something on the page was hidden as a secret.
     var hid = false
 
-    /// The most controls given an id, and the most of the page's words told.
+    /// The most controls given an id, the most of the page's words told (text and headings alike: one budget), and the
+    /// most the controls' own lines may come to.
     static let cap = 200
     static let textCap = 14_000
+    static let controlsCap = 30_000
     static let pieceCap = 600
     static let prefix = "b"
 
@@ -553,6 +601,8 @@ struct BrowserOutline {
         var lines: [String] = []
         var told = 0
         var textLeft = 0
+        var controlsTold = 0
+        var controlsLeft = 0
         var run = ""
         var runOn = false
         var runKey: (frame: Int, block: Int)?
@@ -591,8 +641,11 @@ struct BrowserOutline {
             case "heading":
                 flush()
                 guard has(node), !node.text.isEmpty else { continue }
-                told += node.text.count
-                lines.append(indent() + String(repeating: "#", count: min(max(node.level, 1), 6)) + " " + UIMap.truncate(UIMap.tidy(node.text), 300))
+                // A heading is text: the same budget, and past it it's counted as left out.
+                if told >= textCap { textLeft += 1; continue }
+                let heading = UIMap.truncate(UIMap.tidy(node.text), 300)
+                told += heading.count
+                lines.append(indent() + String(repeating: "#", count: min(max(node.level, 1), 6)) + " " + heading)
             case "frame":
                 flush()
                 // Its own number is its handle here: the frame it opens.
@@ -603,16 +656,21 @@ struct BrowserOutline {
             default:
                 guard kept.contains(index) else { continue }
                 flush()
+                // The controls' lines have a budget of their own: past it the rest are counted as left out.
+                if controlsTold >= controlsCap { controlsLeft += 1; continue }
                 outline.count += 1
                 let id = prefix + String(outline.count)
                 outline.refs[id] = Ref(frame: node.frame, handle: node.handle, node: nodes[index])
-                lines.append(indent() + line(id, node))
+                let said = line(id, node)
+                controlsTold += said.count
+                lines.append(indent() + said)
             }
         }
         flush()
 
         var left: [String] = []
-        if controls.count > kept.count { left.append("\(controls.count - kept.count) more controls (the ones in view came first)") }
+        let more = controls.count - kept.count + controlsLeft
+        if more > 0 { left.append("\(more) more controls (the ones in view came first)") }
         if textLeft > 0 { left.append("\(textLeft) more lines of text") }
         if cut { left.append("the end of a very long page") }
         if !left.isEmpty {

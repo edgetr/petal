@@ -436,10 +436,14 @@ final class Routines {
         return now >= start && now < start.addingTimeInterval(7200) && (last ?? .distantPast) < start
     }
 
+    /// An app opening or coming forward is the person's doing: never Petal's own process, never a browser Petal
+    /// started for a run (the same app as the person's, as a second process, from the moment it's started).
+    nonisolated static func personsEvent(pid: pid_t) -> Bool {
+        pid != ProcessInfo.processInfo.processIdentifier && !RunApps.isRun(pid)
+    }
+
     private func appEvent(_ running: NSRunningApplication?, _ event: String) {
-        guard isOn, let running, running.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
-        // A browser Petal started for a run isn't the person opening that app.
-        guard !RunBrowsers.isRun(running.processIdentifier) else { return }
+        guard isOn, let running, Self.personsEvent(pid: running.processIdentifier) else { return }
         let id = running.bundleIdentifier ?? ""
         for routine in list where routine.on && routine.trigger.on == "app" && routine.trigger.when == event {
             let wanted = routine.trigger.app

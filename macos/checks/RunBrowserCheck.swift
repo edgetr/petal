@@ -219,6 +219,29 @@ struct RunBrowserCheck {
         let cut = BrowserOutline.make(nodes: long, frames: ["https://example.com/"], cut: true, redact: plain, matches: never)
         expect(cut.text.count <= BrowserOutline.textCap + 400 && cut.left.contains("more lines of text") && cut.left.contains("end of a very long page"), "words are capped too", cut.left)
 
+        // Headings are text like any other: one budget, and it says what was left out.
+        var headings: [PageNode] = [node(["k": "heading", "t": "First of many", "lv": 1, "pa": 0, "sb": 0])]
+        let longHeading = String(repeating: "A long heading that goes on and on. ", count: 8)
+        for index in 1...4000 { headings.append(node(["k": "heading", "t": "Heading \(index): " + longHeading, "lv": 2, "pa": index, "sb": 0])) }
+        headings.append(node(["k": "link", "t": "After them", "u": "https://example.com/next", "e": 0, "pa": 5000, "sb": 0, "r": [0, 0, 10, 10]]))
+        let headed = BrowserOutline.make(nodes: headings, frames: ["https://example.com/"], redact: plain, matches: never)
+        expect(headed.text.count <= BrowserOutline.textCap + 2_000, "a page of long headings stays within the cap", "\(headed.text.count) characters")
+        expect(headed.text.hasPrefix("# First of many\n## Heading 1: ") && headed.text.contains("[b1] link \"After them\""), "and still reads from its start, its controls listed")
+        expect(headed.left.contains("more lines of text"), "saying what was left out", headed.left)
+        let checked = UIMap.SecretIndex(["sk-petalcheck-0123456789abcdef"])
+        let stillRead = BrowserOutline.make(nodes: headings, frames: ["https://example.com/"], redact: checked.redacted, matches: checked.matches, spans: checked.spans)
+        expect(stillRead.text.hasPrefix("# First of many") && stillRead.text.utf8.count < UIMap.SecretIndex.limit, "so the vault's check can read all of it, and doesn't hide the whole page")
+        // The controls' own lines have a budget too.
+        var wordy: [PageNode] = []
+        for index in 0..<200 {
+            wordy.append(node(["k": "select", "t": String(repeating: "name ", count: 40), "v": String(repeating: "value ", count: 30), "o": Array(repeating: String(repeating: "option ", count: 8), count: 12),
+                               "n": 12, "e": index, "pa": 1, "sb": index, "r": [0, 0, 10, 10]]))
+        }
+        let trimmed = BrowserOutline.make(nodes: wordy, frames: ["https://example.com/"], redact: plain, matches: never)
+        expect(trimmed.text.count <= BrowserOutline.controlsCap + 2_000 && trimmed.count < 200 && trimmed.left.contains("more controls"), "long controls are cut off at their budget, and said",
+               "\(trimmed.text.count) characters, \(trimmed.count) controls; \(trimmed.left)")
+        expect(trimmed.refs.count == trimmed.count, "and only the ones told have ids")
+
         // Secrets: a field named for one, one the vault filled, one saved in the vault, and one shown in pieces.
         let index = UIMap.SecretIndex(["sk-petalcheck-0123456789abcdef", "4242424242424242", "737"])
         let secrets = [
@@ -284,8 +307,18 @@ struct RunBrowserCheck {
 
     static func vaultChecks() {
         typealias R = RunBrowserRules
-        func place(frame: String, top: String? = nil, tab: String? = nil, loader: String = "L1", trusted: Bool = true) -> Vault.Place {
-            R.place(frame: frame, top: top ?? frame, tab: tab ?? top ?? frame, target: "T1", loader: loader, trusted: trusted, bundle: "com.google.Chrome", name: "Google Chrome")
+        // Whose a document is, when the browser says what its address says (an ordinary page).
+        func own(_ address: String) -> String {
+            guard let parts = URLComponents(string: address), let scheme = parts.scheme, let host = parts.host, ["http", "https"].contains(scheme) else { return "://" }
+            return scheme + "://" + host + (parts.port.map { ":" + String($0) } ?? "")
+        }
+        /// `origin`, `topOrigin`: what the browser reports instead (a sandboxed document: "://"; a frame with no
+        /// address of its own: the site's that made it).
+        func place(frame: String, top: String? = nil, tab: String? = nil, loader: String = "L1", trusted: Bool = true,
+                   origin: String? = nil, topOrigin: String? = nil) -> Vault.Place {
+            let page = top ?? frame
+            return R.place(frame: R.Document(url: frame, origin: origin ?? own(frame)), top: R.Document(url: page, origin: topOrigin ?? (top == nil ? origin : nil) ?? own(page)),
+                           tab: tab ?? page, target: "T1", loader: loader, trusted: trusted, bundle: "com.google.Chrome", name: "Google Chrome")
         }
         var login = VaultItem(kind: .login, title: "Shop", sites: ["shop.example.com"])
         login[.username] = "ada"
@@ -304,7 +337,44 @@ struct RunBrowserCheck {
         asks(place(frame: "https://shop.example.com.evil.example/login"), "a site that only starts like it asks")
         asks(place(frame: "http://shop.example.com/login"), "its own site over http asks")
         asks(place(frame: "https://evil.example/frame", top: "https://shop.example.com/login"), "a field in another site's frame goes by the frame's site, whatever page holds it")
-        asks(place(frame: "about:srcdoc", top: "https://shop.example.com/login"), "a frame with no address of its own asks")
+        // Whose a document is comes from the browser, never from its address.
+        expect(R.site(ofOrigin: "https://shop.example.com")?.port == 443 && R.site(ofOrigin: "http://localhost:3000")?.port == 3000, "an origin names a site")
+        for nobody in ["://", "null", "", "file://", "chrome-extension://abc", "https://", "https://a.example/path", "about:blank"] {
+            expect(R.site(ofOrigin: nobody) == nil, "\(nobody.isEmpty ? "no origin" : nobody) is nobody's")
+        }
+        expect(R.effective(R.Document(url: "https://shop.example.com/login", origin: "https://shop.example.com")) == ("https://shop.example.com/login", false), "an ordinary page is its address's site")
+        expect(R.effective(R.Document(url: "https://shop.example.com:443/login", origin: "https://shop.example.com")).isolated == false, "the usual port, said or not")
+        expect(R.effective(R.Document(url: "https://shop.example.com/login", origin: "://")) == ("https://shop.example.com/login", true), "a sandboxed document at a site's address is isolated from it")
+        expect(R.effective(R.Document(url: "https://shop.example.com/login", origin: "")).isolated, "so is one the browser said nothing of")
+        expect(R.effective(R.Document(url: "https://shop.example.com/login", origin: "https://evil.example")).isolated, "and one whose origin isn't its address's")
+        expect(R.effective(R.Document(url: "https://shop.example.com:8443/login", origin: "https://shop.example.com")).isolated, "another port is another origin")
+        expect(R.effective(R.Document(url: "about:srcdoc", origin: "https://shop.example.com")) == ("https://shop.example.com/", false), "a frame with no address of its own is the site's that made it")
+        expect(R.effective(R.Document(url: "about:blank", origin: "http://localhost:3000")) == ("http://localhost:3000/", false), "an empty frame too, with its port")
+        expect(R.effective(R.Document(url: "blob:https://shop.example.com/1f2a", origin: "https://shop.example.com")) == ("https://shop.example.com/", false), "and a blob")
+        expect(R.effective(R.Document(url: "data:text/html,<input>", origin: "://")).isolated && R.effective(R.Document(url: "about:srcdoc", origin: "://")).isolated,
+               "a data: page, or a sandboxed frame with no address, is nobody's")
+
+        let boxed = place(frame: "https://shop.example.com/login", origin: "://")
+        expect(boxed.web && boxed.isolated && boxed.host == "shop.example.com", "a sandboxed document at the login's own address is an isolated page")
+        asks(boxed, "and never the login's own site: it asks")
+        if case .ask(_, let why) = Vault.decide(login, .password, target: secure, place: boxed) {
+            expect(why.contains("isolated from its site") && why.contains("shop.example.com"), "saying plainly that the page is isolated from its site", why)
+        }
+        asks(place(frame: "https://shop.example.com/login", top: "https://shop.example.com/", origin: "://", topOrigin: "https://shop.example.com"), "a sandboxed frame of the login's own site asks")
+        asks(place(frame: "https://shop.example.com/login", top: "https://shop.example.com/", origin: "https://shop.example.com", topOrigin: "://"), "so does its own frame in a sandboxed page")
+        expect(Vault.decide(login, .password, target: secure, place: place(frame: "about:srcdoc", top: "https://shop.example.com/login", origin: "https://shop.example.com")) == .fill,
+               "a frame with no address inside the login's own site is that site: it fills")
+        asks(place(frame: "about:srcdoc", top: "https://news.example/", origin: "https://news.example"), "the same frame inside another site is that other site")
+        expect(place(frame: "about:srcdoc", top: "https://news.example/", origin: "https://news.example").host == "news.example", "and says so")
+        asks(place(frame: "about:srcdoc", top: "https://shop.example.com/login", origin: "://"), "a sandboxed frame with no address asks")
+        asks(place(frame: "data:text/html,<input type=password>", top: "https://shop.example.com/login", origin: "://"), "a data: frame asks")
+        expect(Vault.decide(login, .password, target: secure, place: place(frame: "blob:https://shop.example.com/1f", top: "https://shop.example.com/login", origin: "https://shop.example.com")) == .fill,
+               "a blob the site made is the site's")
+        var probe = VaultItem(kind: .login, title: "New")
+        Vault.bind(&probe, to: boxed)
+        expect(probe.sites.isEmpty, "nothing is saved for a site from a page isolated from it")
+        expect(Vault.unasked(login, [.password], targets: [secure], places: [boxed]) != nil, "and no new password is made there")
+        expect(Vault.moved(from: own, to: boxed) != nil && Vault.moved(from: boxed, to: own) != nil, "a page that became isolated (or stopped being) is another page")
         asks(place(frame: "https://shop.example.com/login", top: "http://news.example/"), "its own site's frame in a page that isn't secure asks")
         asks(place(frame: "https://shop.example.com/login", top: "https://shop.example.com/login", tab: "https://other.example/"), "the browser's own record of the tab naming another site asks")
         expect(Vault.decide(login, .password, target: secure, place: place(frame: "https://shop.example.com/login", top: "https://partner.example/embed")) == .fill,
@@ -315,6 +385,12 @@ struct RunBrowserCheck {
         var local = VaultItem(kind: .login, title: "Dev", sites: ["localhost"])
         local[.password] = "pw"
         expect(Vault.decide(local, .password, target: secure, place: place(frame: "http://localhost:3000/login")) == .fill, "http on this Mac is this Mac's own")
+        var key = VaultItem(kind: .apiKey, title: "Key", sites: ["example.com"])
+        key[.value] = "k"
+        expect(Vault.decide(key, .value, target: text, place: place(frame: "http://localhost:3000/settings")) == .fill, "an API key fills on this Mac's own pages")
+        if case .ask = Vault.decide(key, .value, target: text, place: place(frame: "http://localhost:3000/settings", origin: "://")) { expect(true, "") } else {
+            expect(false, "but not into a page of this Mac's that's isolated from it")
+        }
         if case .ask = Vault.decide(local, .password, target: secure, place: place(frame: "http://127.0.0.1:3000/login")) { expect(true, "") } else { expect(false, "localhost and 127.0.0.1 are two sites") }
 
         var card = VaultItem(kind: .card, title: "Visa")
@@ -327,6 +403,19 @@ struct RunBrowserCheck {
         for bad in [place(frame: "http://shop.example.com/checkout"), place(frame: "https://pay.example/frame", top: "http://shop.example.com/checkout"),
                     place(frame: "https://shop.example.com/checkout", tab: "https://other.example/"), unverified, place(frame: "http://localhost:3000/pay")] {
             if case .refuse = Vault.decide(card, .number, target: text, place: bad, checkout: true) { expect(true, "") } else { expect(false, "payment info only on https, in a tab the browser agrees about", "\(bad)") }
+        }
+        // An isolated page never gets payment details: no Buy card, and no fill under a Buy said before it was one.
+        for isolated in [place(frame: "https://shop.example.com/checkout", origin: "://"),
+                         place(frame: "https://pay.example/frame", top: "https://shop.example.com/checkout", origin: "://", topOrigin: "https://shop.example.com"),
+                         place(frame: "https://pay.example/frame", top: "https://shop.example.com/checkout", origin: "https://pay.example", topOrigin: "://")] {
+            for covered in [false, true] {
+                if case .refuse(let why) = Vault.decide(card, .number, target: text, place: isolated, checkout: covered) {
+                    expect(why.contains("isolated"), "and says why", why)
+                } else {
+                    expect(false, "an isolated page never gets payment details (Buy \(covered))", "\(Vault.decide(card, .number, target: text, place: isolated, checkout: covered))")
+                }
+            }
+            expect(Vault.Checkout(place: isolated, window: 0xF000_0001, card: card.id, revision: 1, turn: "t|") == nil, "no Buy is kept for an isolated page")
         }
         expect(Vault.mixed(.login, [own, place(frame: "https://evil.example/frame", top: "https://shop.example.com/login")]) != nil, "a login's fields in two sites' frames are two places")
         expect(Vault.mixed(.card, [checkout, place(frame: "https://shop.example.com/checkout")]) == nil, "a card's fields in the shop's page and its payment frame are one checkout")
@@ -343,6 +432,8 @@ struct RunBrowserCheck {
             expect(!bought.covers(same, window: 0xF000_0002, card: card.id, revision: 1, turn: "t|") && !bought.covers(same, window: 0xF000_0001, card: card.id, revision: 1, turn: "u|"),
                    "nor another run's browser, nor another reply")
             expect(Vault.Checkout.seen([bought], pages: [], window: 0xF000_0001).isEmpty, "a page that moved on ends it")
+            expect(!bought.covers(place(frame: "https://pay.example/frame", top: "https://shop.example.com/checkout", origin: "https://pay.example", topOrigin: "://"),
+                                  window: 0xF000_0001, card: card.id, revision: 1, turn: "t|"), "the same page become isolated isn't covered")
             expect(Vault.Checkout.seen([bought], pages: [], window: 77).count == 1, "another window's pages say nothing of it")
         }
         expect(Vault.moved(from: own, to: place(frame: "https://shop.example.com/login")) == nil, "the same page, read again right before the value goes, hasn't moved")
@@ -368,6 +459,25 @@ struct RunBrowserCheck {
         expect(RunBrowserScript.call("f", [Date()]) == nil, "what can't be written as a value isn't sent")
         expect(RunBrowserScript.collect.contains("S.secure.add(el)") && RunBrowserScript.act.contains("if ((a.secure ? true : false) !== secure) return out({changed: 1});"),
                "the page script keeps password fields apart, and a fill checks the field is still the kind it was")
+        // A vault's write: its last check is in the call that writes, after the field took the cursor (the one step
+        // the page can hook) and with nothing between it and the value being set.
+        func squash(_ text: String) -> String { text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ") }
+        // (Its comments aside: only what runs counts.)
+        let act = squash(RunBrowserScript.act.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }.joined(separator: "\n"))
+        if let focus = act.range(of: "try { el.focus({preventScroll: true}); } catch (e) {} if (a.vault) {"),
+           let check = act.range(of: "if (!placed()) return out({moved: 1});", range: focus.upperBound..<act.endIndex),
+           let write = act.range(of: "setValue(next);", range: check.upperBound..<act.endIndex) {
+            let gap = String(act[check.upperBound..<write.lowerBound])
+            expect(!gap.contains("dispatchEvent") && !gap.contains("focus(") && !gap.contains("click(") && !gap.contains("scrollIntoView") && !gap.contains("fire("),
+                   "nothing of the page's runs between a vault write's last check and the write", gap)
+        } else {
+            expect(false, "a vault's write takes the cursor, checks its place, then writes, in that order")
+        }
+        expect(act.contains("if (String(location.href).split('#')[0] !== a.at) return false;") && act.contains("String(top.location.href).split('#')[0] !== a.top"),
+               "its last check is the document's own address, and the tab's where it can see it")
+        expect(squash(RunBrowserScript.collect).contains("if (heading && !state.quiet) {")
+               && squash(RunBrowserScript.collect).contains("if (chars >= maxText) { more = true; } else { var words = cut(el.innerText || el.textContent, 300);"),
+               "the page script counts headings toward its budget")
         expect(RunBrowserScript.act.contains("} else if (secure || S.filled.has(el)) {") && RunBrowserScript.act.contains("return out({secure: 1});"),
                "typing never goes into a password field or one the vault filled")
     }

@@ -158,7 +158,9 @@ private final class BrowserChecker {
     /// Every answer a tool gave, as it would go to the AI.
     private var answers: [String] = []
     /// Every card that showed: its kind, title and the word on its yes button.
-    private var cards: [(kind: String, title: String, allow: String, warn: Bool, owner: String?)] = []
+    private var cards: [(kind: String, title: String, allow: String, warn: Bool, owner: String?, detail: String)] = []
+    /// Cards a step keeps open on purpose (to do something while the person hasn't answered yet).
+    private var held: Set<UUID> = []
     private var made: [CGDirectDisplayID] = []
     private var removed: [CGDirectDisplayID] = []
     let who = AgentAccess.Caller(agent: .petal, host: nil, project: "")
@@ -226,7 +228,11 @@ private final class BrowserChecker {
         if !ok { problems.append(what()) }
     }
 
-    func step(_ number: String, _ title: String, _ body: () -> String) {
+    private var steps = 0
+
+    func step(_ title: String, _ body: () -> String) {
+        steps += 1
+        let number = String(steps)
         problems = []
         let began = Date()
         let detail = body() + String(format: " (%.1f s)", Date().timeIntervalSince(began))
@@ -255,8 +261,8 @@ private final class BrowserChecker {
         var seen: Set<UUID> = []
         app.assist.handle(tool, json, note: caller, who: asker ?? who) { reply = $0 }
         let finished = wait(timeout) {
-            if let pending = self.app.assist.pending, seen.insert(pending.id).inserted {
-                self.cards.append((pending.kind, pending.title, pending.allow, pending.warn, pending.owner))
+            if let pending = self.app.assist.pending, !self.held.contains(pending.id), seen.insert(pending.id).inserted {
+                self.cards.append((pending.kind, pending.title, pending.allow, pending.warn, pending.owner, pending.detail))
                 let choice = choices.isEmpty ? Assist.Choice.no : (choices.count > 1 ? choices.removeFirst() : choices[0])
                 self.app.assist.choose(choice, typed: pending.form == nil ? nil : typed, for: pending.id)
             }
@@ -266,6 +272,43 @@ private final class BrowserChecker {
         answers.append(reply)
         return (try? JSONSerialization.jsonObject(with: Data(reply.utf8)) as? [String: Any]) ?? ["error": "not JSON: \(reply.prefix(200))"]
     }
+
+    /// A call begun and not waited for: its answer, once it has one.
+    final class Begun {
+        var reply: [String: Any]?
+    }
+
+    func begin(_ tool: String, _ args: [String: Any], asker: AgentAccess.Caller? = nil, task: String = "check") -> Begun {
+        var all = args
+        all["task"] = task
+        let json = String(decoding: (try? JSONSerialization.data(withJSONObject: all)) ?? Data("{}".utf8), as: UTF8.self)
+        let begun = Begun()
+        app.assist.handle(tool, json, note: caller, who: asker ?? who) { text in
+            self.answers.append(text)
+            begun.reply = (try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]) ?? ["error": "not JSON: \(text.prefix(200))"]
+        }
+        return begun
+    }
+
+    /// Lets begun calls go on until `done`; a card that shows meanwhile is answered `answer`, or with none kept open
+    /// (`held`) for the step to answer itself.
+    @discardableResult
+    func pump(_ seconds: Double, answer: Assist.Choice?, until done: @escaping () -> Bool) -> Bool {
+        wait(seconds) {
+            if let pending = self.app.assist.pending, !self.held.contains(pending.id) {
+                self.cards.append((pending.kind, pending.title, pending.allow, pending.warn, pending.owner, pending.detail))
+                if let answer { self.app.assist.choose(answer, for: pending.id) } else { self.held.insert(pending.id) }
+            }
+            return done()
+        }
+    }
+
+    /// The processes started with a profile of a run's under this check's own folder.
+    func runProcesses() -> [Int32] {
+        RunBrowsers.processes().filter { RunBrowserRules.profile(inArguments: $0.arguments, root: RunBrowsers.root) != nil }.map(\.pid)
+    }
+
+    func profileFolders() -> [String] { (try? fm.contentsOfDirectory(atPath: RunBrowsers.root)) ?? [] }
 
     func browser(_ action: String, _ args: [String: Any] = [:], answer: [Assist.Choice] = [], task: String = "check", timeout: Double = 40) -> [String: Any] {
         var all = args
@@ -350,6 +393,35 @@ private final class BrowserChecker {
                 <button type="submit">Create account</button>
                 </form>
                 """)
+            case "/sandboxed-login":
+                // The saved site's own address, but a document the browser keeps apart from that site.
+                return ("text/html; charset=utf-8", """
+                <!doctype html><html><head><title>Sign in (sandboxed)</title></head><body><h1>Sign in</h1>
+                <form action="/session" method="post"><label for="user">Email</label><input id="user" name="username">
+                <label for="pass">Password</label><input id="pass" name="password" type="password"></form></body></html>
+                """, ["Content-Security-Policy: sandbox allow-scripts allow-forms"])
+            case "/holds-sandboxed":
+                return html("Holds a sandboxed frame", "<h1>Holder</h1><iframe sandbox=\"allow-scripts allow-forms\" src=\"/login\" width=\"500\" height=\"220\"></iframe>")
+            case "/holds-srcdoc":
+                return html("Holds a frame with no address", "<h1>Holder</h1><iframe id=\"s\" width=\"500\" height=\"120\" srcdoc=\"<form><label for=sp>Inner password</label><input id=sp type=password></form>\"></iframe>")
+            case "/swap":
+                return html("Swap", """
+                <h1>Swap</h1>
+                <form id="f" action="/session" method="post">
+                <label for="user">Email</label><input id="user" name="username">
+                <label for="pass">Password</label><input id="pass" name="password" type="password">
+                <label for="other">Recovery phrase</label><input id="other" name="other" type="password">
+                </form>
+                <script>function swapFields(){ var f = document.getElementById('f'), p = document.querySelector('label[for=pass]');
+                f.insertBefore(document.querySelector('label[for=other]'), p); f.insertBefore(document.getElementById('other'), p); return 'swapped'; }</script>
+                """)
+            case "/framed":
+                return html("Framed", "<h1>Framed</h1><iframe id=\"f\" src=\"/login\" width=\"500\" height=\"220\"></iframe>")
+            case "/headings":
+                var body = ""
+                let long = String(repeating: "A long heading that goes on and on. ", count: 8)
+                for index in 1...4000 { body += "<h2>Heading \(index): \(long)</h2>" }
+                return html("Headings", "<h1>First of many</h1>" + body + "<p>The end.</p><a href=\"/two\">A link after them</a>")
             case "/pay":
                 return html("Pay (not secure)", "<h1>Pay</h1><label for=\"num\">Card number</label><input id=\"num\" name=\"cardnumber\" autocomplete=\"cc-number\">")
             case "/big":
@@ -377,13 +449,20 @@ private final class BrowserChecker {
 
     /// The browser answers for https://shop.example itself with the check's page: the address is a real https one to
     /// the vault's rules, and nothing goes to any network.
+    /// The shop's checkout with a security code field whose own focus handler moves the page on.
+    static let shopTrap = shop.replacingOccurrences(of: "<input id=\"cvc\"", with: "<input id=\"cvc\" onfocus=\"history.pushState({}, '', '/checkout/elsewhere')\"")
+
     func serveShop(_ browser: RunBrowser) {
-        let body = Data(Self.shop.utf8).base64EncodedString()
+        let plain = Data(Self.shop.utf8).base64EncodedString(), trap = Data(Self.shopTrap.utf8).base64EncodedString()
         let pipe = browser.pipe
         browser.onOther = { method, params, session in
             guard method == "Fetch.requestPaused", let id = params["requestId"] as? String else { return }
-            pipe.post("Fetch.fulfillRequest", ["requestId": id, "responseCode": 200,
-                                                "responseHeaders": [["name": "Content-Type", "value": "text/html; charset=utf-8"]], "body": body], session: session)
+            let address = (params["request"] as? [String: Any])?["url"] as? String ?? ""
+            var headers: [[String: String]] = [["name": "Content-Type", "value": "text/html; charset=utf-8"]]
+            // The shop's own address, kept apart from the shop by the browser.
+            if address.contains("/sandboxed/") { headers.append(["name": "Content-Security-Policy", "value": "sandbox allow-scripts allow-forms"]) }
+            pipe.post("Fetch.fulfillRequest", ["requestId": id, "responseCode": 200, "responseHeaders": headers,
+                                                "body": address.contains("/trap") ? trap : plain], session: session)
         }
         if let session = browser.checkSession {
             _ = browser.pipe.call("Fetch.enable", ["patterns": [["urlPattern": "https://shop.example/*"]]], session: session)
@@ -427,7 +506,7 @@ private final class BrowserChecker {
 
         var pid: pid_t = 0
         var profile = ""
-        step("1", "open: asked once, then a browser of its own") {
+        step("open: asked once, then a browser of its own") {
             let none = browser("read")
             expect(error(none).contains("no browser open"), "read before open says there's none (\(none))")
             expect(cards.isEmpty && made.isEmpty, "and asks nobody, makes nothing")
@@ -456,7 +535,7 @@ private final class BrowserChecker {
         }
 
         var home = ""
-        step("2", "read: the page as text, with ids, without secrets") {
+        step("read: the page as text, with ids, without secrets") {
             let read = browser("read")
             home = page(read)
             expect(home.contains("# Petal check") && home.contains("A page of the check's own, served on this Mac."), "its heading and words, a line as one line")
@@ -477,7 +556,7 @@ private final class BrowserChecker {
             return "headings, text, \(home.components(separatedBy: "\n").filter { $0.contains("[b") }.count) controls with ids, a frame of another site; the vault's key hidden, no password value; 320 links capped at \(BrowserOutline.cap)"
         }
 
-        step("3", "click") {
+        step("click") {
             let pressed = browser("click", ["id": id("button \"Press me\"", in: home)])
             expect(error(pressed).isEmpty && (pressed["done"] as? String)?.contains("Press me") == true, "it pressed (\(pressed))")
             expect(page(browser("read")).contains("Pressed once."), "the page changed as its button says")
@@ -494,7 +573,7 @@ private final class BrowserChecker {
             return "a button pressed, a link followed, old ids refused, back"
         }
 
-        step("4", "type, select, check") {
+        step("type, select, check") {
             let typed = browser("type", ["id": id("field \"Search\"", in: home), "text": "tulips"])
             expect((typed["value"] as? String) == "tulips", "it typed, and says what the field reads (\(typed))")
             let secret = browser("type", ["id": id("password field \"Old password\"", in: home), "text": "nope"])
@@ -518,7 +597,7 @@ private final class BrowserChecker {
             return "typed, chosen and checked, each seen by the page; a password field refused"
         }
 
-        step("5", "key, wait") {
+        step("key, wait") {
             _ = browser("open", ["address": base() + "/keys"])
             var read = page(browser("read"))
             let word = id("field \"Word\"", in: read)
@@ -539,7 +618,7 @@ private final class BrowserChecker {
             return "a key into a field, Enter sending its form, wait for words with a bound"
         }
 
-        step("6", "tabs, a page's own message, a download") {
+        step("tabs, a page's own message, a download") {
             _ = browser("open", ["address": base() + "/"])
             let second = browser("open", ["address": base() + "/two", "new_tab": true])
             expect((second["tab"] as? String) == "t2 of 2", "a new tab (\(second["tab"] ?? "none"))")
@@ -568,7 +647,7 @@ private final class BrowserChecker {
             return "a second tab, switched and closed; a tab the page opened; a download refused; a message closed"
         }
 
-        step("7", "the vault: a login on its own site, never told") {
+        step("the vault: a login on its own site, never told") {
             _ = browser("open", ["address": base() + "/login"])
             let read = page(browser("read"))
             let user = id("field \"Email\"", in: read), pass = id("password field \"Password\"", in: read)
@@ -589,7 +668,7 @@ private final class BrowserChecker {
             return "username and password filled without a card on 127.0.0.1, and the site got them"
         }
 
-        step("8", "the vault: refused where it doesn't belong") {
+        step("the vault: refused where it doesn't belong") {
             _ = browser("open", ["address": base("localhost") + "/login"])
             var read = page(browser("read"))
             let before = cards.count
@@ -617,7 +696,7 @@ private final class BrowserChecker {
             return "another site asked and Don't filled nothing; a frame goes by its own site; no card on http"
         }
 
-        step("9", "the vault: a card only after Buy, on that page") {
+        step("the vault: a card only after Buy, on that page") {
             guard let live = current else { expect(false, "the run has a browser"); return "" }
             serveShop(live)
             let opened = browser("open", ["address": "https://shop.example/checkout"])
@@ -652,7 +731,7 @@ private final class BrowserChecker {
 
         var newPassword = ""
         let typedPassword = "typed-Kq7-by-the-person-55"
-        step("10", "the vault: a new login, and one the person types in") {
+        step("the vault: a new login, and one the person types in") {
             _ = browser("open", ["address": base() + "/signup"])
             var read = page(browser("read"))
             let user = id("field \"Email\"", in: read), fresh = id("password field \"New password\"", in: read), again = id("password field \"Again\"", in: read)
@@ -687,7 +766,7 @@ private final class BrowserChecker {
             return "a strong password made, saved for 127.0.0.1 and filled twice; what the person typed into Petal's card filled the page"
         }
 
-        step("11", "the vault: an agent outside Petal asks first; a vault that can't be read tells nothing") {
+        step("the vault: an agent outside Petal asks first; a vault that can't be read tells nothing") {
             _ = browser("open", ["address": base() + "/login"])
             let read = page(browser("read"))
             let user = id("field \"Email\"", in: read), pass = id("password field \"Password\"", in: read)
@@ -714,7 +793,123 @@ private final class BrowserChecker {
             return "Codex in T3 Code asked on its own card, Don't and Allow once each did as said; unreadable, the page stayed untold and untouched"
         }
 
-        step("12", "no secret in any answer") {
+        let agent = AgentAccess.Caller(agent: .codex, host: "T3 Code", project: root.appending(path: "project").path)
+        step("the vault: a page isolated from its site is never that site") {
+            // The saved site's own address, served sandboxed: the browser keeps it apart from the site, whatever its address.
+            _ = browser("open", ["address": base() + "/sandboxed-login"])
+            var read = page(browser("read"))
+            var before = cards.count
+            let boxed = call("petal_vault", ["action": "fill", "item": loginID, "fields": ["username": id("field \"Email\"", in: read), "password": id("password field \"Password\"", in: read)]], answer: [.no])
+            expect(cards.count == before + 1 && cards.last?.warn == true && cards.last?.detail.contains("isolated") == true,
+                   "a sandboxed document at the login's own address asks, saying it's isolated (\(cards.count - before) cards: \(cards.last?.detail ?? ""); \(boxed))")
+            expect(boxed["declined"] != nil && current?.checkEvaluate("document.getElementById('pass').value + document.getElementById('user').value") == "", "and Don't fills nothing")
+            _ = browser("open", ["address": base() + "/holds-sandboxed"])
+            read = page(browser("read"))
+            before = cards.count
+            let framed = call("petal_vault", ["action": "fill", "item": loginID, "fields": ["password": id("password field \"Password\"", in: read)]], answer: [.no])
+            expect(framed["declined"] != nil && cards.count == before + 1 && cards.last?.detail.contains("isolated") == true,
+                   "a sandboxed frame of the login's own site asks the same way (\(cards.last?.detail ?? ""); \(framed))")
+            // A frame with no address of its own is the site that made it: by what the browser says, not its address.
+            _ = browser("open", ["address": base() + "/holds-srcdoc"])
+            read = page(browser("read"))
+            before = cards.count
+            let inherited = call("petal_vault", ["action": "fill", "item": loginID, "fields": ["password": id("password field \"Inner password\"", in: read)]])
+            expect((inherited["filled"] as? [String]) == ["password"] && cards.count == before, "a frame with no address inside the login's own site is that site: filled by itself (\(inherited))")
+            expect(current?.checkEvaluate("document.getElementById('s').contentDocument.getElementById('sp').value") == password, "and holds the password")
+            _ = browser("open", ["address": base("localhost") + "/holds-srcdoc"])
+            read = page(browser("read"))
+            before = cards.count
+            let foreign = call("petal_vault", ["action": "fill", "item": loginID, "fields": ["password": id("password field \"Inner password\"", in: read)]], answer: [.no])
+            expect(foreign["declined"] != nil && cards.count == before + 1 && cards.last?.title.contains("on localhost") == true,
+                   "the same frame inside another site is that other site (\(cards.last?.title ?? "no card"); \(foreign))")
+            // Payment info never goes into an isolated page, Buy or no Buy.
+            if let live = current { serveShop(live) }
+            _ = browser("open", ["address": "https://shop.example/sandboxed/checkout"])
+            read = page(browser("read"))
+            before = cards.count
+            let pay = call("petal_vault", ["action": "fill", "item": cardID, "fields": ["number": id("field \"Card number\"", in: read)]], answer: [.once])
+            expect(error(pay).contains("isolated") && cards.count == before, "no payment info into an isolated page, and no Buy card for one (\(pay))")
+            expect(current?.checkEvaluate("document.getElementById('num').value") == "", "nothing of the card went in")
+            return "a sandboxed document and a sandboxed frame at the site's own address asked; a frame with no address went by the site that made it; no card into an isolated page"
+        }
+
+        step("the vault: a fill stays with the field it was planned for") {
+            // While the person hasn't answered, the page puts another field where the planned one was, and is read again.
+            _ = browser("open", ["address": base() + "/swap"])
+            var read = page(browser("read"))
+            let planned = id("password field \"Password\"", in: read)
+            var fill = begin("petal_vault", ["action": "fill", "item": loginID, "fields": ["password": planned]], asker: agent)
+            expect(pump(8, answer: nil) { self.app.assist.pending != nil } && fill.reply == nil, "the fill waits on its card")
+            var card = app.assist.pending?.id
+            expect(current?.checkEvaluate("swapFields()") == "swapped", "the page swapped its fields")
+            read = page(browser("read"))
+            expect(id("password field \"Recovery phrase\"", in: read) == planned, "read again, the id names another field now (\(planned))")
+            app.assist.choose(.once, for: card)
+            expect(pump(10, answer: .no) { fill.reply != nil }, "it answered")
+            expect(error(fill.reply ?? [:]).contains("read again") || ((fill.reply?["error"] as? String) ?? "").contains("changed"), "allowed after that, the fill refuses: the page changed (\(fill.reply ?? [:]))")
+            expect(current?.checkEvaluate("document.getElementById('other').value + '|' + document.getElementById('pass').value") == "|", "and neither field got the password")
+            // The same with a frame of the same site that became another document meanwhile.
+            _ = browser("open", ["address": base() + "/framed"])
+            read = page(browser("read"))
+            fill = begin("petal_vault", ["action": "fill", "item": loginID, "fields": ["password": id("password field \"Password\"", in: read)]], asker: agent)
+            expect(pump(8, answer: nil) { self.app.assist.pending != nil } && fill.reply == nil, "the second fill waits on its card")
+            card = app.assist.pending?.id
+            _ = current?.checkEvaluate("document.getElementById('f').src = '/login?again=1'; 'ok'")
+            _ = browser("wait", ["seconds": 2])
+            read = page(browser("read"))
+            expect(!id("password field \"Password\"", in: read).isEmpty, "the frame's new document has the same field")
+            app.assist.choose(.once, for: card)
+            expect(pump(10, answer: .no) { fill.reply != nil }, "it answered")
+            expect(!error(fill.reply ?? [:]).isEmpty, "allowed after that, the fill refuses (\(fill.reply ?? [:]))")
+            expect(current?.checkEvaluate("document.getElementById('f').contentDocument.getElementById('pass').value") == "", "and the new document's field got nothing")
+            // An ordinary act is bound the same way when its call comes in: read again since, it does nothing.
+            _ = browser("open", ["address": base() + "/swap"])
+            read = page(browser("read"))
+            let email = id("field \"Email\"", in: read)
+            let bound = current?.bind([email])?.first
+            expect(bound != nil && current?.checkEvaluate("swapFields()") == "swapped", "a control bound, then the page changed")
+            _ = browser("read")
+            if let live = current, let bound {
+                if case .failure(let problem) = live.act(email, bound: bound, "type", ["text": "late", "replace": true, "secret": false]) {
+                    expect(problem == .stale, "an act bound before the page was read again does nothing (\(problem.words))")
+                } else {
+                    expect(false, "an act bound before the page was read again does nothing")
+                }
+                expect(live.checkEvaluate("document.getElementById('user').value") == "", "and typed nothing")
+            }
+            return "fields swapped under a waiting card, and a frame that became another document: both fills refused, nothing written; an act bound before a re-read did nothing"
+        }
+
+        step("the vault: no page code between the last look and the write") {
+            guard let live = current else { expect(false, "the run has a browser"); return "" }
+            serveShop(live)
+            _ = browser("open", ["address": "https://shop.example/checkout/trap"])
+            let read = page(browser("read"))
+            let number = id("field \"Card number\"", in: read), cvc = id("field \"Security code\"", in: read)
+            let first = call("petal_vault", ["action": "fill", "item": cardID, "fields": ["number": number], "buying": "a test"], answer: [.once])
+            expect((first["filled"] as? [String]) == ["number"], "Buy said, the number filled (\(first))")
+            let before = cards.count
+            // The security code field's own focus handler moves the page to another path, which ends the Buy.
+            let trapped = call("petal_vault", ["action": "fill", "item": cardID, "fields": ["securityCode": cvc]])
+            expect(live.checkEvaluate("document.getElementById('cvc').value") == "", "a field whose focus handler moves the page gets nothing (\(trapped))")
+            expect(!error(trapped).isEmpty && cards.count == before, "and the fill says the page changed")
+            let again = call("petal_vault", ["action": "fill", "item": cardID, "fields": ["number": number]], answer: [.no])
+            expect(again["declined"] != nil && cards.count == before + 1 && cards.last?.allow == "Buy", "the Buy is over: the next fill asks again (\(again))")
+            return "the field's own handler moved the page, and the code was never written; the Buy ended"
+        }
+
+        step("read: a page of long headings stays within the cap") {
+            _ = browser("open", ["address": base() + "/headings"])
+            let read = browser("read")
+            let text = page(read)
+            expect(text.count < 40_000, "the page as told is short (\(text.count) characters)")
+            expect(text.contains("# First of many") && text.contains("## Heading 1:"), "it still reads from its start (\(text.prefix(80)))")
+            expect((read["left"] as? String)?.isEmpty == false, "and says what was left out (\(read["left"] ?? "nothing"))")
+            expect(text.contains("link \"A link after them\""), "a control past the cut is still listed")
+            return "4000 long headings told in \(text.count) characters, the rest said to be left out"
+        }
+
+        step("no secret in any answer") {
             let all = answers.joined(separator: "\n")
             for (name, secret) in [("the password", password), ("the key", key), ("the card number", cardNumber), ("the page's own password", "letmein-shown-by-page"),
                                    ("the password Petal made", newPassword.isEmpty ? "never-made" : newPassword), ("the password the person typed", typedPassword)] {
@@ -728,7 +923,7 @@ private final class BrowserChecker {
             return "\(answers.count) answers and \(app.assist.history.count) lines of What Petal AI did hold none of them"
         }
 
-        step("13", "Stop ends an action, and the reply") {
+        step("Stop ends an action, and the reply") {
             _ = browser("open", ["address": base() + "/"], answer: [.once], task: "stopping")
             let read = page(browser("read", task: "stopping"))
             let started = Date()
@@ -751,7 +946,7 @@ private final class BrowserChecker {
             return "a wait of 25 s ended in \(String(format: "%.1f", Date().timeIntervalSince(started))) s; that reply did nothing more; the next task asked again"
         }
 
-        step("14", "it ends with its run: no process, no profile") {
+        step("it ends with its run: no process, no profile") {
             guard alive(pid), fm.fileExists(atPath: profile) else { expect(false, "it was still there to end"); return "" }
             app.displays.ended(caller)
             expect(wait(6) { !self.alive(pid) && !self.fm.fileExists(atPath: profile) }, "the run's end ended its process and removed its profile (alive \(alive(pid)), folder \(fm.fileExists(atPath: profile)))")
@@ -775,7 +970,75 @@ private final class BrowserChecker {
             return "the run's end and the switch each ended theirs (pids \(pid), \(secondPID)); no profile left; off and no browser say why"
         }
 
-        step("15", "what a crash leaves") {
+        // A browser that starts and never answers (a script that only sleeps), to hold a launch open.
+        let slow = root.appending(path: "slow-browser").path
+        try? Data("#!/bin/sh\nsleep 40\n".utf8).write(to: URL(fileURLWithPath: slow))
+        try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slow)
+        let slowSpec: @Sendable (String) -> RunBrowser.Spec? = { _ in
+            RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: slow, headless: true, verify: { _ in true })
+        }
+        let realSpec: @Sendable (String) -> RunBrowser.Spec? = { _ in
+            RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
+                            extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true })
+        }
+
+        step("a browser still starting is already a run's, and ends with its run") {
+            app.runBrowsers.finder = slowSpec
+            var opening = begin("petal_browser", ["action": "open", "address": base() + "/two"], task: "starting one")
+            expect(pump(8, answer: .once) { !self.runProcesses().isEmpty } && opening.reply == nil, "a launch is under way")
+            guard let starting = runProcesses().first else { return "" }
+            expect(RunApps.isRun(starting), "its process is a run's from the moment it exists (pid \(starting))")
+            expect(!Routines.personsEvent(pid: starting), "so an app event for it is never the person's (a \"when it opens\" routine doesn't fire)")
+            // Stop while it starts: the launch is ended, not left to finish.
+            var began = Date()
+            app.displays.ended(caller)
+            expect(pump(4, answer: .no) { opening.reply != nil && !self.alive(starting) && self.profileFolders().isEmpty },
+                   "the run ending ended the launch: answered \(opening.reply != nil), process gone \(!alive(starting)), profiles left \(profileFolders())")
+            let stopped = Date().timeIntervalSince(began)
+            expect(!error(opening.reply ?? [:]).isEmpty && current == nil, "and the tool says the run's display went (\(opening.reply ?? [:]))")
+            // The setting turned off while it starts.
+            opening = begin("petal_browser", ["action": "open", "address": base() + "/two"], task: "starting two")
+            expect(pump(8, answer: .once) { !self.runProcesses().isEmpty } && opening.reply == nil, "a second launch is under way")
+            let second = runProcesses().first ?? 0
+            began = Date()
+            app.config.set("runDisplays", false)
+            expect(pump(4, answer: .no) { opening.reply != nil && !self.alive(second) && self.profileFolders().isEmpty },
+                   "hidden displays turned off ended the launch: answered \(opening.reply != nil), process gone \(!alive(second)), profiles left \(profileFolders())")
+            app.config.set("runDisplays", true)
+            return String(format: "Stop ended a launch in %.1f s and the switch in %.1f s; no process, no profile", stopped, Date().timeIntervalSince(began))
+        }
+
+        step("a launch that outlives its run is thrown away") {
+            // The first launch is held before its browser starts; its run ends; the same run starts again and gets a
+            // browser; then the first launch is let go on.
+            let hold = DispatchSemaphore(value: 0)
+            let entered = DispatchSemaphore(value: 0)
+            let calls = Counter()
+            app.runBrowsers.finder = { setting in
+                guard calls.next() == 1 else { return realSpec(setting) }
+                entered.signal()
+                hold.wait()
+                return realSpec(setting)
+            }
+            let old = begin("petal_browser", ["action": "open", "address": base() + "/two"], task: "outlived")
+            expect(pump(8, answer: .once) { entered.wait(timeout: .now()) == .success }, "the first launch is under way")
+            app.displays.ended(caller)
+            expect(pump(4, answer: .no) { old.reply != nil }, "its run ending answers it at once (\(old.reply ?? [:]))")
+            let new = browser("open", ["address": base() + "/"], answer: [.once], task: "the same note again")
+            expect(error(new).isEmpty && current != nil, "the same run, started again, has a browser (\(error(new)))")
+            let kept = current?.pid ?? 0
+            hold.signal()
+            wait(3) { false }
+            expect(current?.pid == kept && alive(kept), "the old launch coming back doesn't take its place")
+            expect(runProcesses().filter { ($0 == kept) == false && (PetalProcess.arguments(of: $0) ?? []).contains { $0.hasPrefix("--type=") } == false } == [],
+                   "and leaves no browser of its own (\(runProcesses()), kept \(kept))")
+            expect(profileFolders().count == 1, "nor a profile (\(profileFolders()))")
+            app.displays.ended(caller)
+            expect(wait(6) { !self.alive(kept) && self.profileFolders().isEmpty }, "and the new one ends with its run")
+            return "the run's own browser stayed (pid \(kept)); the old launch left no process and no profile"
+        }
+
+        step("what a crash leaves") {
             // Petal gone: the pipe closes, and the browser ends itself.
             let orphan = profiles.appending(path: RunBrowserRules.folderName(group: "mcp-1", nonce: "orphan")).path
             try? fm.createDirectory(atPath: orphan, withIntermediateDirectories: true)
@@ -802,9 +1065,16 @@ private final class BrowserChecker {
             return "the pipe closing ended one by itself; the sweep ended the other and removed both profiles"
         }
 
-        print(failures == 0 ? "browser check: all 15 steps passed" : "browser check: \(failures) failed")
+        print(failures == 0 ? "browser check: all \(steps) steps passed" : "browser check: \(failures) of \(steps) failed")
         return failures
     }
+}
+
+/// Counts calls, from any thread.
+final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func next() -> Int { lock.withLock { count += 1; return count } }
 }
 
 /// `Petal --browser-check --live <folder>`: a run's browser for real: a real hidden display, a real installed
@@ -935,7 +1205,7 @@ enum BrowserLiveCheck {
             display.remove()
             finish()
         }
-        RunBrowsers.register(browser.pid, bundle: spec.bundle)
+        step(RunApps.isRun(browser.pid), "its process is known as a run's, not the person's, from the moment it started")
         let pid = browser.pid
         let arguments = PetalProcess.arguments(of: pid) ?? []
         step(getppid() != pid && arguments.contains("--remote-debugging-pipe") && !arguments.contains { $0.hasPrefix("--remote-debugging-port") },
@@ -1015,7 +1285,6 @@ enum BrowserLiveCheck {
 
         // 8. The end: nothing is left.
         browser.end(wait: 4)
-        RunBrowsers.forget(pid)
         step(wait(6) { kill(pid, 0) != 0 }, "the browser's process is gone", "pid \(pid)")
         step(wait(4) { !fm.fileExists(atPath: profile) }, "its profile folder is gone", profile)
         let leftover = RunBrowsers.processes().filter { RunBrowserRules.profile(inArguments: $0.arguments, root: RunBrowsers.root) != nil }.map(\.pid)

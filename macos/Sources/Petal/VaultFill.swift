@@ -493,7 +493,7 @@ extension Assist {
         let map: ComputerUse.Map, entries: [ComputerUse.Entry]
         switch surface {
         // A page of the run's own browser: the browser itself says where each field is (RunBrowserTool.swift).
-        case .page(let browser, let ids): return vaultPagePlaces(browser, ids, fail: fail, done: done)
+        case .page(let browser, let fields): return vaultPagePlaces(browser, fields, fail: fail, done: done)
         case .window(let itsMap, let itsEntries): (map, entries) = (itsMap, itsEntries)
         }
         ComputerUse.readQueue.async {
@@ -729,8 +729,8 @@ extension Assist {
             switch surface {
             case .window(let map, let entries):
                 computer.fill(plans[index], entry: entries[index], map: map, caller: caller, token: token, allowed: allowed, agent: agent, send: filledOne, fail: failedOne)
-            case .page(let browser, let ids):
-                vaultPageFill(plans[index], id: ids[index], browser: browser, caller: caller, token: token, allowed: allowed, agent: agent, send: filledOne, fail: failedOne)
+            case .page(let browser, let fields):
+                vaultPageFill(plans[index], field: fields[index], browser: browser, caller: caller, token: token, allowed: allowed, agent: agent, send: filledOne, fail: failedOne)
             }
         }
         next()
