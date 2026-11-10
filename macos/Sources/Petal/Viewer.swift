@@ -322,10 +322,11 @@ struct ViewerLensRequest: Equatable, Sendable {
     var bounds: CGRect
 }
 
-/// The answer beside the paragraph it's about.
+/// The answer beside the paragraph it's about (no words yet: asked, not answered; `faint`: why there's none).
 struct ViewerLensAnswer: Equatable {
     var request: ViewerLensRequest
     var text: String
+    var faint = false
 }
 
 @MainActor @Observable
@@ -953,6 +954,8 @@ final class ViewerModel: Identifiable {
         watcher = nil
         versionWatch = nil
         lensSoon?.cancel()
+        // The lens goes with the viewer: what it was asking ends, and it's off when the file is opened again.
+        follow(nil)
         if let key = openKey { fold(key) }
         // Every set this viewer made goes with it: told, its pictures dropped, its copies removed (the picked one
         // too: the asker reads it while the viewer is open).
@@ -1297,10 +1300,13 @@ final class ViewerModel: Identifiable {
         resolvePassages()
     }
 
-    // MARK: The reading lens (Phase 2 connects the AI)
+    // MARK: The reading lens
 
-    /// Marks a margin paper to follow the selection (nil: none does).
+    /// Marks a margin paper to follow the selection (nil: none does). Off until the person turns it on for a note,
+    /// and never kept: it goes with the viewer.
     func follow(_ key: String?) {
+        // The note that followed it before asks nothing more.
+        if let old = lensKey, old != key, let noteID = desk.store.paper(old)?.noteID { desk.helpers.lensOff(noteID) }
         lensKey = key
         lensAnswer = nil
         lensSpot = nil
@@ -1326,8 +1332,7 @@ final class ViewerModel: Identifiable {
                     MainActor.assumeIsolated {
                         guard let self, let told, self.lensKey == key else { return }
                         let request = ViewerLensRequest(noteID: noteID, page: page + 1, paragraph: told.0, selected: told.1, bounds: bounds)
-                        self.lensRequest = request
-                        self.onLens?(request)
+                        self.askLens(request)
                     }
                 }
             }
@@ -1336,10 +1341,27 @@ final class ViewerModel: Identifiable {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
     }
 
+    /// The lens asked about `request`: answered by the note's helper (NoteHelpers.lens: the quick AI, through the
+    /// helpers' one way in for every paid call, its answer shielded), beside the paragraph. `onLens`, when it's set
+    /// (Petal --viewer-check), is asked instead.
+    private func askLens(_ request: ViewerLensRequest) {
+        lensRequest = request
+        if let onLens { return onLens(request) }
+        // Asked: its place beside the paragraph is taken at once, with no words until the answer is in.
+        lensAnswer = ViewerLensAnswer(request: request, text: "")
+        lensPlaced()
+        desk.helpers.lens(request) { [weak self] outcome in
+            switch outcome {
+            case .said(let words): self?.answerLens(words.text, for: request)
+            case .couldnt(let why): self?.answerLens(why, for: request, faint: true)
+            }
+        }
+    }
+
     /// A short answer beside the paragraph `request` is about (only while it's still the one asked about).
-    func answerLens(_ text: String, for request: ViewerLensRequest) {
+    func answerLens(_ text: String, for request: ViewerLensRequest, faint: Bool = false) {
         guard request.id == lensRequest?.id, lensKey.flatMap({ desk.store.paper($0)?.noteID }) == request.noteID else { return }
-        lensAnswer = ViewerLensAnswer(request: request, text: ViewerLens.short(text))
+        lensAnswer = ViewerLensAnswer(request: request, text: ViewerLens.short(text), faint: faint)
         lensPlaced()
     }
 

@@ -645,7 +645,7 @@ struct ViewerMarginView: View {
         let longWhere = spot.moved ? place.label() + " · passage moved" : place.label()
         PaperView(paper: paper, color: color, glass: desk.glass, face: face, place: open ? longWhere : shortWhere, notebook: paper.notebook,
                   others: others == 1 ? paper.file.places.first { !$0.samePlace(place) }?.label() ?? "" : others > 1 ? "\(others) places" : "",
-                  footer: model.lensKey == paper.key ? "Follows your selection" : desk.footer(paper),
+                  footer: model.lensKey == paper.key ? "Follows what you select" : desk.footer(paper),
                   keyboard: open, editorHeight: desk.heights[paper.key] ?? 0, desk: snapshotting || !model.marginEditable ? nil : desk,
                   conflict: desk.store.readOnly(paper), unsaved: desk.store.failed.contains(paper.key), pictureTrouble: desk.troubleCount(paper),
                   width: ViewerLook.openWidth, flipped: { model.flip(paper) }, folded: { model.fold(paper.key) })
@@ -655,9 +655,9 @@ struct ViewerMarginView: View {
             })
             .modifier(ViewerFolded(folded: !open, open: { model.openPaper(paper) }) {
                 if model.lensKey == paper.key {
-                    Button("Stop following my selection") { model.follow(nil) }
+                    Button("Stop following what I select") { model.follow(nil) }
                 } else {
-                    Button("Follow my selection") { model.follow(paper.key) }
+                    Button("Follow what I select") { model.follow(paper.key) }
                 }
                 if let index = spot.page {
                     Button("Go to its \(model.unit.word)") { model.go(to: index) }
@@ -691,7 +691,9 @@ struct ViewerLensSlot: View {
         let tint = PaperLook.rgb(color)
         VStack(alignment: .leading, spacing: 1) {
             Text("✦ Petal").font(.system(size: 11, weight: .semibold)).opacity(0.85)
-            Text(answer.text).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+            // Asked and not answered yet: a faint mark where the answer will be. No answer: why, faintly.
+            Text(answer.text.isEmpty ? "…" : answer.text).font(.system(size: 12.5)).fixedSize(horizontal: false, vertical: true)
+                .opacity(answer.text.isEmpty || answer.faint ? 0.55 : 1)
         }
         .foregroundStyle(PaperLook.color(NoteInk.ink(tint)))
         .padding(.leading, 9)
