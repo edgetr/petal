@@ -23,6 +23,7 @@ struct PetalProcessCheck {
             [petal, "--bench-windows", "--runs", "20", "--only", "Chat, 60 messages", "--json", "/tmp/a.json"],
             [petal, "--bench-windows-child", "settings"], [petal, "--bench-windows-idle", "Chat, 60 messages"],
             [petal, "--snapshot", "/tmp/snap"], [petal, "--routines-check", "--ai"], [petal, "--restore-dock"],
+            [petal, "--helpers-check"], [petal, "--helpers-check", "--ai"], [petal, "--viewer-check", "/tmp/a.pdf"],
             [petal, "mode", "social"], [petal, "doctor"], [petal, "report"], [petal, "run", "--key", "x", "--", "env"],
             [petal, "no-such-command"], [petal, "-psn_0_1", "--mcp"],
         ]
@@ -45,6 +46,7 @@ struct PetalProcessCheck {
             ([petal, "--bench-settings"], .benchWindows(settingsOnly: true)),
             ([petal, "--bench-dock"], .benchDock), ([petal, "--bench-dock", "/tmp/strips"], .benchDock), ([petal, "--bench"], .bench),
             ([petal, "--routines-check", "--ai"], .routinesCheck(ai: true)), ([petal, "--routines-check"], .routinesCheck(ai: false)),
+            ([petal, "--helpers-check", "--ai"], .helpersCheck(ai: true)), ([petal, "--helpers-check"], .helpersCheck(ai: false)),
         ]
         for (argv, launch) in launches {
             let parsed = PetalProcess.parse(argv)

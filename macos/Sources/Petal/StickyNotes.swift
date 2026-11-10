@@ -65,7 +65,11 @@ extension ClaudePanel {
     /// and previews stay, for helpers in notes to come; nothing makes a chat a note now.
     var notesOn: Bool { false }
 
-    var working: Int { notes.filter { $0.agent.running }.count }
+    /// How many notes hold a place among the `atOnce` at work: those running, and a helper whose turn ended asking
+    /// the person (Allow or Don't), which is the same run going on (`Agent.holdsPlace`).
+    var working: Int { notes.filter { $0.agent.holdsPlace }.count }
+    /// The same, not counting `agent`'s own place: what its next turn has to fit beside.
+    func working(besides agent: Agent) -> Int { notes.filter { $0.agent !== agent && $0.agent.holdsPlace }.count }
 
     func note(withID id: String) -> StickyNote? { notes.first { $0.id.uuidString == id } }
 
@@ -1160,7 +1164,7 @@ extension ClaudePanel {
     /// ended (a new chat, a chat picked from the list).
     func startWaiting() {
         // A helper's turn starts only while its run admits it (paused: it keeps waiting; stopped: never).
-        for note in notes where !note.agent.waiting.isEmpty && working < Self.atOnce && note.agent.admitted { note.agent.runWaiting() }
+        for note in notes where !note.agent.waiting.isEmpty && working(besides: note.agent) < Self.atOnce && note.agent.admitted { note.agent.runWaiting() }
     }
 
     func updateReady() {

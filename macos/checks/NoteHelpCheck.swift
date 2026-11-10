@@ -151,6 +151,15 @@ struct NoteHelpCheck {
         expect(values.map(\.label) == ["Flights", "Hotel", "Food"], "the note's values", "\(values)")
         expect(NoteHelp.evaluate("[Flights] + [Hotel] * 2", values: values) == 653, "a formula")
         expect(NoteHelp.evaluate("sum()", values: values) == 592.5, "sum")
+        // `sum` with its own terms, as an AI often writes it (found by `Petal --helpers-check --ai`): those terms only,
+        // each known or nothing; a comma there separates terms, and is a thousands mark only outside it.
+        expect(NoteHelp.evaluate("sum([Flights], [Hotel])", values: values) == NoteHelp.evaluate("[Flights] + [Hotel]", values: values)
+               && NoteHelp.evaluate("sum([Flights], [Hotel])", values: values) != nil, "sum of the terms it names")
+        expect(NoteHelp.evaluate("sum([Flights], 10) * 2", values: values) == NoteHelp.evaluate("([Flights] + 10) * 2", values: values), "a term is a whole expression")
+        expect(NoteHelp.evaluate("sum(1,2)", values: values) == 3 && NoteHelp.evaluate("1,200 + 1", values: values) == 1201 && NoteHelp.evaluate("sum * 2", values: values) == 1185,
+               "a comma separates sum's terms, and marks thousands elsewhere; sum alone is every value")
+        expect(NoteHelp.evaluate("sum([Taxi])", values: values) == nil && NoteHelp.evaluate("sum([Flights], )", values: values) == nil
+               && NoteHelp.evaluate("sum([Flights]", values: values) == nil, "a term it doesn't know, or a list left open: nothing")
         expect(NoteHelp.evaluate("(Flights + Food) / 2", values: values) == 236, "one-word labels")
         expect(NoteHelp.evaluate("[Taxi] + 1", values: values) == nil && NoteHelp.evaluate("1 / 0", values: values) == nil && NoteHelp.evaluate("2 +", values: values) == nil, "never a guess")
 
@@ -619,7 +628,7 @@ struct NoteHelpCheck {
         var fileHelper = facts
         fileHelper.place = "file"; fileHelper.placeIsFile = true
         fileHelper.placeShowing = false
-        if case .wait(let why) = NoteHelp.admit(fileHelper) { expect(why.contains("file"), "a file helper with another document showing waits for its file", why) }
+        if case .wait(let why) = NoteHelp.admit(fileHelper) { expect(why.contains("document"), "a file helper with another document showing waits for its document", why) }
         else { expect(false, "a file helper with another document showing waits", "\(NoteHelp.admit(fileHelper))") }
         fileHelper.placeShowing = true
         expect(NoteHelp.admit(fileHelper) == .go, "its own document showing: go")
@@ -939,7 +948,17 @@ struct NoteHelpCheck {
         if case .wait(let why) = NoteHelp.admit(waitsNamed) { expect(!why.contains("Q7m") && !why.contains("Bank"), "a wait's reason never names the place (it goes on the note and to the AI)", why) }
         else { expect(false, "a place not in front waits") }
         waitsNamed.placeIsFile = true
-        if case .wait(let why) = NoteHelp.admit(waitsNamed) { expect(!why.contains("Q7m") && why.contains("file"), "nor its file", why) } else { expect(false, "a file not showing waits") }
+        if case .wait(let why) = NoteHelp.admit(waitsNamed) {
+            expect(!why.contains("Q7m") && why.contains("document") && why.contains("Petal's viewer"), "nor its file: it says its document needs to be open in Petal's viewer", why)
+        } else { expect(false, "a file not showing waits") }
+        // A note on a document: its helper is told the viewer showing it is its place.
+        var onFile = NoteHelp.Told()
+        onFile.place = "a file"
+        let plainSystem = NoteHelp.system(onFile, provider: "Claude", computerUse: false, brief: "").text
+        onFile.placeIsFile = true
+        let fileSystem = NoteHelp.system(onFile, provider: "Claude", computerUse: false, brief: "").text
+        expect(fileSystem.contains("Petal's viewer") && fileSystem.contains("petal_view") && fileSystem.contains("copies") && !plainSystem.contains("petal_view_versions"),
+               "a helper on a document is told the viewer is its place, and to change it on copies first")
         guard let afterShown = NoteShield.shield(["# Research \(saved) and more\nIts words"], index: savedIndex) else { return expect(false, "after") }
         let chainBrief = NoteHelp.brief(NoteHelp.Told(after: afterShown[0]))
         expect(chainBrief.text.contains("This runs because") && !chainBrief.text.contains("Q7m"), "a chain's done note is named by a title derived after redaction", chainBrief.text)

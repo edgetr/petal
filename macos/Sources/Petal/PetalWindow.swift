@@ -8,6 +8,8 @@ enum PetalWindow {
     /// in front, and a second click was needed. So it's asked once the menu has gone (the next turn of the main
     /// loop), and the window is ordered over the others even if macOS keeps another app active.
     static func bringForward(_ window: NSWindow) {
+        // A headless run (a check, a snapshot, a bench) shows nothing: no window of Petal's is ever ordered in by it.
+        guard !Headless.on else { return }
         DispatchQueue.main.async {
             NSApp.activate()
             window.orderFrontRegardless()

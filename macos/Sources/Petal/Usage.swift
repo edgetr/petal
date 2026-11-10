@@ -123,6 +123,8 @@ final class Usage {
     }
 
     func refresh(_ provider: Provider) async {
+        // A headless run (a bench, a snapshot, a check) reads no Keychain and asks no usage endpoint.
+        guard !Headless.on else { return }
         guard !PetalApp.shared.usesAPIKey(provider) else { return }
         switch provider {
         case .claude: await refreshClaude()

@@ -113,7 +113,8 @@ final class Agent {
     @ObservationIgnored private var steering = 0
     /// Where the messages waiting for room begin in `messages`: saved as still to send, not as sent.
     @ObservationIgnored private var waitingFrom: Int?
-    static let approved = "I approved that. Go ahead and run it, then continue."
+    static let approvedWords: Shielded = "I approved that. Go ahead and run it, then continue."
+    static let approved = approvedWords.text
 
 
     /// What the person types in the chat. A helper's agent takes nothing raw: only `send(_: Shielded)`.
@@ -143,6 +144,8 @@ final class Agent {
     private func holdTurn() {
         if waiting.isEmpty { waitingToken = token; waitingFrom = messages.count }
         waiting = [Self.helperTurn]
+        // (Waiting for its gate or for Go on, it holds no place among those working meanwhile.)
+        continuing = false
     }
 
     /// What a chat is doing, for a line shown outside its own panel (the AI button's preview, a note's status line),
@@ -209,7 +212,7 @@ final class Agent {
     private func admit(_ prompt: String, from index: Int) {
         // A helper's run that's stopped admits nothing; paused, its turn waits (Go on restores it).
         if let token, token.state == .cancelled || token.state == .finished { return }
-        if !waiting.isEmpty || app.claude.working >= ClaudePanel.atOnce || !admitted {
+        if !waiting.isEmpty || app.claude.working(besides: self) >= ClaudePanel.atOnce || !admitted {
             if helperSystem != nil { return holdTurn() }
             if waiting.isEmpty {
                 waitingFrom = index
@@ -272,6 +275,24 @@ final class Agent {
         admit(Self.approved, from: messages.count)
     }
 
+    /// A helper's Allow (NoteHelpers.allowDenials): the rules go to its run and the card goes; nothing is sent here.
+    /// Its continuation is its run's next turn, made and started through `NoteHelpers.start` like every turn, and it
+    /// keeps the run's place among those working until that turn starts (`holdsPlace`). False: nothing was asked.
+    func takeAllow() -> Bool {
+        guard !running, !pendingAsk.isEmpty else { return false }
+        for denial in pendingAsk { for rule in denial.rules where !allowed.contains(rule) { allowed.append(rule) } }
+        pendingAsk = []
+        continuing = true
+        messages.append(Message(kind: .step, text: "Allowed"))
+        return true
+    }
+
+    /// A helper's turn ended asking the person (Allow or Don't), or its Allow's continuation is being made: the run
+    /// isn't over, so it keeps its place among the `ClaudePanel.atOnce` working, and its continuation never waits
+    /// behind another note for room. An ordinary chat's question holds nothing.
+    var holdsPlace: Bool { running || (helperSystem != nil && (!pendingAsk.isEmpty || continuing)) }
+    @ObservationIgnored private var continuing = false
+
     /// A note's stamp tapped: Claude's per-part rules it stood for are taken back (the next run asks again).
     func revoke(_ rules: [String]) { allowed.removeAll { rules.contains($0) } }
 
@@ -309,6 +330,7 @@ final class Agent {
         needs = nil
         quietly = false
         runID = UUID()
+        continuing = false
         queued = []
         waiting = []
         waitingFrom = nil
@@ -411,6 +433,7 @@ final class Agent {
     /// (its outcome, then `agentFinished`), so whoever waits on it (a note's helper) hears it.
     private func refuse(_ reason: String, opensSettings: Bool = false) {
         turnToken = token
+        continuing = false
         messages.append(Message(kind: .error, text: reason, opensSettings: opensSettings))
         outcome = .failed
         failure = reason
@@ -462,6 +485,7 @@ final class Agent {
             }
         }
         turnToken = token
+        continuing = false
         outcome = nil
         turnErrored = false
         turn += 1

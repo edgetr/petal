@@ -6,7 +6,7 @@ import Foundation
 /// dock counts as "Petal running": the one-at-a-time check at launch, `petal doctor` and the Dock guard.
 enum PetalProcess {
     /// Flags that start Petal as something other than a dock (main.swift handles each before the dock starts).
-    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--mcp", "--restore-dock"]
+    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--mcp", "--restore-dock"]
     /// Every benchmark: --bench, --bench-dock, --bench-settings, --bench-windows, --bench-windows-child, -idle.
     static let benchPrefix = "--bench"
 
@@ -29,6 +29,8 @@ enum PetalProcess {
         case snapshot(String)
         /// `Petal --viewer-check <file>…`: the viewer's loading, headless, on throwaway files.
         case viewerCheck
+        /// `Petal --helpers-check [--ai]`: helpers in notes run end to end, headless, on throwaway folders.
+        case helpersCheck(ai: Bool)
         /// A tool's flag written wrong (`--snapshot` with no folder, a `--bench…` there isn't): its usage, printed
         /// before anything starts, and a non-zero exit. Never a dock.
         case usage(String)
@@ -76,6 +78,7 @@ enum PetalProcess {
         if words.contains("--bench-dock") { return .benchDock }
         if words.contains("--bench") { return .bench }
         if words.contains("--routines-check") { return .routinesCheck(ai: words.contains("--ai")) }
+        if words.contains("--helpers-check") { return .helpersCheck(ai: words.contains("--ai")) }
         if words.contains("--viewer-check") {
             guard value(after: "--viewer-check") != nil else { return .usage("usage: Petal --viewer-check <file>… [--out <folder>]") }
             return .viewerCheck

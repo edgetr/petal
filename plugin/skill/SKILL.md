@@ -86,7 +86,8 @@ Use, in this order:
    Excel, Pages and Numbers through macOS's own Quick Look preview (notes per page or slide), Open in <app> one click
    away. `petal_view` opens one (`path`: a file whose final destination, every link followed, is in their home folder
    and theirs, or on a drive or share mounted under /Volumes and readable by them; `page` from 1); it never moves or
-   changes the file. To change a document, try it on copies first:
+   changes the file, and answers with the words of the page or slide it shows (`text`). To change a document, try it
+   on copies first:
    `petal_view_versions` (`path`, `names`) makes a copy per name in a folder of Petal's own and shows them under the
    document with Use this (each version has an `id`; names may repeat); edit the copies (never the file), and
    `petal_view_pick` (`set`, `wait` up to 120 s) says which one the user picked (its `id`, name and path), only while the original is the very file, unchanged, the versions were made from (else null with why: make versions again; the copies stay), so ask again right before changing the original. Newer versions replace a set (its copies go, all but a picked one; a copy you changed goes to the Trash), and every copy goes when the viewer closes, so read the picked one while it's open. Change their own file only after they allow it. `petal_note_pdf_comments` writes the

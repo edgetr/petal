@@ -516,6 +516,13 @@ final class PetalApp {
         return model.efforts
     }
 
+    /// For `Petal --helpers-check` only (a headless run looks for no AI app by itself): where `provider` is, as the
+    /// check says: its stand-in script, or with --ai the CLI it found.
+    func standIn(_ provider: Provider, at path: String?) {
+        guard Headless.on else { return }
+        paths[provider] = path
+    }
+
     /// Asking the login shell can take a moment; the dock doesn't wait for it.
     func lookFor(_ provider: Provider) async {
         guard !Headless.on else { return }   // a benchmark starts no shell

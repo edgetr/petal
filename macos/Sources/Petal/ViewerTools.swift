@@ -30,16 +30,17 @@ extension Viewers {
         // (which may wait on the vault), then that state read again right before it's delivered. Still the same,
         // it goes; changed meanwhile (the original replaced, the viewer closed, a pick held back), the answer is
         // made again from what's true now, never the earlier one. Nothing goes to an asker that hung up.
-        func told(_ make: @escaping @MainActor () -> Told, attempt: Int = 0) {
+        /// `fit`: the redacted answer made to fit (a page's words cut short only once they're redacted whole).
+        func told(_ make: @escaping @MainActor () -> Told, attempt: Int = 0, fit: @escaping @MainActor (Any) -> Any = { $0 }) {
             let first = make()
             guard let value = first.value else { return fail(first.refusal ?? NoteShield.unreadable) }
             Self.shielded(value) { out in
                 guard live() else { return }
                 guard make().mark == first.mark else {
                     // Three tries at most: a viewer that never settles is said so, not told stale.
-                    return attempt < 2 ? told(make, attempt: attempt + 1) : fail("The viewer kept changing while Petal answered: ask again.")
+                    return attempt < 2 ? told(make, attempt: attempt + 1, fit: fit) : fail("The viewer kept changing while Petal answered: ask again.")
                 }
-                if let out { answer(out) } else { refuse(NoteShield.unreadable) }
+                if let out { answer(fit(out)) } else { refuse(NoteShield.unreadable) }
             }
         }
         guard app.paper.on else { return fail("Petal Notes is off in Petal's settings (notes); the viewer is part of it.") }
@@ -58,19 +59,32 @@ extension Viewers {
                 case .failure(let refusal): fail(refusal.description)
                 case .success(let model):
                     model.whenLoaded(within: Self.loadLimit) { _ in
-                        // What it shows as the answer goes out: closed meanwhile (while it was read, or while the
-                        // answer was redacted), said so, never a page count or "still loading"; reloaded or replaced
-                        // meanwhile, told again as it is then.
-                        told {
-                            guard !model.isClosed else { return Told(refusal: Self.closedText) }
-                            var told = self.told(model, caller: caller)
-                            // The page asked for is checked only against a finished document: while it loads or
-                            // reloads the answer says it's loading (never the pages of the document before).
-                            if let page, !model.loading, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
-                                told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows \(model.unit.word) \(model.current + 1)."
-                            }
-                            return Told(told, state: model.shownState)
+                        // The words of the page it shows, read off the main thread from this load's own copy of the
+                        // document (ViewerText), told with the rest: redacted whole with the answer, cut short after.
+                        let source = model.text
+                        let shown = model.current
+                        let tell = { (words: String?) in
+                            // What it shows as the answer goes out: closed meanwhile (while it was read, or while the
+                            // answer was redacted), said so, never a page count or "still loading"; reloaded or replaced
+                            // meanwhile, told again as it is then.
+                            told({
+                                guard !model.isClosed else { return Told(refusal: Self.closedText) }
+                                var told = self.told(model, caller: caller)
+                                // The page asked for is checked only against a finished document: while it loads or
+                                // reloads the answer says it's loading (never the pages of the document before).
+                                if let page, !model.loading, !model.live, model.pageCount > 0, ViewerPages.index(page, count: model.pageCount) == nil {
+                                    told["note"] = "It has \(model.pageCount) \(model.unit.word)s; \(model.unit.word) \(page) isn't one, so it shows \(model.unit.word) \(model.current + 1)."
+                                }
+                                // Only the page still shown, of the load its words were read from.
+                                if let words, !words.isEmpty, !model.loading, model.text === source, model.current == shown {
+                                    told[model.unit.word] = shown + 1
+                                    told["text"] = words
+                                }
+                                return Told(told, state: model.shownState)
+                            }, fit: Self.fitText)
                         }
+                        guard let source, !model.loading, !model.live, model.pageCount > 0 else { return tell(nil) }
+                        source.read(page: shown, selected: NSRange(location: NSNotFound, length: 0), paragraph: { _ in nil }) { text, _, _ in tell(text) }
                     }
                 }
             }
@@ -195,6 +209,15 @@ extension Viewers {
             let out = ViewerCarry(VaultIndex.settled { $0.unreadable ? nil : NoteShield.shield(carried.value as Any, index: $0) } ?? nil)
             DispatchQueue.main.async { MainActor.assumeIsolated { done(out.value) } }
         }
+    }
+
+    /// A page's words in `petal_view`'s answer, made to fit once the whole answer is redacted (never cut before).
+    static let textLimit = 12_000
+    static func fitText(_ answer: Any) -> Any {
+        guard var told = answer as? [String: Any], let text = told["text"] as? String, text.count > textLimit else { return answer }
+        told["text"] = String(text.prefix(textLimit)) + "…"
+        told["textCut"] = "This is the start of the page; it goes on."
+        return told
     }
 
     /// How long `petal_view` waits for a document to be read (Quick Look's export and WebKit's pages, a file iCloud

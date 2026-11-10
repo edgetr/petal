@@ -66,7 +66,7 @@ final class Viewers {
 
     /// The model for a checked file, made or found, and its window shown.
     @discardableResult
-    func show(_ url: URL, page: Int? = nil, front: Bool = true) -> ViewerModel {
+    func show(_ url: URL, page: Int? = nil, front: Bool = true, window makesWindow: Bool = !Headless.on) -> ViewerModel {
         if let model = open.first(where: { $0.url.path == url.path }) {
             model.ask(page: page)
             if front, let window = windows[model.id] { PetalWindow.bringForward(window) }
@@ -76,7 +76,8 @@ final class Viewers {
         // Checked against the document once it's read (ViewerPages.index).
         model.wantedPage = page
         open.append(model)
-        if !Headless.on {
+        // (`makesWindow`: a headless check may ask for the window itself, never ordered in, to see what's bound to it.)
+        if makesWindow {
             let window = ViewerWindow(model: model)
             windows[model.id] = window
             window.onClose = { [weak self] in self?.closed(model) }
@@ -84,6 +85,14 @@ final class Viewers {
         }
         model.load()
         return model
+    }
+
+    /// A viewer's own window as a note's helper sees its place (NoteHelpers.place): Petal's window showing that file,
+    /// by its window number, so `petal_look` and `petal_ui` read the viewer for a note in its margin. Nil: no window.
+    func place(of model: ViewerModel) -> NotePlace? {
+        guard let window = windows[model.id], window.windowNumber > 0 else { return nil }
+        return NotePlace(pid: getpid(), app: NSRunningApplication.current.bundleIdentifier ?? "", appName: "Petal's viewer",
+                         window: CGWindowID(window.windowNumber), title: model.name, mode: "", desktop: nil, scope: .window)
     }
 
     /// The viewer whose window has the keyboard, by its model's id (ViewerWindow): while it does, it's the desk's
@@ -107,6 +116,8 @@ final class Viewers {
         model.close()
         open.removeAll { $0 === model }
         windows[model.id] = nil
+        // A helper of a note in its margin has no document open now: it waits for one.
+        app.paper.helpers.viewerChanged()
     }
 
     /// The notes' folder being switched: margins read only meanwhile (nothing in them takes typing the store would
@@ -1021,6 +1032,8 @@ final class ViewerModel: Identifiable {
                     guard found != self.onFile else { return }
                     self.onFile = found
                     self.resolvePassages()
+                    // The notes in this margin changed: a helper of one of them is on its document here now.
+                    self.desk.helpers.viewerChanged()
                 }
             }
         }

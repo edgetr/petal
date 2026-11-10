@@ -122,12 +122,33 @@ grep -q 'app.paper.handle(name, args, asker: note.flatMap { app.claude.note(with
 # asks ViewerFiles' answer for the window in front, or the file Petal's viewer shows): never a path compared. A file's
 # repository, and a task's file at Open all, are found by ViewerFiles.locate (identity, then bookmark, then path).
 grep -q 'return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false' Sources/Petal/NoteHelpers.swift \
-    && grep -q 'shown.samePlace(required)' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'if required.map({ place.samePlace($0) }) ?? true { return (model, place) }' Sources/Petal/NoteHelpers.swift \
     && grep -q 'let file = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path' Sources/Petal/NoteHelpers.swift \
     && grep -q 'if compare == nil, let stick, ViewerFiles.namesFile(stick) {' Sources/Petal/NoteHelpers.swift \
     && grep -q 'if item.kind == "file" { return located(item, mac: mac, follow: follow).map(decide) }' Sources/Petal/NoteTasks.swift \
     && ! grep -n 'documentShowing\|sceneFile\|run\.document' Sources/Petal/NoteHelpers.swift Sources/Petal/NoteHelp.swift \
     || { echo "NoteHelpers: a helper's files go by the one file resolver, never a path comparison"; exit 1; }
+# The final review's three (Petal --helpers-check drives them, steps 11 to 13; these keep their shape in the source):
+# a run takes the private apps' generation when it's made, never a default; Allow's continuation is the run's own
+# call through `start`, in the place the run kept while it asked; a note in the viewer's margin has that viewer's
+# window as its place. And a headless run never orders a window of Petal's in.
+grep -q 'self.privacy = ClaudePanel.privacy.now' Sources/Petal/NoteHelpers.swift \
+    && ! grep -q 'var privacy = 0' Sources/Petal/NoteHelpers.swift \
+    || { echo "NoteHelpers: a run takes the private apps' generation when it's made"; exit 1; }
+grep -q 'guard agent.takeAllow() else { return }' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'start(run, turn(run, said: nil, words: { _ in Agent.approvedWords }))' Sources/Petal/NoteHelpers.swift \
+    && ! grep -q 'agent\.allow()' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'var holdsPlace: Bool { running || (helperSystem != nil && (!pendingAsk.isEmpty || continuing)) }' Sources/Petal/Claude.swift \
+    && grep -q 'app.claude.working(besides: self) >= ClaudePanel.atOnce' Sources/Petal/Claude.swift \
+    && grep -q 'var working: Int { notes.filter { $0.agent.holdsPlace }.count }' Sources/Petal/StickyNotes.swift \
+    || { echo "NoteHelpers: Allow's continuation goes through start, in the place its run kept"; exit 1; }
+grep -q 'return viewing.flatMap { app.viewers.place(of: $0) }' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'if viewer(showing: run.noteID, on: required) != nil { return true }' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'func place(of model: ViewerModel) -> NotePlace?' Sources/Petal/Viewer.swift \
+    || { echo "NoteHelpers: a note in the viewer's margin has that viewer's window as its place"; exit 1; }
+awk '/static func bringForward\(_ window: NSWindow\)/,/^    }$/' Sources/Petal/PetalWindow.swift | grep -q 'guard !Headless.on else { return }' \
+    || { echo "PetalWindow: a headless run never orders a window in"; exit 1; }
+echo "helpers: the private apps' generation, Allow's continuation and the viewer as a place keep their shape"
 echo "helpers: a helper's documents and a task's file go by the one file resolver"
 # The viewer's tools tell an agent only of notes it may read, and write only those into a PDF for it (a Private
 # notebook's never leave it); a helper is answered only through its admission gate (Assist.handle wraps every tool).
@@ -211,7 +232,7 @@ perl -ne '
 perl -0777 -ne '
     my $made = () = /StickyNote\(\)/g;
     unless ($made == 1 && /func sticky\(for paper: PaperNote\) -> StickyNote \{\s*let sticky = StickyNote\(\)/ && /let sticky = run\.sticky \?\? sticky\(for: paper\)/
-            && /let reviewer = sticky\(for: paper\)/ && /func retire\(_ run: Run\) \{\s*if let sticky = run\.sticky \{ drop\(sticky\) \}/) {
+            && /let reviewer = sticky\(for: paper\)/ && /func retire\(_ run: Run\) \{\s*if let sticky = run\.sticky \{.*?\n\s*drop\(sticky\)\n/s) {
         print "NoteHelpers: every run must get a fresh agent of its own, dropped when it ends\n"; exit 1 }
     print "helpers: a fresh agent for every run\n";
 ' Sources/Petal/NoteHelpers.swift

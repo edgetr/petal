@@ -197,6 +197,34 @@ final class NoteDesk {
         }
     }
 
+    /// For `Petal --helpers-check` only: the desk's own start without the parts that watch the person's apps, windows
+    /// and Desktops (nothing is looked at, shown or narrowed). The real store, its sessions and journal, entered the
+    /// one way (`switchRoot`, as at launch); the helpers started on it; a change of the notes heard as `refresh`
+    /// hears it for them (their held results tried again, what waited for a place asked again).
+    func startHeadless(root: URL, then done: @escaping @MainActor () -> Void) {
+        guard Headless.on else { return }
+        NoteStore.nameRedactor = { text in VaultIndex.settled { $0.unreadable ? nil : $0.redacted(text) } ?? nil }
+        store.onChange = { [weak self] in
+            self?.helpers.applyHeld()
+            self?.helpers.placedNow()
+        }
+        helpers.start(self)
+        hookStore()
+        store.onProblem = { [weak self] text in self?.say(text) }
+        let setting = app.config.string("notesFolder")
+        NoteStore.io.async {
+            let loaded = NoteLocal.load()
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.local = loaded
+                    self.rootCache = (setting, root)
+                    self.ready = true
+                    self.store.switchRoot(to: root, launch: true) { done() }
+                }
+            }
+        }
+    }
+
     /// `notes`, `notesLook` or `notesFolder` changed (or any setting did).
     func settingsChanged() {
         followFolderSetting()
@@ -387,7 +415,7 @@ final class NoteDesk {
     /// Another notes folder: what's typed is saved into the folder it was typed in (each note's session, drained off
     /// the main thread), every open note and editor of the old folder is put away and every window narrowed for one
     /// gets its width back (narrowing under way cancelled first), then the new folder's notes come.
-    private func switchFolder(to root: URL) {
+    func switchFolder(to root: URL) {
         lookSoon?.cancel()
         looks += 1
         giveBackAll {}
@@ -421,7 +449,11 @@ final class NoteDesk {
     /// Said on the paper from its editor (a copy refused).
     func tell(_ text: String) { say(text) }
 
+    /// For `Petal --helpers-check` only: what the desk says (nothing shows headless), as it's said.
+    @ObservationIgnored var heard: ((String) -> Void)?
+
     private func say(_ text: String) {
+        heard?(text)
         // Said by the AI button of the dock under the pointer (never a window-list lookup on the main thread); with
         // macOS's Dock chosen there's no button to say it by.
         let mouse = NSEvent.mouseLocation

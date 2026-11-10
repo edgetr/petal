@@ -97,8 +97,9 @@ final class NoteHelpers {
         /// agent is launched (`launch`); set once its setup is done (`setUp`).
         @ObservationIgnored var gather: (@MainActor (PaperNote, inout Raw) -> String?)?
         @ObservationIgnored var launch: Launch?
-        /// The private apps' generation what it was told was made under (a change rebuilds it, `admit`).
-        var privacy = 0
+        /// The private apps' generation what it was told was made under (a change rebuilds it, `admit`). Taken when
+        /// the run is made (`init`), before anything can ask its gate: never a default that differs from now.
+        var privacy: Int
         /// Parked by a tool's admission (its place or document not showing): paused, going on once the gate admits.
         var parked = false
         /// Its agent was started (a turn sent): Go on carries that session on; before it, the request begins again.
@@ -111,6 +112,7 @@ final class NoteHelpers {
             self.noteID = noteID
             self.asked = asked
             self.who = who
+            self.privacy = ClaudePanel.privacy.now
         }
 
         var paused: Bool { token.paused }
@@ -616,10 +618,16 @@ final class NoteHelpers {
     private func stopped(_ run: Run, saying words: Shielded? = nil) { end(run, .stopped(words)) }
 
     /// Stop, wherever it's pressed (the note, the AI button's preview, the pointer's Stop): the run ends where it is,
-    /// and says so. Nothing waiting on it moves.
+    /// its helper line cleared and nothing else written (the note's ink stays as it was; a faint "Stopped." says so).
+    /// Nothing waiting on it moves.
     func stop(_ noteID: String) {
         looks.cancel(noteID)
-        if let run = runs[noteID] { return end(run, .stopped(run.kind == .quick ? nil : "Stopped.")) }
+        if let run = runs[noteID] {
+            let quick = run.kind == .quick
+            end(run, .stopped(nil))
+            if !quick { reply(noteID, giveBack: nil) { _ in "Stopped." } }
+            return
+        }
         // No run here (a chain waiting, or a helper left at work by a Petal that quit): its waiting ends.
         if paper(noteID)?.file.helper?.state != .done { write(noteID) { $0.helper = nil; $0.chain = nil } }
     }
@@ -702,12 +710,13 @@ final class NoteHelpers {
     /// hasn't run since (`at`, its identity in the editor: NoteLine; the editor hands nothing else). Taking it marks
     /// it ran; a run that fails or is stopped, a local refusal, or a follow-up never sent makes it runnable again.
     func returned(_ key: String, line: String, at ticket: NoteLine) {
-        guard let desk, let paper = desk.store.paper(key), paper.version == nil, NoteHelp.calls(line) else { return }
+        guard let desk, NoteHelp.calls(line) else { return }
+        // Notes not ready yet (their folder being entered or switched): no helper starts, said plainly; the line
+        // stays runnable. Asked first: the note's paper isn't in the store until its folder's first read is in.
+        guard desk.takesChanges() else { return }
+        guard let paper = desk.store.paper(key), paper.version == nil else { return }
         let noteID = paper.noteID
         let trimmed = line.trimmingCharacters(in: .whitespaces)
-        // Notes not ready yet (their folder being entered or switched): no helper starts, said plainly; the line
-        // stays runnable.
-        guard desk.takesChanges() else { return }
         // Refused here, before anything is taken: the line stays runnable.
         guard !desk.store.readOnly(paper) else { return reply(noteID, giveBack: nil) { _ in "This note has two versions: keep one before asking a helper." } }
         // A bare @Petal asks nothing: refused before any run is registered, with a faint hint.
@@ -976,6 +985,7 @@ final class NoteHelpers {
                     guard let place = NoteShield.place(stick, appPrivate: raw.placePrivate, index: index) else { return nil }
                     told.place = place.words
                     told.quote = place.quote
+                    told.placeIsFile = ViewerFiles.namesFile(stick)
                 }
                 return told
             }
@@ -1285,16 +1295,16 @@ final class NoteHelpers {
     /// "Put this away": the window in front's tabs, the file it shows and the mail it came from become the note's
     /// task (Open all brings them back), with a short line of where the person stopped and what's next.
     private func putAway(_ paper: PaperNote, asked: String) {
-        guard let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != getpid(),
-              !app.assist.neverLook(front.bundleIdentifier ?? "") else {
+        guard let front = inFront(), front.pid != getpid(), !app.assist.neverLook(front.bundle) else {
             return reply(paper.noteID, giveBack: taking) { _ in "Petal couldn't tell what you were working on (or it's an app you keep private)." }
         }
         let run = begin(paper, asked: asked, step: "Putting the task away")
         run.kind = .quick
         run.restart = { [weak self] in if let self, let paper = self.paper(paper.noteID) { self.putAway(paper, asked: asked) } }
         guard let provider = quickProviderOrFail(run) else { return }
-        let bundle = front.bundleIdentifier ?? ""
-        let pid = front.processIdentifier
+        let bundle = front.bundle
+        let pid = front.pid
+        let parts = Self.partsInFront
         let file = desk?.scene?.file ?? ""
         // The file as the disk knows it, read with the scene (its incarnation and a bookmark): what Open all finds again.
         let fileID = desk?.scene?.fileID ?? ""
@@ -1302,10 +1312,10 @@ final class NoteHelpers {
         let token = run.token
         NoteDesk.queue.async {
             guard token.admits else { return }
-            var items = Self.windowTabs(bundle).map { NoteHelp.TaskItem(kind: .tab, title: $0.title, target: $0.url) }
+            var items = parts.map { $0(bundle, pid) } ?? Self.windowTabs(bundle).map { NoteHelp.TaskItem(kind: .tab, title: $0.title, target: $0.url) }
             if !file.isEmpty { items.append(NoteHelp.TaskItem(kind: .file, title: (file as NSString).lastPathComponent, target: file, bookmark: fileBookmark, fileID: fileID)) }
-            if bundle == "com.apple.mail", let mail = Self.selectedMail() { items.append(NoteHelp.TaskItem(kind: .mail, title: mail.subject, target: mail.url)) }
-            if items.isEmpty, let title = Self.windowTitle(pid), !title.isEmpty { items.append(NoteHelp.TaskItem(kind: .window, title: title, target: bundle)) }
+            if parts == nil, bundle == "com.apple.mail", let mail = Self.selectedMail() { items.append(NoteHelp.TaskItem(kind: .mail, title: mail.subject, target: mail.url)) }
+            if parts == nil, items.isEmpty, let title = Self.windowTitle(pid), !title.isEmpty { items.append(NoteHelp.TaskItem(kind: .window, title: title, target: bundle)) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard self.live(run) else { return }
@@ -1342,6 +1352,17 @@ final class NoteHelpers {
             }
         }
     }
+
+    /// The app in front, whose window "put this away" puts away.
+    private func inFront() -> (bundle: String, pid: pid_t)? {
+        if let stand = Self.appInFront { return stand() }
+        return NSWorkspace.shared.frontmostApplication.map { ($0.bundleIdentifier ?? "", $0.processIdentifier) }
+    }
+
+    /// For `Petal --helpers-check` only: a made-up app in front and the parts of its window, in place of asking
+    /// macOS, the browser and Mail (a check never reads the person's own windows). Everything after is as always.
+    nonisolated(unsafe) static var appInFront: (() -> (bundle: String, pid: pid_t)?)?
+    nonisolated(unsafe) static var partsInFront: (@Sendable (String, pid_t) -> [NoteHelp.TaskItem])?
 
     /// Open all: a task's tabs, files and mail, back, by NoteTasks' rule (never an app or a script: a task can come
     /// from sync or a tool).
@@ -1425,11 +1446,25 @@ final class NoteHelpers {
 
     /// Which of a note's places it's on now: its place on the file Petal's viewer shows, while the viewer has the
     /// keyboard and the note is on that file (it's the current place then, as for the note tools: NoteDesk.hereNow);
-    /// else the one that fits the window in front (`here`).
+    /// else the one that fits the window in front (`here`); else its place on a file any open viewer shows (a note in
+    /// a viewer's margin is on its document there, wherever the keyboard is).
     private func here(_ paper: PaperNote) -> Int? {
-        if let place = app.viewers.front?.notes.first(where: { $0.paper.key == paper.key })?.place,
-           let index = paper.file.places.firstIndex(where: { $0.samePlace(place) }) { return index }
-        return desk?.here[paper.key]
+        let index = { (place: NoteStick?) in place.flatMap { shown in paper.file.places.firstIndex { $0.samePlace(shown) } } }
+        if let front = app.viewers.front, let found = index(front.notes.first { $0.paper.key == paper.key }?.place) { return found }
+        if let found = desk?.here[paper.key] { return found }
+        return index(viewer(showing: paper.noteID, on: nil)?.place)
+    }
+
+    /// The open viewer whose margin holds the note (on `required`, when given: that very place, by `samePlace`), by
+    /// the one file resolver's answer for the file it shows (`ViewerModel.notes`): the one with the keyboard first,
+    /// then any other open one.
+    private func viewer(showing noteID: String, on required: NoteStick?) -> (model: ViewerModel, place: NoteStick)? {
+        let front = app.viewers.front
+        for model in [front].compactMap({ $0 }) + app.viewers.open.filter({ $0 !== front }) {
+            guard let place = model.notes.first(where: { $0.paper.noteID == noteID && $0.paper.version == nil })?.place else { continue }
+            if required.map({ place.samePlace($0) }) ?? true { return (model, place) }
+        }
+        return nil
     }
 
     /// The run's requirement (the place it must be on) and its agent's tool target, set together from the note's
@@ -1453,10 +1488,11 @@ final class NoteHelpers {
     /// Whether the run's required place is the one showing now: from the run's own requirement, never `here`. A
     /// file's place (or a sentence in a file) by the one file resolver's answer for the window in front
     /// (`NoteMatch.fits`: the very file by its `fileID`, a file renamed is it, a path another file took isn't), or as
-    /// the file Petal's viewer shows while it has the keyboard (its margin's notes, resolved the same way).
+    /// the file an open viewer of Petal's shows (its margin's notes, resolved the same way): the document is open
+    /// there, whichever window has the keyboard.
     private func requirementShowing(_ run: Run) -> Bool {
         guard let required = run.requiredPlace else { return true }
-        if let shown = app.viewers.front?.notes.first(where: { $0.paper.noteID == run.noteID && $0.paper.version == nil })?.place, shown.samePlace(required) { return true }
+        if viewer(showing: run.noteID, on: required) != nil { return true }
         return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false
     }
 
@@ -1472,8 +1508,8 @@ final class NoteHelpers {
         mornings = []
     }
 
-    /// Petal's viewer took or gave up the keyboard, or the notes on its file changed: a helper's place is what it
-    /// shows now (bound again, and what waited for it goes on).
+    /// Petal's viewer took or gave up the keyboard, one opened or closed, or the notes on its file changed: a
+    /// helper's place is what it shows now (bound again, and what waited for it goes on).
     func viewerChanged() {
         guard !runs.isEmpty else { return }
         placesFollow()
@@ -1615,7 +1651,12 @@ final class NoteHelpers {
 
     /// A run ended (any way): its agent goes.
     private func retire(_ run: Run) {
-        if let sticky = run.sticky { drop(sticky) }
+        if let sticky = run.sticky {
+            // One that kept its place while it asked the person (Allow or Don't) frees it now: the next one waiting starts.
+            let held = sticky.agent.holdsPlace && !sticky.agent.running
+            drop(sticky)
+            if held { DispatchQueue.main.async { MainActor.assumeIsolated { self.app.claude.startWaiting() } } }
+        }
     }
 
     /// Whether a helper of this note may show in the AI button's previews: only one in a notebook known to be open.
@@ -1627,16 +1668,23 @@ final class NoteHelpers {
 
     /// Where the note is now, as its helper's tools see it (NotePlace): the window in front when the note is on it,
     /// its tab, or all of its app; nil when it isn't placed on a window now.
-    /// `required`: the run's own place; the window in front is its tools' target only as that very place (in Petal's
-    /// viewer, or on another of the note's places, there's none: its tools then say what they look at).
+    /// `required`: the run's own place; the window in front is its tools' target only as that very place (on another
+    /// of the note's places there's none: its tools then say what they look at). A note in the margin of Petal's
+    /// viewer is on its document there: the viewer's own window showing that file is its tools' target (`petal_look`
+    /// and `petal_ui` read the viewer), the one with the keyboard before the window in front, any other open one after.
     private func place(of paper: PaperNote, on required: NoteStick) -> NotePlace? {
-        guard let desk, let scene = desk.scene, let index = desk.here[paper.key], paper.file.places.indices.contains(index) else { return nil }
-        let stick = paper.file.places[index]
-        guard stick.samePlace(required), NoteMatch.fits(required, scene) else { return nil }
-        let scope: NoteScope = stick.kind == .app ? .app : (stick.kind == .tab || stick.kind == .passage) && scene.tab != nil ? .tab : .window
-        let name = NSRunningApplication(processIdentifier: scene.pid)?.localizedName ?? stick.appName
-        return NotePlace(pid: scene.pid, app: scene.app, appName: name, window: scene.window, title: scene.title,
-                         mode: desk.modeID(desktop: scene.desktop), desktop: scene.desktop, scope: scope, tab: scope == .tab ? scene.tab : nil)
+        let viewing = viewer(showing: paper.noteID, on: required)?.model
+        if let viewing, viewing === app.viewers.front, let place = app.viewers.place(of: viewing) { return place }
+        if let desk, let scene = desk.scene, let index = desk.here[paper.key], paper.file.places.indices.contains(index) {
+            let stick = paper.file.places[index]
+            if stick.samePlace(required), NoteMatch.fits(required, scene) {
+                let scope: NoteScope = stick.kind == .app ? .app : (stick.kind == .tab || stick.kind == .passage) && scene.tab != nil ? .tab : .window
+                let name = NSRunningApplication(processIdentifier: scene.pid)?.localizedName ?? stick.appName
+                return NotePlace(pid: scene.pid, app: scene.app, appName: name, window: scene.window, title: scene.title,
+                                 mode: desk.modeID(desktop: scene.desktop), desktop: scene.desktop, scope: scope, tab: scope == .tab ? scene.tab : nil)
+            }
+        }
+        return viewing.flatMap { app.viewers.place(of: $0) }
     }
 
     /// A run's agent, set up once the run's own setup is done (its AI chosen, its worktree made): its token, its
@@ -1949,7 +1997,10 @@ final class NoteHelpers {
         grantedRules[grant] = rules
         stamp(noteID, label: "ALLOWED · " + label.uppercased(), grant: grant)
         write(noteID) { file in file.helper?.state = .working; file.helper?.step = "Allowed" }
-        agent.allow()
+        // Its continuation is the same run's next turn: a call like any other (`start`), kept with the run while it
+        // waits (its gate, a pause), in the place among those working that the run kept while it asked.
+        guard agent.takeAllow() else { return }
+        start(run, turn(run, said: nil, words: { _ in Agent.approvedWords }))
     }
 
     func denyDenials(_ noteID: String) {

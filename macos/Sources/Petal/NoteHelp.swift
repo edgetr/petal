@@ -1337,7 +1337,8 @@ enum NoteHelp {
         return out
     }
 
-    /// A formula over the note's values: numbers, `[Label]` (or a one-word label), `sum`, + − × ÷ and parentheses.
+    /// A formula over the note's values: numbers, `[Label]` (or a one-word label), `sum` (alone or `sum()`: every
+    /// value; `sum(a, b, …)`: those terms, as an AI often writes it), + − × ÷ and parentheses.
     /// Nil when anything in it isn't known (never a guess).
     static func evaluate(_ formula: String, values: [(label: String, value: Double)]) -> Double? {
         var parser = Arithmetic(formula, values: values)
@@ -1349,6 +1350,8 @@ enum NoteHelp {
         let chars: [Character]
         var at = 0
         let values: [(label: String, value: Double)]
+        /// Inside `sum(…)`'s terms: a comma separates them there, and is never a number's thousands mark.
+        var lists = 0
 
         init(_ text: String, values: [(label: String, value: Double)]) {
             chars = Array(text.replacingOccurrences(of: "×", with: "*").replacingOccurrences(of: "÷", with: "/").replacingOccurrences(of: "−", with: "-"))
@@ -1402,7 +1405,7 @@ enum NoteHelp {
             }
             if c.isNumber || c == "." {
                 var digits = ""
-                while at < chars.count, chars[at].isNumber || chars[at] == "." || chars[at] == "," { if chars[at] != "," { digits.append(chars[at]) }; at += 1 }
+                while at < chars.count, chars[at].isNumber || chars[at] == "." || (chars[at] == "," && lists == 0) { if chars[at] != "," { digits.append(chars[at]) }; at += 1 }
                 return Double(digits)
             }
             if c.isLetter {
@@ -1410,8 +1413,24 @@ enum NoteHelp {
                 while at < chars.count, chars[at].isLetter || chars[at].isNumber || chars[at] == "_" { word.append(chars[at]); at += 1 }
                 if word.lowercased() == "sum" {
                     skip()
-                    if at + 1 < chars.count, chars[at] == "(", chars[at + 1] == ")" { at += 2 }
-                    return values.map(\.value).reduce(0, +)
+                    let all = values.map(\.value).reduce(0, +)
+                    guard at < chars.count, chars[at] == "(" else { return all }
+                    at += 1
+                    skip()
+                    if at < chars.count, chars[at] == ")" { at += 1; return all }
+                    // Its own terms, each a whole expression: all of them known, or nothing.
+                    lists += 1
+                    defer { lists -= 1 }
+                    var total = 0.0
+                    while true {
+                        guard let part = expression() else { return nil }
+                        total += part
+                        skip()
+                        guard at < chars.count else { return nil }
+                        if chars[at] == ")" { at += 1; return total }
+                        guard chars[at] == "," else { return nil }
+                        at += 1
+                    }
                 }
                 return value(word)
             }
@@ -2086,7 +2105,7 @@ extension NoteHelp {
         if let models = f.models, !f.model.isEmpty, !models.contains(f.model) { return .fail("\(f.model) isn't available in Petal now.") }
         // (Said without its name: a reason goes on the note and to the AI, and only what's shielded is ever named.)
         if f.place != nil, !f.placeShowing {
-            return .wait(f.placeIsFile ? "Waiting for this note's file to be in front." : "Waiting for this note's place to be in front.")
+            return .wait(f.placeIsFile ? "Waiting for this note's document: open it in Petal's viewer, or bring it to the front." : "Waiting for this note's place to be in front.")
         }
         return .go
     }
@@ -2492,6 +2511,8 @@ extension NoteHelp {
         var sources: [Shielded] = []
         /// A chain's note that is done: its whole body (its title derived from it).
         var after: Shielded = ""
+        /// The note's place is a file (or a sentence in one): its document, which Petal's viewer may show.
+        var placeIsFile = false
     }
 
     /// A helper's whole system prompt, made only of `Shielded` parts (no window or tab title, no raw text): what it
@@ -2501,6 +2522,9 @@ extension NoteHelp {
         You are \(provider), running inside Petal on the user's Mac as a helper in one of their Petal Notes. Petal's tools (the petal MCP server) are yours: petal_look and petal_ui look at the note's own place, petal_act uses it (in the background when it can; when it says the window must be in front, ask the user), petal_apps and petal_windows open and arrange apps, petal_notes and petal_note_read read their notes (a Private notebook's only from inside it), petal_vault fills logins, addresses and cards without you seeing a secret (paying shows the user a Buy card first; never type a password, card or key yourself), petal_trash moves files to the Trash (never delete files any other way). Petal asks the user before what changes things; if they say no, don't find another way.
         """
         if computerUse { words = words + "\n\nYou may use the user's apps with petal_ui and petal_act; call petal_ui first and again after anything changes the window." }
+        if t.placeIsFile {
+            words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look and petal_ui read it there, and petal_view gives the words of the page it shows (page: another one). Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
+        }
         if !t.place.isEmpty {
             words = words + "\n\nThe note is on: \(t.place). This, here, this page and this sentence mean that place, even after the user has gone elsewhere."
         }
