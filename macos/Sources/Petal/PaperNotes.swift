@@ -2336,14 +2336,18 @@ final class NoteStore {
 
     /// A note made and put away empty goes to the Trash (never deleted outright), after its own work, and only while
     /// its file still says what Petal last saw there; never one with pictures on the way.
-    func trash(_ key: String) {
+    /// `asked`: the person said to throw it away (its menu), whatever it says; else only a note with nothing in it.
+    /// Either way never while a picture of it is still being saved or read in. True when it went.
+    @discardableResult
+    func trash(_ key: String, asked: Bool = false) -> Bool {
         guard let paper = paper(key), let session = session(for: key),
-              NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: session.picturesPending,
+              NoteShelf.mayTrash(bodyEmpty: asked || paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: session.picturesPending,
                                  importing: importing(key))
-        else { return }
+        else { return false }
         notes.removeAll { $0.key == key }
         gone(key)
         enqueue(session, .trash(revision: paper.revision), done: nil)
+        return true
     }
 
     /// A conflict settled, through the session of the note's file, on the papers exactly as they were shown: each

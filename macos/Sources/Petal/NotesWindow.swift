@@ -968,6 +968,11 @@ struct GridPaper: View, Equatable {
         .environment(\.colorScheme, .light)
         .contentShape(.rect(cornerRadius: 12))
         .onTapGesture { opening(); Self.open(paper, app: app) }
+        .contextMenu {
+            Button("Open") { opening(); Self.open(paper, app: app) }
+            Divider()
+            Button("Move to Trash") { app.paper.throwAway(paper.key) }
+        }
         .modifier(NoteDragSource(paper: paper, on: draggable))
     }
 

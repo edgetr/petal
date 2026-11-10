@@ -555,6 +555,8 @@ struct NotesCheck {
         expect(NoteShelf.quoted("one\n  two ") == "> one\n> two\n\n", "each line quoted")
         expect(NoteShelf.quoted(nil).isEmpty && NoteShelf.quoted("  \n").isEmpty, "nothing selected: an empty note")
         expect(NoteShelf.quoted(String(repeating: "a", count: 900)).count == 2 + 500 + 2, "never more than 500 characters of it")
+        expect(NoteShelf.untouched("", madeWith: nil) && NoteShelf.untouched("> a word\n\n", madeWith: "> a word\n\n"), "a new note with nothing, or only its quote, is untouched")
+        expect(!NoteShelf.untouched("> a word\n\nmine", madeWith: "> a word\n\n") && !NoteShelf.untouched("mine", madeWith: nil), "one the person wrote in isn't")
         // While Petal hides macOS's Dock, its window coming onto the screen is Mission Control (macOS 27 sends no event).
         expect(NoteShelf.missionControl(dockOut: true, fullScreen: false, open: false) == true, "macOS's Dock came out while Petal hides it: Mission Control opened")
         expect(NoteShelf.missionControl(dockOut: false, fullScreen: false, open: true) == false, "it left the screen: Mission Control closed")

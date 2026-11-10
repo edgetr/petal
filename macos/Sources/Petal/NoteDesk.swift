@@ -71,6 +71,8 @@ final class NoteDesk {
     /// Made just now and still empty: let go of if it's put away empty (folded or hidden; never when it's only
     /// handed to its other editor, `handOff`).
     @ObservationIgnored var fresh: Set<String> = []
+    /// What each fresh note was made with (the words selected, as its quote): one still saying only that is untouched.
+    @ObservationIgnored private var madeWith: [String: String] = [:]
     /// Notes opened on their own (from the Petal Notes window or a notebook's stack), by paper key: one record each,
     /// everything about it together, so it moves with its paper as one (`rekey`). Never kept past this run.
     @ObservationIgnored private(set) var standalone: [String: Standalone] = [:]
@@ -1624,15 +1626,57 @@ final class NoteDesk {
     /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
     func letGoIfEmpty(_ key: String) {
         guard fresh.contains(key), let paper = store.paper(key), faces[key] != .open,
-              NoteShelf.mayTrash(bodyEmpty: paper.file.body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, picturesPending: store.picturesPending(key),
+              NoteShelf.mayTrash(bodyEmpty: NoteShelf.untouched(paper.file.body, madeWith: madeWith[key]), picturesPending: store.picturesPending(key),
                                  importing: store.importing(key))
         else { return }
         fresh.remove(key)
+        madeWith[key] = nil
         faces[key] = nil
         panels[key]?.conceal()
         panels[key] = nil
-        _ = paper
-        store.trash(key)
+        store.trash(key, asked: true)
+    }
+
+    /// The person said to throw this note away (its tab's menu, its letterhead's, the Petal Notes window's): what's
+    /// typed is saved first, then its file goes to the Trash, where it can be put back. Never deleted.
+    func throwAway(_ key: String) {
+        guard takesChanges(), let paper = store.paper(key) else { return }
+        guard paper.version == nil, !store.conflicts.values.contains(where: { $0.contains { $0.key == key } }) else { return say("Keep one version of this note first.") }
+        editors[key]?.flush()
+        guard store.trash(key, asked: true) else { return say("A picture in this note is still being saved. Try again in a moment.") }
+        fresh.remove(key)
+        madeWith[key] = nil
+        standalone[key] = nil
+        keyboardWanted.cancel(key)
+        if keyboard == key { keyboard = nil }
+        helpers.dismissed(key)
+        faces[key] = nil
+        panels[key]?.conceal()
+        panels[key] = nil
+        say("Moved to the Trash.")
+        layout()
+    }
+
+    /// An edge tab right-clicked: show its note, or throw it away (each note by name when the tab holds several).
+    func tabMenu(_ ids: [String]) {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let showing = ids.contains { faces[$0] != nil }
+        menu.addItem(ActionItem(showing ? "Hide" : "Show") { [weak self] in self?.tabClicked(ids) })
+        menu.addItem(.separator())
+        if ids.count == 1 {
+            menu.addItem(ActionItem("Move to Trash") { [weak self] in self?.throwAway(ids[0]) })
+        } else {
+            let item = NSMenuItem(title: "Move to Trash", action: nil, keyEquivalent: "")
+            let sub = NSMenu()
+            for key in ids {
+                let title = store.paper(key)?.file.title ?? ""
+                sub.addItem(ActionItem(title.isEmpty ? "A note" : String(title.prefix(40))) { [weak self] in self?.throwAway(key) })
+            }
+            item.submenu = sub
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
     // MARK: Room beside the window
@@ -1807,7 +1851,7 @@ final class NoteDesk {
         // Petal's own changes since (a place followed or added) don't make this a conflict; words changed do.
         let base = NoteShelf.rebase(editor: base, current: paper.revision, currentBody: paper.file.body)
         guard paper.file.body != body || also != nil else { done?(.written); return base }
-        if !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { fresh.remove(key) }
+        if !NoteShelf.untouched(body, madeWith: madeWith[key]) { fresh.remove(key); madeWith[key] = nil }
         // Links the person typed (an address alone on a line): their pages' titles may be fetched; a link already
         // in the note (from sync) never is.
         let links = { (text: String) in Set(NoteBlock.blocks(text).compactMap { if case .link(let url) = $0 { url } else { nil } }) }
@@ -2041,6 +2085,7 @@ final class NoteDesk {
         here = NoteShelf.rekeyed(here, old, new)
         found = NoteShelf.rekeyed(found, old, new)
         if fresh.remove(old) != nil { fresh.insert(new) }
+        madeWith = NoteShelf.rekeyed(madeWith, old, new)
         lines = NoteShelf.rekeyed(lines, old, new)
         standalone = NoteShelf.rekeyed(standalone, old, new)
         passageRects = NoteShelf.rekeyed(passageRects, old, new)
@@ -2240,7 +2285,7 @@ final class NoteDesk {
     /// `window`: the frame (Accessibility's coordinates) of the window it's made on, when that isn't the one in
     /// front (a drop on a window behind): its spot is recorded against that window.
     /// `open` false: made without opening it on the desk (Petal's viewer opens it in its margin).
-    func make(on stick: NoteStick, body: String = "", chat: String = "", at point: CGPoint? = nil, window: CGRect? = nil,
+    func make(on stick: NoteStick, body: String = "", quote: String? = nil, chat: String = "", at point: CGPoint? = nil, window: CGRect? = nil,
               expecting: NoteShelf.KeyboardRequests.Target? = nil, open opening: Bool = true) -> PaperNote? {
         var file = NoteFile(body: body)
         file.places = [stick]
@@ -2249,6 +2294,8 @@ final class NoteDesk {
         guard let paper = store.make(file, in: notebook) else { return nil }
         remember(paper.notebook, for: stick)
         if body.isEmpty { fresh.insert(paper.key) }
+        // Made with only the words selected, as a quote: still fresh, and let go if nothing is written under it.
+        if let quote, !body.isEmpty, body == quote { fresh.insert(paper.key); madeWith[paper.key] = body }
         if let point {
             if stick.kind == .desktop { local.desk[paper.noteID] = [point.x, point.y] }
             else if let frame = window ?? frame {
@@ -2319,7 +2366,7 @@ final class NoteDesk {
                 // Where the sentence itself can't be the place (an app with no page or file to find it in again), the
                 // note goes on the window and starts with the words that were selected, so they aren't lost.
                 let body = first.kind == .passage ? "" : NoteShelf.quoted(passage?.quote)
-                self.make(on: first, body: body)
+                self.make(on: first, body: body, quote: body.isEmpty ? nil : body)
                 self.sayNear = nil
             }
         }
@@ -2688,6 +2735,8 @@ final class NoteDesk {
                 self.restick(key, [desk])
             }
         })
+        menu.addItem(.separator())
+        menu.addItem(ActionItem("Move to Trash") { [weak self] in self?.throwAway(key) })
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
 
@@ -3153,6 +3202,15 @@ final class EdgeTabPanel: NSPanel {
     }
 
     override var canBecomeKey: Bool { false }
+
+    /// A right-click (or a Control-click) on a tab: its menu.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .rightMouseDown || (event.type == .leftMouseDown && event.modifierFlags.contains(.control)), let tab = edgeTab {
+            desk?.tabMenu(tab.ids)
+            return
+        }
+        super.sendEvent(event)
+    }
 
     /// At its line on `window` (Accessibility's frame): hanging out of the right edge, or in over it with no room.
     func show(_ tab: EdgeTab, outside: Bool, window: CGRect, primaryHeight: CGFloat) {
