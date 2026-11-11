@@ -13,7 +13,7 @@ enum CLI {
     petal dock [petal|macos]  which dock is showing, or switch
     petal ask | chat <text>   open the AI panel, or ask it something
     petal chats               your kept chats with Petal AI, to read again or carry on
-    petal search | settings   open the "+" search, or Petal's settings
+    petal search | settings   open the "+" search, or Petal's settings (settings privacy: a page by name)
     petal restart | update    restart Petal, or check for a new one
     petal doctor [--fix]      check Petal, and repair what it safely can
     petal report "<what>"     tell Petal's maker what went wrong (a GitHub issue; shown to you first)

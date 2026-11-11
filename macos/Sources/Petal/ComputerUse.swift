@@ -1094,7 +1094,7 @@ final class ComputerUse {
         job.send(reply)
     }
 
-    /// What it did, for Settings › AI (never what it typed: that may be private).
+    /// What it did, for Settings › Privacy (never what it typed: that may be private).
     /// What an act did, for What Petal AI did: the control's name, the menu item, the app and the site are names
     /// (HistoryLine: redacted with the vault's index before the line is kept, left out while it can't be read).
     private func historyLine(_ job: Job, _ outcome: Acting.Outcome) -> HistoryLine {

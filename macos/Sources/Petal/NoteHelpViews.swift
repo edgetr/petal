@@ -106,7 +106,7 @@ struct InkView: View {
                 Text("No proof given").font(.system(size: TextSize.small)).foregroundStyle(HelperLook.grey).padding(.top, 2)
             }
             if ink.link == NoteHelp.settingsLink {
-                NoteButton(title: "Open Settings › AI") { PetalApp.shared.settings.show(.claude) }.padding(.top, 6)
+                NoteButton(title: "Open Settings › Petal AI") { PetalApp.shared.settings.show(.claude) }.padding(.top, 6)
             }
             if !ink.proof.isEmpty {
                 HStack(spacing: 6) {

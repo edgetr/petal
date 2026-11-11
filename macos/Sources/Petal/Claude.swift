@@ -13,7 +13,7 @@ final class Agent {
         let id = UUID()
         let kind: Kind
         let text: String
-        var opensSettings = false   // an error that Settings › AI fixes (a key or sign-in), with a button there
+        var opensSettings = false   // an error that Settings › Petal AI fixes (a key or sign-in), with a button there
         init(kind: Kind, text: String, opensSettings: Bool = false) { self.kind = kind; self.text = text; self.opensSettings = opensSettings }
     }
     struct Denial: Equatable { let tool: String; let label: String; let rules: [String] }
@@ -443,7 +443,7 @@ final class Agent {
         DispatchQueue.main.async { MainActor.assumeIsolated { self.app.claude.agentFinished(self) } }
     }
 
-    /// Why its last turn failed, when it said, and whether Settings › AI fixes it (a key or a sign-in).
+    /// Why its last turn failed, when it said, and whether Settings › Petal AI fixes it (a key or a sign-in).
     @ObservationIgnored private(set) var failure: String?
     @ObservationIgnored private(set) var failureOpensSettings = false
     /// The run its waiting turn was sent under: started only while that is still its run (paused, it keeps waiting).
@@ -456,7 +456,7 @@ final class Agent {
         guard let path = app.paths[provider] else { return refuse("Petal couldn't find \(provider.appName). Set it up in Petal's settings, under AI.") }
         // On an API key with none saved, say so rather than quietly using the subscription.
         guard app.aiReady(provider) else {
-            return refuse("\(provider.name) is set to use an API key, and there isn't one yet. Add it in Settings › AI, or switch back to your subscription.", opensSettings: true)
+            return refuse("\(provider.name) is set to use an API key, and there isn't one yet. Add it in Settings › Petal AI, or switch back to your subscription.", opensSettings: true)
         }
         if sessionProvider != provider { sessionID = nil; allowed = []; sessionProvider = provider }
         let config = app.config
@@ -644,8 +644,8 @@ final class Agent {
             authFailed = true
             stop()
             let reason = app.usesAPIKey(provider)
-                ? "\(provider.keyMaker) didn't accept your API key. Check it in Settings › AI."
-                : "\(provider.appName) isn't signed in anymore. Sign in again from Settings › AI."
+                ? "\(provider.keyMaker) didn't accept your API key. Check it in Settings › Petal AI."
+                : "\(provider.appName) isn't signed in anymore. Sign in again from Settings › Petal AI."
             messages.append(Message(kind: .error, text: reason, opensSettings: true))
             failure = reason
             failureOpensSettings = true
@@ -1564,7 +1564,7 @@ struct MessageView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(message.text).font(.system(size: TextSize.body)).foregroundStyle(Color(red: 1, green: 0.42, blue: 0.54)).textSelection(.enabled)
                 if message.opensSettings {
-                    Button("Open Settings › AI") { app.settings.show(.claude) }.buttonStyle(.glass)
+                    Button("Open Settings › Petal AI") { app.settings.show(.claude) }.buttonStyle(.glass)
                 }
             }
         case .ask:

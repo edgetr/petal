@@ -483,7 +483,11 @@ final class PetalApp {
         ipc.on("allow") { [unowned self] _ in claude.agent.allow(); return "ok" }
         ipc.on("newChat") { [unowned self] _ in claude.agent.reset(); return "ok" }
         ipc.on("search") { [unowned self] _ in search.open(in: nil); return "ok" }
-        ipc.on("settings") { [unowned self] _ in settings.show(); return "ok" }
+        ipc.on("settings") { [unowned self] args in
+            // `petal settings privacy` opens that page; a name it doesn't know opens Settings as it was.
+            if let page = args.first.flatMap(SettingsSection.init(named:)) { settings.show(page) } else { settings.show() }
+            return "ok"
+        }
         ipc.on("reveal") { [unowned self] _ in docks.revealAll(); return "ok" }
         ipc.on("stack") { [unowned self] args in
             let folders = Stacks.resolve(config.strings("stackFolders"))

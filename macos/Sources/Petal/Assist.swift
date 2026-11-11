@@ -472,7 +472,7 @@ final class Assist {
                     self.app.browsers.frontURL(of: front, window: other) { url in
                         // A browser that hasn't been asked yet: the AI says so, instead of the address just missing.
                         if url == nil, Browsers.waiting(front.bundleIdentifier ?? "") {
-                            result["tabNote"] = "Petal hasn't been allowed to read this browser's tabs yet, so there's no address (the person allows it in Petal's settings, Permissions)."
+                            result["tabNote"] = "Petal hasn't been allowed to read this browser's tabs yet, so there's no address (the person allows it in Petal's settings, Privacy)."
                         }
                         guard url != nil || noteTab != nil else { return finish() }
                         // An address can carry a key too (?token=…).

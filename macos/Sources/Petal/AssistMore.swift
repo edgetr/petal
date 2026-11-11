@@ -1,7 +1,7 @@
 import AppKit
 import Security
 
-/// What Petal AI did (shown in Settings › AI, each with its own undo where there is one), the apps it never looks
+/// What Petal AI did (shown in Settings › Privacy, each with its own undo where there is one), the apps it never looks
 /// into, and keeping the vault's secrets out of everything it reads.
 extension Assist {
     // MARK: What it did

@@ -603,7 +603,7 @@ enum WindowBench {
         _ = measure(window) { _ = app.settings.prepare(.dock) }
         for section in SettingsSection.allCases.dropFirst() + [.dock] { _ = measure(window) { send(.select(section)) } }
         // Opened again a moment after it was closed (as a person does), on the Dock page as Settings… opens it,
-        // and on Petal AI as "Open Settings › AI" does.
+        // and on Petal AI as "Open Settings › Petal AI" does.
         var opens: [Sample] = [], others: [Sample] = []
         for _ in 0..<runs {
             closeAsAPerson(app.settings.window)

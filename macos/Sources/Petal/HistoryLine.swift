@@ -1,6 +1,6 @@
 import Foundation
 
-/// A line of "What Petal AI did" (Settings › AI, kept in ai-history.json) before it's kept. Its words are Petal's
+/// A line of "What Petal AI did" (Settings › Privacy, kept in ai-history.json) before it's kept. Its words are Petal's
 /// own, written here as a literal; whatever it names (an app, a window's title, a file, a site, a memory's words, a
 /// vault item's title, what an agent said it was doing) can only go in as a name, with what to say in its place when
 /// it must be left out. Every name is put through the vault's settled redaction before the line is kept, and left

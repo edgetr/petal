@@ -771,7 +771,7 @@ struct Permissions: View {
             } else if players.contains(.allowed) {
                 Allowed()
             } else {
-                Text("macOS asks when a player opens").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
+                Text("Asked when a player is open").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
             }
         }
     }
@@ -801,6 +801,33 @@ struct Permissions: View {
         var body: some View {
             Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
                 .font(.system(size: TextSize.callout, weight: .medium))
+        }
+    }
+}
+
+/// The browsers' answer in Privacy: Allow… asks every installed browser that hasn't been asked (macOS asks once for
+/// each), Open Settings… when one said no, Allowed when all said yes.
+struct BrowserAccessButton: View {
+    @Environment(PetalApp.self) private var app
+    @Binding var asking: Bool
+
+    var body: some View {
+        let browsers = app.browsers
+        if asking {
+            ProgressView().controlSize(.small)
+        } else if !browsers.refused.isEmpty {
+            Button("Open Settings…") {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") { NSWorkspace.shared.open(url) }
+            }
+            .buttonStyle(.glass)
+        } else if browsers.allAllowed || Browsers.installed().isEmpty {
+            Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+                .font(.system(size: TextSize.callout, weight: .medium))
+        } else {
+            AccentButton(title: "Allow…") {
+                asking = true
+                browsers.askAll { asking = false }
+            }
         }
     }
 }

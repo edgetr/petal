@@ -271,7 +271,7 @@ struct ProviderRow: View {
     var body: some View {
         let setup = app.aiSetup
         let state = setup.state(provider)
-        // On an API key, being signed in doesn't matter: the key does (Settings › AI has its field).
+        // On an API key, being signed in doesn't matter: the key does (Settings › Petal AI has its field).
         let keyed: Bool? = switch state {
         case .signedOut, .ready: app.usesAPIKey(provider) ? app.apiKeyCheck.savedKey(provider) != nil : nil
         default: nil
