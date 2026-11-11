@@ -2,25 +2,33 @@
 """Writes the pictures of Petal that petal.codes shows (site/views/*.webp).
 
 Every one is a real view of Petal, drawn off-screen by `Petal --snapshot` with made-up content at 3 pixels a
-point on a clear background (the promotional video's `source/img/`, whose README says how they are drawn).
-This cuts each to what the page shows, takes the soft shadow off the light ones and trims them to their edge (the
+point on a clear background, once light and once dark (the promotional video's `source/README.md` says how, and
+its `snapshot-film.patch` is what the harness needs for it). This reads those two folders as they were drawn,
+cuts each view to what the page shows, takes the soft shadow off the light ones and trims them to their edge (the
 page draws the shadow itself, so a view lines up with the text beside it), scales it to twice the size it is
-shown at, and writes WebP. The two views of Settings are drawn over a blurred wallpaper, which reads as a wash of
-color: FLAT puts their rows and words on plain paper instead.
+shown at, and writes WebP. The two views of Settings are cut from a page of the settings window, which is glass
+over whatever is behind it: the snapshots are drawn with `PETAL_SNAPSHOT_BACKDROP=#f6f5f1` (the patch's), so the
+page has the site's plain paper behind it and nothing here is a wash of color. Those two are cut flat (FLAT).
 
-    python3 brand/site-views.py <folder of the views' PNGs>
+    python3 brand/site-views.py <folder with the snapshots' light/ and dark/>
 
 It needs Pillow. Run it again when a view changes; the names here are the names index.html uses.
 """
 import sys
 from pathlib import Path
-from PIL import Image, ImageChops, ImageDraw, ImageFilter
+from PIL import Image, ImageChops, ImageDraw
 
 SRC = Path(sys.argv[1]) if len(sys.argv) > 1 else None
 OUT = Path(__file__).resolve().parent.parent / 'site' / 'views'
 
-# name: (source, box or None, width written, corner radius in source pixels or 0).
-# Dark views (cards, chips, the dock's buttons) keep their own edge: DARK.
+# Settings › Vault, 920 points wide. Its column of rows runs from 258 to 862 points; each cut is one group (the
+# items with the line under them; Import and export) with 20 points of the page around what it holds.
+VAULT_ITEMS = (714, 1119, 2646, 2208)
+VAULT_IMPORT = (714, 2898, 2646, 3360)
+
+# name: (source, box or None, width written, corner radius in source pixels or 0). A box is in the snapshot's own
+# pixels, 3 to a point. Dark views (cards, chips, the dock's buttons) come from dark/ and keep their own edge: DARK.
+# Everything else comes from light/.
 VIEWS = {
     # the first screen
     'hero-outline': ('note-open', None, 960, 0),
@@ -32,9 +40,9 @@ VIEWS = {
     'person': ('note-person', (0, 0, 2460, 1330), 1500, 0),
     'screen': ('note-on-screen', (0, 0, 2130, 1470), 1300, 0),
     # every note in one window
-    'window-grid': ('notes-window-grid', (0, 0, 2560, 1290), 1900, 0),
-    'window-grid-near': ('notes-window-grid', (560, 0, 1620, 1010), 900, 0),
-    'window-canvas': ('notes-window-canvas', (0, 0, 2560, 1500), 1500, 0),
+    'window-grid': ('notes-window-grid', (0, 0, 3840, 1935), 1900, 0),
+    'window-grid-near': ('notes-window-grid', (840, 0, 2430, 1515), 900, 0),
+    'window-canvas': ('notes-window-canvas', (0, 0, 3840, 2250), 1500, 0),
     # @Petal on a note
     'helper-ink': ('helper-ink', None, 960, 0),
     'helper-watcher': ('helper-watcher', (640, 40, 1880, 720), 860, 0),
@@ -44,7 +52,7 @@ VIEWS = {
     'helper-code-back': ('helper-code', (1240, 30, 2450, 1190), 900, 0),
     # the viewer
     'viewer': ('viewer-pdf', None, 1900, 0),
-    'viewer-near': ('viewer-pdf', (1340, 0, 2440, 1240), 1000, 0),
+    'viewer-near': ('viewer-pdf', (2010, 0, 3660, 1860), 1000, 0),
     # Petal AI in apps
     'card-use': ('film-card-use', (16, 0, 1280, 336), 880, 66),
     'card-trash': ('film-card-trash', (16, 0, 1280, 336), 880, 66),
@@ -52,9 +60,9 @@ VIEWS = {
     'preview-run': ('film-run-preview', (17, 18, 1327, 585), 1100, 60),
     'run-note': ('film-run-note', None, 1000, 0),
     'chip-export': ('film-pill-export', None, 430, 0),
-    # the vault
-    'vault-items': ('vault-items', (14, 14, 1884, 1044), 1300, 0),
-    'vault-import': ('vault-import', (14, 14, 1884, 486), 1300, 0),
+    # the vault: in Settings, its items and Import and export, each a group of rows with the page's margin around it
+    'vault-items': ('settings-vault', VAULT_ITEMS, 1300, 0),
+    'vault-import': ('settings-vault', VAULT_IMPORT, 1300, 0),
     'card-buy': ('card-vault-buy', None, 800, 0),
     'chip-password': ('film-pill-password', None, 470, 0),
     'card-key': ('card-agent-key', (16, 0, 1280, 336), 880, 66),
@@ -71,7 +79,6 @@ VIEWS = {
 
 DARK = ('card-', 'chip-', 'dock-', 'preview-')
 FLAT = ('vault-items', 'vault-import')
-PAPER = (246, 245, 241)
 
 
 def trimmed(picture):
@@ -83,28 +90,15 @@ def trimmed(picture):
     return picture.crop(picture.getchannel('A').getbbox())
 
 
-def flattened(picture):
-    """The view's ink on plain paper: each pixel's lightness against the blurred wallpaper behind it."""
-    light = picture.convert('L')
-    width, height = light.size
-    behind = light.resize((width // 8, height // 8), Image.BOX).filter(ImageFilter.MedianFilter(31))
-    behind = behind.resize((width, height), Image.BICUBIC).filter(ImageFilter.GaussianBlur(12))
-    ratio = [min(1.06, a / max(1, b)) for a, b in zip(light.tobytes(), behind.tobytes())]
-    bands = [Image.frombytes('L', (width, height), bytes(min(255, round(r * tone)) for r in ratio)) for tone in PAPER]
-    return Image.merge('RGB', bands).convert('RGBA')
-
-
 def main():
-    if not SRC or not SRC.is_dir():
+    if not SRC or not (SRC / 'light').is_dir() or not (SRC / 'dark').is_dir():
         sys.exit(__doc__)
     OUT.mkdir(parents=True, exist_ok=True)
     for name, (source, box, width, radius) in VIEWS.items():
-        picture = Image.open(SRC / f'{source}.png').convert('RGBA')
+        picture = Image.open(SRC / ('dark' if name.startswith(DARK) else 'light') / f'{source}.png').convert('RGBA')
         if box:
             picture = picture.crop(box)
-        if name in FLAT:
-            picture = flattened(picture)
-        elif not name.startswith(DARK):
+        if name not in FLAT and not name.startswith(DARK):
             picture = trimmed(picture)
         if radius:
             # A card the snapshot cut flat at an edge gets its own corners back.
