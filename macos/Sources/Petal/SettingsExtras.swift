@@ -1,52 +1,83 @@
 import AppKit
 import SwiftUI
 
-// The settings window's keyboard shortcuts card.
+// The Dock page's windows and keyboard shortcuts groups.
 
-/// A key combination, drawn as keys.
+/// A key combination, drawn as a key: clear glass of its own on the glass it sits on.
 struct KeyCaps: View {
     let text: String
 
     var body: some View {
-        Text(text).font(.system(size: 11, weight: .semibold, design: .rounded))
+        Text(text).font(.system(size: TextSize.small, weight: .semibold, design: .rounded))
             .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(.white.opacity(0.12), in: .rect(cornerRadius: 5))
-            .overlay(RoundedRectangle(cornerRadius: 5).strokeBorder(.white.opacity(0.14)))
+            .glassEffect(.clear, in: .rect(cornerRadius: Radius.chip))
     }
 }
 
-struct ShortcutsCard: View {
+/// A row of a legend: the keys in one column, then what they do, and whether another app already has them.
+struct KeyRow: View {
+    let keys: String
+    let what: String
+    var taken = false
+    /// The keys' column, so every row's words start on one line.
+    var column: CGFloat = 112
+
+    var body: some View {
+        HStack(spacing: 10) {
+            KeyCaps(text: keys).frame(width: column, alignment: .leading)
+            Text(what).font(.system(size: TextSize.body))
+            Spacer(minLength: 8)
+            if taken { Text("In use elsewhere").font(.system(size: TextSize.small)).foregroundStyle(.secondary) }
+        }
+    }
+}
+
+extension SettingsList {
+    private static let tilingOn: (PetalApp) -> Bool = { $0.config.bool("tiling") }
+
+    /// Tiling: its switch, and while it's on its gaps and its keys.
+    static let windows = SettingsBlock("Windows", footer: "Turning it off leaves every window where it is.", [
+        SettingsEntry(SettingToggle(key: "tiling", title: "Tile windows", detail: "Windows sit side by side and fill the screen."),
+                      words: "tiling window manager layout"),
+        SettingsEntry(SettingSlider(key: "tilingGaps", title: "Gaps", range: 0...32), words: "space between tiling", when: tilingOn),
+        SettingsEntry("tilingKeys", "Tiling keys", words: "keyboard shortcuts swap float even", when: tilingOn) { _ in TilingKeys() },
+    ])
+
+    /// Petal's own keyboard shortcuts: their switch, and while it's on, which keys do what.
+    static let shortcuts = SettingsBlock("Shortcuts", [
+        SettingsEntry(SettingToggle(key: "shortcuts", title: "Keyboard shortcuts"), words: "hotkeys keys"),
+        SettingsEntry("shortcutKeys", "Shortcut keys", words: "keyboard open petal ai add apps new note", when: { $0.config.bool("shortcuts") }) { _ in
+            ShortcutKeys()
+        },
+    ])
+}
+
+/// Tiling's keys, and the one thing it does with the pointer.
+struct TilingKeys: View {
+    var body: some View {
+        ForEach(Tiling.legend, id: \.keys) { row in
+            KeyRow(keys: row.keys, what: row.what, taken: row.ids.allSatisfy(Tiling.taken.contains) && !row.ids.isEmpty)
+        }
+        KeyRow(keys: "Drag", what: "A window onto another swaps them")
+    }
+}
+
+/// Petal's shortcuts, each with what it does.
+struct ShortcutKeys: View {
     @Environment(PetalApp.self) private var app
 
     var body: some View {
-        Card(title: "Keyboard shortcuts", footer: "They work in any app. A combination macOS or another app already uses is left to it.") {
-            SettingToggle(key: "shortcuts", title: "Keyboard shortcuts")
-            if app.config.bool("shortcuts") {
-                let keys = app.hotkeys.keys
-                ForEach(keys) { key in
-                    HStack(spacing: 10) {
-                        KeyCaps(text: key.label).frame(width: 74, alignment: .leading)
-                        what(key)
-                        Spacer()
-                        if app.hotkeys.taken.contains(key.id) {
-                            Text("In use elsewhere").font(.system(size: 11)).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
+        ForEach(app.hotkeys.keys) { key in
+            KeyRow(keys: key.label, what: what(key), taken: app.hotkeys.taken.contains(key.id))
         }
     }
 
-    @ViewBuilder private func what(_ key: Hotkeys.Key) -> some View {
+    private func what(_ key: Hotkeys.Key) -> String {
         switch key.id {
-        case Hotkeys.ask:
-            Text("Open \(app.chatProvider?.name ?? "the AI")").font(.system(size: 12))
-        case Hotkeys.search:
-            Text("Add apps to the dock").font(.system(size: 12))
-        case Hotkeys.note:
-            Text("A new note on what’s in front").font(.system(size: 12))
-        default:
-            EmptyView()
+        case Hotkeys.ask: "Open Petal AI"
+        case Hotkeys.search: "Add apps to the dock"
+        case Hotkeys.note: "A new note on what’s in front"
+        default: ""
         }
     }
 }

@@ -1,4 +1,5 @@
 import AppKit
+import CoreImage
 import SwiftUI
 
 /// `Petal --snapshot <folder>` draws each of Petal's views into a PNG, in an off-screen window, without showing
@@ -154,10 +155,12 @@ enum Snapshot {
             ### Fixes
             * A note no longer covers the update notice
             """, link: nil))), CGSize(width: 560, height: 600)))
-        views.append(("settings-windows", AnyView(VStack { WindowsCard(showTiling: true) }.padding(20)), CGSize(width: 640, height: 420)))
-        // Using your apps, with the switch for a hidden display for each run.
-        views.append(("settings-run-displays", AnyView(VStack { UsingAppsCard() }.padding(20)), CGSize(width: 640, height: 260)))
-        views.append(("settings-api-keys", AnyView(VStack(spacing: 14) { ForEach(Provider.allCases) { APIKeyCard(provider: $0) } }.padding(20)), CGSize(width: 640, height: 420)))
+        // Groups of the settings window on their own, with every row whatever the settings say: tiling's keys, using
+        // your apps with the switch for a hidden display for each run, and paying with a subscription or an API key.
+        for (name, block, height) in [("settings-windows", SettingsList.windows, 420.0), ("settings-run-displays", SettingsList.usingApps, 260.0),
+                                      ("settings-api-keys", SettingsList.paying, 260.0)] {
+            views.append((name, AnyView(VStack { SettingsBlocks(blocks: [block], whatever: true) }.padding(20)), CGSize(width: 640, height: height)))
+        }
         // Petal AI using an app: its first question, the chip with Stop by its pointer, and the pointer itself.
         app.assist.preview(Assist.Request(kind: "computer:com.apple.Safari", title: "Let Petal AI use Safari?",
                                           detail: "First, pressing Export. Until this reply is done it can press, type and choose menus in Safari with its own pointer; yours stays where it is. Esc stops it."))
@@ -203,17 +206,20 @@ enum Snapshot {
                 Image(nsImage: mark).renderingMode(rendering).resizable().frame(width: 72, height: 72).foregroundStyle(.white)
             }.padding(12)), nil))
         }
+        // The settings window, a page at a time, each whole (as tall as its rows, never shorter than the window), and
+        // what the ask bar finds for a word.
         for section in SettingsSection.allCases {
-            views.append(("settings-\(section.rawValue)", AnyView(SettingsView(selection: section)), CGSize(width: 920, height: 700)))
+            write(settingsPage(SettingsView(selection: section), app: app), name: "settings-\(section.rawValue)", folder: folder)
         }
-        // The AI page whole, with the notes changed elsewhere while the person typed: their typing kept, and the
+        write(settingsPage(SettingsView(selection: .dock, asking: "hover"), app: app), name: "settings-search", folder: folder)
+        // The Petal AI page with the notes changed elsewhere while the person typed: their typing kept, and the
         // line under the editor to pick theirs or mine.
         app.instructions.preview(changedElsewhere: true)
-        write(render(AnyView(SettingsView(selection: .claude)), app: app, size: CGSize(width: 920, height: 2400)), name: "settings-claude-conflict", folder: folder)
+        write(settingsPage(SettingsView(selection: .ai), app: app), name: "settings-ai-conflict", folder: folder)
         app.instructions.preview(changedElsewhere: false)
         // A vault of 300 logins, whole, and twelve releases' notes.
         VaultModel.shared.preview(vault + BenchTargets.logins(300))
-        write(render(AnyView(SettingsView(selection: .vault)), app: app, size: CGSize(width: 920, height: 14000)), name: "settings-vault-300", folder: folder)
+        write(settingsPage(SettingsView(selection: .vault), app: app), name: "settings-vault-300", folder: folder)
         VaultModel.shared.preview(vault)
         views.append(("whats-new-long", AnyView(ReleaseNotesView(version: "1.0.0", preloaded: .init(body: BenchTargets.releaseNotes, link: nil))),
                       CGSize(width: 560, height: 3200)))
@@ -233,6 +239,20 @@ enum Snapshot {
         for (name, view, size) in views {
             write(render(view, app: app, size: size), name: name, folder: folder)
         }
+    }
+
+    /// The settings window at its width, as tall as the page it shows (a snapshot doesn't scroll). App icons are
+    /// HDR pictures on this macOS, and a page that shows one right on the window makes the renderer's own picture
+    /// HDR; turned into a PNG the plain way, the whole page comes out grey. Core Image maps it to sRGB as it looks.
+    static func settingsPage(_ view: SettingsView, app: PetalApp) -> NSImage? {
+        let page = view.frame(width: 920).frame(minHeight: 640).fixedSize(horizontal: false, vertical: true)
+        let renderer = ImageRenderer(content: page.environment(app).environment(\.colorScheme, .dark).environment(\.snapshotting, true)
+            .background(Color(white: 0.16)))
+        renderer.scale = 1
+        guard let drawn = renderer.cgImage, let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let picture = CIImage(cgImage: drawn)
+        guard let plain = CIContext().createCGImage(picture, from: picture.extent, format: .RGBA8, colorSpace: space) else { return nil }
+        return NSImage(cgImage: plain, size: NSSize(width: plain.width, height: plain.height))
     }
 
     /// The vault's made-up items for snapshots.

@@ -253,11 +253,22 @@ final class APIKeyCheck {
     }
 }
 
-/// Settings › AI, per AI: pay with the subscription or an API key; the key pasted into a secure field, saved in the
-/// Keychain, checked with one tiny call.
-struct APIKeyCard: View {
+extension SettingsList {
+    /// How each chosen AI is paid for: the person's subscription, or an API key of theirs.
+    static let paying = SettingsBlock("Paying", says: { app in
+        app.providers.contains(where: app.usesAPIKey) ? "A key stays in your Mac’s Keychain, for Petal’s own runs only." : nil
+    }, when: { !$0.providers.isEmpty }, Provider.allCases.map { provider in
+        SettingsEntry(provider.authSetting, provider.name, words: "pay paying subscription api key billing \(provider.keyMaker.lowercased())",
+                      when: { $0.providers.contains(provider) }) { APIKeyRows(provider: provider, title: $0) }
+    })
+}
+
+/// Settings › Petal AI, per AI: pay with the subscription or an API key; the key pasted into a secure field, saved in
+/// the Keychain, checked with one tiny call.
+struct APIKeyRows: View {
     @Environment(PetalApp.self) private var app
     let provider: Provider
+    let title: String
     @State private var draft = ""
     @State private var replacing = false
     @State private var refused = false
@@ -267,45 +278,44 @@ struct APIKeyCard: View {
         let api = app.usesAPIKey(provider)
         let key = app.apiKeyCheck.savedKey(provider)
         let check = app.apiKeyCheck.state(provider)
-        Card(title: "Pay for \(provider.name) with", footer: api ? "The key stays in your Mac's Keychain, and only Petal's own \(provider.name) uses it. \(provider.appName) everywhere else keeps your own sign-in." : nil) {
-            Picker("Pay with", selection: Binding(get: { api ? "api" : "subscription" }, set: {
-                app.config.set(provider.authSetting, $0)
-                app.apiKeyCheck.reset(provider)
-                Task { await app.usage.refresh(provider) }
-            })) {
-                Text("My subscription").tag("subscription")
-                Text("An API key").tag("api")
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            if api {
-                if let key, !replacing {
-                    HStack(spacing: 10) {
-                        Image(systemName: "key.fill").foregroundStyle(.secondary)
-                        Text(key).font(.system(size: 12, design: .monospaced))
-                        Spacer()
-                        Button("Check") { app.apiKeyCheck.check(provider) }.buttonStyle(.glass).disabled(check == .checking)
-                        Button("Replace") { replacing = true; draft = "" }.buttonStyle(.glass)
-                        Button("Remove") { app.apiKeyCheck.remove(provider) }.buttonStyle(.glass)
-                    }
+        ChoiceRow(title: title, options: [("subscription", "My subscription"), ("api", "An API key")],
+                  selection: Binding(get: { api ? "api" : "subscription" }, set: {
+                      app.config.set(provider.authSetting, $0)
+                      app.apiKeyCheck.reset(provider)
+                      Task { await app.usage.refresh(provider) }
+                  }))
+        if api {
+            if let key, !replacing {
+                HStack(spacing: 8) {
+                    Image(systemName: "key.fill").foregroundStyle(.secondary)
+                    Text(key).font(.system(size: TextSize.callout, design: .monospaced))
                     status(check)
-                } else {
-                    HStack(spacing: 10) {
+                    Spacer(minLength: 8)
+                    Button("Check") { app.apiKeyCheck.check(provider) }.buttonStyle(.glass).disabled(check == .checking)
+                    Button("Replace") { replacing = true; draft = "" }.buttonStyle(.glass)
+                    Button("Remove") { app.apiKeyCheck.remove(provider) }.buttonStyle(.glass)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
                         SecureField("Paste your \(provider.keyMaker) API key", text: $draft)
                             .textFieldStyle(.roundedBorder)
                             .onSubmit(save)
-                        Button("Save", action: save).buttonStyle(.glassProminent).tint(SettingsSection.claude.tint)
+                        Button("Save", action: save).buttonStyle(.glassProminent).tint(Part.ai.color)
                             .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         if replacing { Button("Cancel") { replacing = false; draft = "" }.buttonStyle(.glass) }
                     }
                     if refused {
-                        Text("The Keychain didn't save it. Try again.").font(.system(size: 12)).foregroundStyle(Color(red: 1, green: 0.42, blue: 0.54))
+                        Text("The Keychain didn't save it. Try again.").font(.system(size: TextSize.callout)).foregroundStyle(Self.trouble)
                     }
-                    Link("Get a key from \(provider.keyMaker)", destination: provider.keysPage).font(.system(size: 12))
+                    Link("Get a key from \(provider.keyMaker)", destination: provider.keysPage).font(.system(size: TextSize.callout))
                 }
             }
         }
     }
+
+    /// What went wrong, in the red the chat uses for it.
+    private static let trouble = Color(red: 1, green: 0.42, blue: 0.54)
 
     private func save() {
         let key = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -320,11 +330,11 @@ struct APIKeyCard: View {
         switch state {
         case .idle: EmptyView()
         case .checking:
-            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Checking…").foregroundStyle(.secondary) }.font(.system(size: 12))
+            HStack(spacing: 6) { ProgressView().controlSize(.small); Text("Checking…").foregroundStyle(.secondary) }.font(.system(size: TextSize.callout))
         case .ok:
-            Label("Works.", systemImage: "checkmark.circle.fill").font(.system(size: 12)).foregroundStyle(.green)
+            Label("Works", systemImage: "checkmark.circle.fill").font(.system(size: TextSize.callout)).foregroundStyle(.green)
         case .failed(let text):
-            Text(text).font(.system(size: 12)).foregroundStyle(Color(red: 1, green: 0.42, blue: 0.54)).fixedSize(horizontal: false, vertical: true)
+            Text(text).font(.system(size: TextSize.callout)).foregroundStyle(Self.trouble).fixedSize(horizontal: false, vertical: true)
         }
     }
 }

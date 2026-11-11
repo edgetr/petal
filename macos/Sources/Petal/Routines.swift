@@ -1540,57 +1540,79 @@ enum Shortcuts {
 
 // MARK: - Settings: Routines
 
-struct RoutinesSettings: View {
+extension SettingsList {
+    static let routines: [SettingsBlock] = [
+        SettingsBlock(footer: "Files are only moved, never deleted, and can be put back.", [
+            SettingsEntry(SettingToggle(key: "routines", title: "Run my routines"), words: "automation rules"),
+            SettingsEntry("newRoutine", "Make a routine", words: "new add create tidy downloads") { title in
+                WithApp { app in
+                    SettingRow(title: title, help: "“Keep my Downloads tidy”") {
+                        Button("Ask Petal AI") { app.claude.open(asking: "Make a routine: ", send: false) }.buttonStyle(.glass)
+                    }
+                }
+            },
+        ]),
+        SettingsBlock("Yours", when: { !$0.routines.list.isEmpty }, [
+            SettingsEntry("routineList", "Your routines", words: "routines list") { _ in RoutineList() },
+        ]),
+        SettingsBlock("What they did", [
+            SettingsEntry("routineLog", "What your routines did", words: "routines log history put back undo") { _ in RoutineLog() },
+        ]),
+    ]
+}
+
+/// The person's routines: each in their own words, what it does, when it last ran, its switch and a way to remove it.
+struct RoutineList: View {
     @Environment(PetalApp.self) private var app
+    @Environment(\.settingsTint) private var tint
 
     var body: some View {
         let _ = BodyCount.hit("RoutinesSettings")
         let routines = app.routines
-        Card(title: "Routines", footer: "Ask Petal AI in your own words: “keep my Downloads tidy”, “when a PDF lands in Downloads, file it under Receipts”, “when I open Xcode, hide Messages”. Files are only moved into folders, never deleted, and everything a routine moves can be put back.") {
-            SettingToggle(key: "routines", title: "Run my routines", detail: "Petal does them by itself, without asking each time.")
-            Button("Make one with Petal AI") { app.claude.open(asking: "Make a routine: ", send: false) }.buttonStyle(.glass)
-        }
-        if !routines.list.isEmpty {
-            Card(title: "Yours") {
-                ForEach(routines.list) { routine in
-                    HStack(alignment: .top, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(routine.words).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
-                            Text(routines.summary(routine)).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                            if routine.usesModes {
-                                Text(Routines.Routine.modesGone).font(.system(size: 11)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                            } else if let last = routine.lastRun {
-                                Text("Last ran \(last, format: .relative(presentation: .named))\(routine.lastResult.isEmpty ? "" : ": " + routine.lastResult.prefix(1).lowercased() + routine.lastResult.dropFirst())")
-                                    .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
-                            }
-                        }
-                        Spacer(minLength: 8)
-                        if !routine.usesModes {
-                            Toggle("", isOn: Binding(get: { routine.on }, set: { routines.setOn(routine.id, $0) }))
-                                .toggleStyle(.switch).labelsHidden().controlSize(.small)
-                        }
-                        RoundButton(symbol: "xmark") { routines.delete(routine.id) }
+        ForEach(routines.list) { routine in
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(routine.words).font(.system(size: TextSize.body)).fixedSize(horizontal: false, vertical: true)
+                    Text(routines.summary(routine)).font(.system(size: TextSize.small)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if routine.usesModes {
+                        Text(Routines.Routine.modesGone).font(.system(size: TextSize.small)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    } else if let last = routine.lastRun {
+                        Text("Last ran \(last, format: .relative(presentation: .named))\(routine.lastResult.isEmpty ? "" : ": " + routine.lastResult.prefix(1).lowercased() + routine.lastResult.dropFirst())")
+                            .font(.system(size: TextSize.small)).foregroundStyle(.secondary).lineLimit(2)
                     }
                 }
+                Spacer(minLength: 8)
+                RoundButton(symbol: "xmark") { routines.delete(routine.id) }
+                // The switch last, in the column every page's switches are in; none for a routine that can't run.
+                Toggle(routine.words, isOn: Binding(get: { routine.on }, set: { routines.setOn(routine.id, $0) }))
+                    .toggleStyle(.switch).labelsHidden().controlSize(.small).tint(tint)
+                    .opacity(routine.usesModes ? 0 : 1).disabled(routine.usesModes)
             }
         }
-        Card(title: "What they did", footer: "Put back returns a routine's files to where they were.") {
-            if routines.log.isEmpty {
-                Text("Nothing yet.").font(.system(size: 12)).foregroundStyle(.secondary)
-            }
-            ForEach(routines.log.prefix(40)) { entry in
-                HStack(alignment: .center, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(entry.text).font(.system(size: 13)).lineLimit(2)
-                        Text("\(entry.name.isEmpty ? "" : entry.name + " · ")\(entry.at, format: .relative(presentation: .named))")
-                            .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    if entry.canUndo {
-                        Button("Put back") { routines.undo(entry.id) }.buttonStyle(.glass).controlSize(.small)
-                    } else if entry.undone {
-                        Text("Put back").font(.system(size: 11)).foregroundStyle(.tertiary)
-                    }
+    }
+}
+
+/// What routines did, newest first, each with Put back where its files can go back.
+struct RoutineLog: View {
+    @Environment(PetalApp.self) private var app
+
+    var body: some View {
+        let routines = app.routines
+        if routines.log.isEmpty {
+            Text("Nothing yet.").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
+        }
+        ForEach(routines.log.prefix(40)) { entry in
+            HStack(alignment: .center, spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(entry.text).font(.system(size: TextSize.body)).lineLimit(2)
+                    Text("\(entry.name.isEmpty ? "" : entry.name + " · ")\(entry.at, format: .relative(presentation: .named))")
+                        .font(.system(size: TextSize.small)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if entry.canUndo {
+                    Button("Put back") { routines.undo(entry.id) }.buttonStyle(.glass).controlSize(.small)
+                } else if entry.undone {
+                    Text("Put back").font(.system(size: TextSize.small)).foregroundStyle(.tertiary)
                 }
             }
         }

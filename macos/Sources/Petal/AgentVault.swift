@@ -334,25 +334,26 @@ struct AgentsCard: View {
     @State private var problem: String?
 
     var body: some View {
-        Card(title: "Agents",
-             footer: "Your agents in T3 Code or a terminal use the vault without seeing a password or key: Petal fills it in, or gives the key to the command they run and takes it out of what it prints. Each asks first in a project unless it's allowed here. A command made to show a key still can, so allow only agents you trust.") {
+        SettingsGroup(title: "Agents", footer: "Each agent asks first in a project unless it’s allowed here. It never sees a secret, but a command made to show a key still can.") {
             if grants.grants.isEmpty {
-                Text("No agent uses your vault without asking yet.").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("Nothing allowed yet.").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
             }
             ForEach(grants.grants.sorted { ($0.project, $0.title) < ($1.project, $1.title) }) { grant in
                 HStack(spacing: 10) {
-                    AgentMark(agent: grant.agent).frame(width: 16, height: 16).frame(width: 28, height: 28).glassEffect(.clear, in: .circle)
+                    AgentMark(agent: grant.agent).frame(width: 16, height: 16).frame(width: 24, height: 24)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(itemName(grant)).font(.system(size: 13))
+                        Text(itemName(grant)).font(.system(size: TextSize.body))
                         Text("\(grant.agent.name) · \(AgentAccess.shown(grant.project, home: NSHomeDirectory()))")
-                            .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            .font(.system(size: TextSize.small)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                     }
                     Spacer(minLength: 8)
                     Button("Remove") { grants.remove(grant.id) }.buttonStyle(.glass)
                 }
             }
             if adding { form } else {
-                Button { adding = true } label: { Label("Allow an agent…", systemImage: "plus") }.buttonStyle(.glass)
+                SettingRow(title: "Allow an agent") {
+                    Button("Choose…") { adding = true }.buttonStyle(.glass)
+                }
             }
         }
         .onAppear { if !snapshotting { grants.load() } }
@@ -393,7 +394,7 @@ struct AgentsCard: View {
                 Button("Cancel") { reset() }.buttonStyle(.glass)
                 Button("Allow") { add() }.buttonStyle(.glassProminent).disabled(item.isEmpty || project == nil)
             }
-            if let problem { Text(problem).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+            if let problem { Text(problem).font(.system(size: TextSize.small)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
         }
     }
 
