@@ -439,7 +439,7 @@ enum WindowBench {
         let app = makeApp()
         BodyCount.on = true
         var window: NSWindow?
-        if name.hasPrefix("Settings: "), let section = SettingsSection(rawValue: String(name.dropFirst(10))) {
+        if name.hasPrefix("Settings: "), let section = SettingsSection(named: String(name.dropFirst(10))) {
             window = app.settings.prepare(section)
         } else if let target = BenchTargets.all(app: app).first(where: { $0.name == name }) {
             window = host(target, app: app)
@@ -603,7 +603,7 @@ enum WindowBench {
         _ = measure(window) { _ = app.settings.prepare(.dock) }
         for section in SettingsSection.allCases.dropFirst() + [.dock] { _ = measure(window) { send(.select(section)) } }
         // Opened again a moment after it was closed (as a person does), on the Dock page as Settings… opens it,
-        // and on AI as "Open Settings › AI" does.
+        // and on Petal AI as "Open Settings › Petal AI" does.
         var opens: [Sample] = [], others: [Sample] = []
         for _ in 0..<runs {
             closeAsAPerson(app.settings.window)
@@ -613,11 +613,11 @@ enum WindowBench {
         for _ in 0..<runs {
             closeAsAPerson(app.settings.window)
             RunLoop.main.run(until: Date().addingTimeInterval(1.5))
-            others.append(measure(window) { _ = app.settings.prepare(.claude) })
+            others.append(measure(window) { _ = app.settings.prepare(.ai) })
         }
         result.rows.append(("open, cold (first in a process)", stat(colds.compactMap { $0.opens["Settings"] })))
         result.rows.append(("open, warm (again)", stat(opens)))
-        result.rows.append(("open on AI (again)", stat(others)))
+        result.rows.append(("open on Petal AI (again)", stat(others)))
         // What opening costs before it: a fresh view made while the window is closed (nobody waits for it).
         var ahead: [Sample] = []
         for _ in 0..<runs {
@@ -642,7 +642,7 @@ enum WindowBench {
             result.rows.append(("  \(section.title), switch back", stat(visits[section] ?? [])))
         }
 
-        // Typing in the ask field, on the Dock page: a keystroke at a time.
+        // Typing in the ask bar, on the Dock page: a keystroke at a time, each searching the settings as it's typed.
         step("settings: typing")
         _ = measure(window) { send(.select(.dock)) }
         let words = "Make my dock icons a bit bigger please"
@@ -653,16 +653,16 @@ enum WindowBench {
             if round > 0 { typing += keys }   // the first round warms the field
             _ = measure(window) { send(.type("")) }
         }
-        result.rows.append(("typing in the ask field (a key)", stat(typing)))
+        result.rows.append(("typing in the ask bar (a key)", stat(typing)))
 
-        // A switch on Apps & Extras, and a slider on Look: what their bindings do.
+        // A switch on Dock, and a slider on Look (with the dock drawn above it): what their bindings do.
         step("settings: a switch, a slider")
-        _ = measure(window) { send(.select(.apps)) }
+        _ = measure(window) { send(.select(.dock)) }
         let badges = app.config.bool("badges")
         var toggles: [Sample] = []
         for index in 0..<runs { toggles.append(measure(window) { app.config.set("badges", index % 2 == 0 ? !badges : badges) }) }
         app.config.set("badges", badges)
-        result.rows.append(("a switch (Apps & Extras)", stat(toggles)))
+        result.rows.append(("a switch (Dock)", stat(toggles)))
         _ = measure(window) { send(.select(.look)) }
         let size = app.config.number("iconSize")
         var slides: [Sample] = []
@@ -698,7 +698,7 @@ enum WindowBench {
 
         // Doing nothing, each page alone in a fresh process.
         step("settings: idle")
-        for section in [SettingsSection.dock, .claude, .permissions] {
+        for section in [SettingsSection.dock, .ai, .privacy] {
             if let idle = idleChild("Settings: \(section.rawValue)") { result.idle.append((section.title, idle.cpu, idle.bodies)) }
         }
         // The person closes it.

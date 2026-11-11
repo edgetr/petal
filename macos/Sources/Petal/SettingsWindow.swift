@@ -2,8 +2,10 @@ import AppKit
 import Combine
 import SwiftUI
 
-/// The settings window: everything Petal can change, on a window of Liquid Glass that shows what's behind it.
-/// The right-click menu stays tiny, so this window holds the rest; its first field asks the AI (when there is one).
+/// The settings window: everything Petal can change, on one window of Liquid Glass that shows what's behind it. The
+/// window is the only glass: the ask bar across its top, a sidebar with a tile for each part of Petal, and the page,
+/// whose groups are a label and rows with hairlines between them. The right-click menu stays tiny, so this window
+/// holds the rest. The pages and their rows are in `SettingsPages.swift`.
 @MainActor
 final class SettingsWindow {
     private(set) var window: NSWindow?
@@ -63,19 +65,33 @@ final class SettingsWindow {
     }
 }
 
+/// The settings window's pages, in the sidebar's order: one for each part of Petal.
 enum SettingsSection: String, CaseIterable, Identifiable {
-    case dock, claude, vault, routines, apps, look, permissions, about
+    case dock, look, notes, ai, vault, routines, privacy, about
     var id: String { rawValue }
+
+    /// What these pages were called before, for whoever still opens one by that name.
+    static let claude = SettingsSection.ai, apps = SettingsSection.dock, permissions = SettingsSection.privacy
+
+    /// A page by its name, old or new ("claude" is Petal AI, "apps" the Dock, "permissions" Privacy).
+    init?(named name: String) {
+        switch name {
+        case "claude": self = .ai
+        case "apps": self = .dock
+        case "permissions": self = .privacy
+        default: self.init(rawValue: name)
+        }
+    }
 
     var title: String {
         switch self {
         case .dock: "Dock"
-        case .claude: "AI"
+        case .look: "Look"
+        case .notes: "Notes"
+        case .ai: "Petal AI"
         case .vault: "Vault"
         case .routines: "Routines"
-        case .apps: "Apps & Extras"
-        case .look: "Look"
-        case .permissions: "Permissions"
+        case .privacy: "Privacy"
         case .about: "About"
         }
     }
@@ -83,175 +99,365 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .dock: "dock.rectangle"
-        case .claude: "sparkles"
+        case .look: "paintbrush.pointed.fill"
+        case .notes: "note.text"
+        case .ai: "sparkles"
         case .vault: "key.fill"
         case .routines: "wand.and.sparkles"
-        case .apps: "square.grid.2x2.fill"
-        case .look: "paintbrush.pointed.fill"
-        case .permissions: "lock.shield.fill"
-        case .about: "info.circle.fill"
+        case .privacy: "hand.raised.fill"
+        case .about: "info"
         }
     }
 
-    var tint: Color {
+    /// The part of Petal the page is about: its color is the tile's, and its controls'.
+    var part: Part {
         switch self {
-        case .dock: Color(red: 0.85, green: 0.21, blue: 0.50)
-        case .claude: Color(red: 0.85, green: 0.47, blue: 0.34)
-        case .vault: Color(red: 0.32, green: 0.66, blue: 0.62)
-        case .routines: Color(red: 0.95, green: 0.68, blue: 0.22)
-        case .apps: Color(red: 0.35, green: 0.78, blue: 0.55)
-        case .look: Color(red: 1.0, green: 0.62, blue: 0.48)
-        case .permissions: Color(red: 0.55, green: 0.58, blue: 0.65)
-        case .about: Color(red: 0.55, green: 0.58, blue: 0.65)
+        case .dock: .dock
+        case .look: .look
+        case .notes: .notes
+        case .ai: .ai
+        case .vault: .vault
+        case .routines: .routines
+        case .privacy: .privacy
+        case .about: .about
         }
     }
 
-    var subtitle: String {
+    var tint: Color { part.color }
+
+    /// The color of the page's switches, sliders and filled buttons: its part's, or, where that is the neutral one
+    /// (and on the Dock's page, whose color is the accent itself), the person's accent.
+    @MainActor func controls(_ app: PetalApp) -> Color {
         switch self {
-        case .dock: "Choose your dock, where it sits, and how windows sit with it."
-        case .claude: "Claude, Codex, or no AI at all."
-        case .vault: "What Petal AI fills in for you, without seeing secrets."
-        case .routines: "What Petal does by itself, in your words."
-        case .apps: "What the dock shows besides your apps."
-        case .look: "Size, motion and color."
-        case .permissions: "What macOS lets Petal see."
-        case .about: "Petal for macOS."
+        case .dock, .privacy, .about: Color(nsColor: app.accent)
+        default: part.color
+        }
+    }
+
+    /// More words the ask bar finds the page by.
+    var words: String {
+        switch self {
+        case .dock: "apps position shortcuts windows"
+        case .look: "size color appearance theme"
+        case .notes: "petal notes paper notebook"
+        case .ai: "claude codex chat model"
+        case .vault: "passwords logins cards keys addresses contacts import export agents"
+        case .routines: "automation rules tidy"
+        case .privacy: "permissions private memory history accessibility"
+        case .about: "version update help report"
         }
     }
 }
 
+/// What the window shows: the page, and what's typed in the ask bar. Each view watches only what it draws, so a key
+/// in the ask bar draws the bar again, and the page only once the search it means changes.
+@MainActor @Observable
+final class SettingsState {
+    var selection: SettingsSection
+    var ask = "" {
+        didSet {
+            let now = SettingsList.query(ask)
+            if now != query { query = now }
+        }
+    }
+    /// What the ask bar's text searches for; nil shows the page.
+    private(set) var query: String?
+
+    init(_ selection: SettingsSection) { self.selection = selection }
+
+    /// A page chosen: the search, if any, is over.
+    func go(_ section: SettingsSection) {
+        if !ask.isEmpty { ask = "" }
+        if selection != section { selection = section }
+    }
+}
+
 struct SettingsView: View {
-    @Environment(PetalApp.self) private var app
-    @State var selection: SettingsSection
-    @State private var ask = ""
+    @State private var state: SettingsState
+
+    /// `asking`: what the ask bar already holds (a snapshot of the search).
+    init(selection: SettingsSection, asking: String = "") {
+        let state = SettingsState(selection)
+        state.ask = asking
+        _state = State(initialValue: state)
+    }
 
     var body: some View {
         let _ = BodyCount.hit("SettingsView")
         ZStack {
             Backdrop()
-            HStack(spacing: 14) {
-                sidebar
-                Scroll {
-                    VStack(alignment: .leading, spacing: 18) {
-                        header
-                        GlassEffectContainer(spacing: 14) {
-                            VStack(alignment: .leading, spacing: 14) { content }
-                        }
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 18)
-                    .frame(maxWidth: 640, alignment: .leading)
-                    .frame(maxWidth: .infinity)
+            // No glass container around these: one would lift glass drawn behind its content (a note on Liquid Glass,
+            // the dock's own glass while it magnifies) over that content.
+            VStack(spacing: 12) {
+                AskBar(state: state)
+                HStack(alignment: .top, spacing: 10) {
+                    SettingsSidebar(state: state)
+                    SettingsContent(state: state)
                 }
-                .scrollIndicators(.never)
             }
-            .padding(.horizontal, 14)
-            .padding(.top, 36)
-            .padding(.bottom, 14)
+            .padding(.horizontal, 12)
+            // Under the window's own buttons: the strip above stays the window's to drag.
+            .padding(.top, 34)
+            .padding(.bottom, 12)
         }
         .frame(minWidth: 780, minHeight: 540)
-        .animation(.smooth(duration: 0.25), value: selection)
         .onReceive(SettingsBench.commands) { command in
             switch command {
-            case .select(let section): selection = section
-            case .type(let text): ask = text
+            case .select(let section): state.go(section)
+            case .type(let text): state.ask = text
             case .open(let section):
                 // A view made ahead, opening on another page: as if made on it, without the page's animation.
                 var transaction = Transaction()
                 transaction.disablesAnimations = true
-                withTransaction(transaction) { selection = section }
+                withTransaction(transaction) { state.go(section) }
             }
         }
     }
+}
 
-    private var sidebar: some View {
-        let _ = BodyCount.hit("sidebar")
-        return VStack(alignment: .leading, spacing: 4) {
-            if let provider = app.chatProvider {
-            HStack(spacing: 8) {
-                Image(systemName: "sparkle").foregroundStyle(SettingsSection.claude.tint)
-                TextField("Ask \(provider.name) to change anything…", text: $ask)
-                    .textFieldStyle(.plain)
-                    .onSubmit {
-                        let text = ask.trimmingCharacters(in: .whitespacesAndNewlines)
-                        guard !text.isEmpty else { return }
-                        app.claude.open(asking: text)
-                        ask = ""
-                    }
-            }
-            .padding(10)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .padding(.bottom, 10)
-            }
+/// Across the top of the window: what's typed finds settings on every page as it's typed, and Return hands it to
+/// Petal AI. With no AI chosen it only searches.
+struct AskBar: View {
+    @Environment(PetalApp.self) private var app
+    let state: SettingsState
 
-            ForEach(SettingsSection.allCases) { section in
-                Button {
-                    selection = section
-                } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: section.symbol)
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white)
-                            .frame(width: 24, height: 24)
-                            .background(section.tint.gradient, in: .rect(cornerRadius: 7))
-                        Text(section.title).font(.system(size: 13, weight: .medium))
-                        Spacer()
-                    }
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 6)
-                    .contentShape(.rect)
-                    .background(selection == section ? AnyShapeStyle(.white.opacity(0.14)) : AnyShapeStyle(.clear),
-                                in: .rect(cornerRadius: 10))
+    var body: some View {
+        let _ = BodyCount.hit("AskBar")
+        @Bindable var state = state
+        let ai = app.chatProvider != nil
+        HStack(spacing: 8) {
+            Image(systemName: ai ? "sparkle" : "magnifyingglass")
+                .font(.system(size: TextSize.body, weight: .semibold))
+                .foregroundStyle(ai ? AnyShapeStyle(Part.ai.color) : AnyShapeStyle(.secondary))
+                .frame(width: 18)
+            TextField(ai ? "Ask Petal AI, or search settings" : "Search settings", text: $state.ask)
+                .textFieldStyle(.plain)
+                .font(.system(size: TextSize.body))
+                .onSubmit {
+                    let text = state.ask.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard ai, !text.isEmpty else { return }
+                    app.claude.open(asking: text)
+                    state.ask = ""
                 }
-                .buttonStyle(.plain)
+                // Escape clears it: back to the page.
+                .onExitCommand { if !state.ask.isEmpty { state.ask = "" } }
+            if !state.ask.isEmpty {
+                if ai { KeyCaps(text: "↩").help("Return asks Petal AI") }
+                RoundButton(symbol: "xmark") { state.ask = "" }
             }
-            Spacer()
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 8)
+        .frame(height: 36)
+        .glassEffect(.clear.interactive(), in: .capsule)
+    }
+}
+
+/// The pages, down the window's left side with no panel of their own: a tile in each part's color, its name, and a
+/// dot by the page that's showing, as under a running app in the dock. Petal's icon and version rest at the bottom.
+struct SettingsSidebar: View {
+    @Environment(PetalApp.self) private var app
+    let state: SettingsState
+
+    var body: some View {
+        let _ = BodyCount.hit("sidebar")
+        let current = state.query == nil ? state.selection : nil
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(SettingsSection.allCases) { section in
+                SidebarRow(section: section, current: current == section) { state.go(section) }
+            }
+            Spacer(minLength: 12)
             HStack(spacing: 8) {
                 Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 26, height: 26)
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("Petal").font(.system(size: 12, weight: .semibold))
-                    Text(app.version).font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text("Petal").font(.system(size: TextSize.callout, weight: .semibold))
+                    Text(app.version).font(.system(size: TextSize.small)).foregroundStyle(.secondary)
                 }
             }
-            .padding(8)
+            .padding(.leading, SidebarRow.dot + SidebarRow.inset)
+            .padding(.bottom, 4)
         }
-        .padding(12)
-        .frame(width: 230)
+        .frame(width: SettingsLook.sidebar)
         .frame(maxHeight: .infinity, alignment: .top)
-        .glassEffect(.regular, in: .rect(cornerRadius: 24))
     }
+}
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 14) {
-            Image(systemName: selection.symbol)
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 46, height: 46)
-                .background(selection.tint.gradient, in: .rect(cornerRadius: 13))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(selection.title).font(.system(size: 26, weight: .bold))
-                Text(selection.subtitle).font(.system(size: 13)).foregroundStyle(.secondary)
+struct SidebarRow: View {
+    let section: SettingsSection
+    let current: Bool
+    let action: () -> Void
+    @State private var hovering = false
+    static let dot: CGFloat = 5
+    static let inset: CGFloat = 8
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: Self.inset) {
+                Circle().fill(section.part.color).frame(width: Self.dot, height: Self.dot).opacity(current ? 1 : 0)
+                PartTile(section: section, size: 24)
+                Text(section.title).font(.system(size: TextSize.body, weight: current ? .semibold : .medium))
+                    .opacity(current || hovering ? 1 : 0.8)
+                Spacer(minLength: 0)
+            }
+            .padding(.leading, 0)
+            .padding(.trailing, Self.inset)
+            .padding(.vertical, 5)
+            .contentShape(.rect)
+            // Under the pointer the row is clear glass of its own (pressed, it gives as glass does); at rest, nothing.
+            .glassEffect(hovering ? .clear.interactive() : .identity, in: .rect(cornerRadius: Radius.control))
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .accessibilityAddTraits(current ? .isSelected : [])
+    }
+}
+
+/// A part of Petal as a flat tile in its color, its symbol drawn on it.
+struct PartTile: View {
+    let section: SettingsSection
+    var size: CGFloat = 24
+
+    var body: some View {
+        Image(systemName: section.symbol)
+            .font(.system(size: size > 20 ? TextSize.callout : TextSize.caption, weight: .semibold))
+            .foregroundStyle(section.part.onColor)
+            .frame(width: size, height: size)
+            .background(section.part.color, in: .rect(cornerRadius: size > 20 ? Radius.control : Radius.chip))
+    }
+}
+
+/// What the window shows beside the sidebar: the page, or what the ask bar found.
+struct SettingsContent: View {
+    let state: SettingsState
+
+    var body: some View {
+        let _ = BodyCount.hit("page")
+        Group {
+            if let query = state.query {
+                SettingsSearch(query: query, state: state)
+            } else {
+                SettingsPage(section: state.selection)
             }
         }
-        .padding(.bottom, 4)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .animation(.smooth(duration: 0.25), value: state.selection)
     }
+}
 
-    @ViewBuilder private var content: some View {
-        let _ = BodyCount.hit("page")
-        switch selection {
-        case .dock: DockSettings()
-        case .claude: ClaudeSettings()
-        case .vault: VaultSettings()
-        case .routines: RoutinesSettings()
-        case .apps: AppsSettings()
-        case .look: LookSettings()
-        case .permissions: PermissionsSettings()
-        case .about: AboutSettings()
+/// One page: its title, then its groups. Look keeps the dock itself in view above what scrolls.
+struct SettingsPage: View {
+    @Environment(PetalApp.self) private var app
+    let section: SettingsSection
+
+    var body: some View {
+        Group {
+            switch section {
+            case .look:
+                LookPage()
+            case .vault:
+                PageScroll {
+                    PageTitle(text: section.title)
+                    VaultSettings()
+                }
+            default:
+                PageScroll {
+                    PageTitle(text: section.title)
+                    SettingsBlocks(blocks: SettingsList.blocks(section))
+                }
+                // Each page is its own: it opens at its top, wherever the last one was scrolled to.
+                .id(section)
+            }
+        }
+        .environment(\.settingsTint, section.controls(app))
+    }
+}
+
+extension EnvironmentValues {
+    /// The color of a page's switches and sliders: its part's. Only theirs: a button's glass is never tinted.
+    @Entry var settingsTint: Color? = nil
+}
+
+/// A page's one title: nothing beside it, nothing under it.
+struct PageTitle: View {
+    let text: String
+
+    var body: some View {
+        Text(text).font(.system(size: TextSize.title, weight: .bold))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
+    }
+}
+
+/// A page's column: its groups one under another with room between them, as wide as reads well, scrolling.
+struct PageScroll<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        Scroll {
+            VStack(alignment: .leading, spacing: SettingsLook.between) { content }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 20)
+                .frame(maxWidth: SettingsLook.column, alignment: .leading)
+                .frame(maxWidth: .infinity)
+        }
+        .scrollIndicators(.never)
+    }
+}
+
+/// What the ask bar found: the rows that match, from every page, each under its page's name and working as it does
+/// there. A page's name alone finds the page.
+struct SettingsSearch: View {
+    @Environment(PetalApp.self) private var app
+    let query: String
+    let state: SettingsState
+
+    var body: some View {
+        let _ = BodyCount.hit("SettingsSearch")
+        let found = SettingsList.find(query, app: app)
+        PageScroll {
+            if found.isEmpty {
+                Text(app.chatProvider == nil ? "No setting matches." : "No setting matches. Return asks Petal AI.")
+                    .font(.system(size: TextSize.body)).foregroundStyle(.secondary)
+                    .padding(.top, 8)
+            }
+            ForEach(found) { hit in
+                VStack(alignment: .leading, spacing: 4) {
+                    Button { state.go(hit.section) } label: {
+                        HStack(spacing: 8) {
+                            PartTile(section: hit.section, size: 18)
+                            Text(hit.section.title).font(.system(size: TextSize.heading, weight: .semibold))
+                            Image(systemName: "chevron.right").font(.system(size: TextSize.caption, weight: .semibold)).foregroundStyle(.tertiary)
+                        }
+                        .contentShape(.rect)
+                    }
+                    .buttonStyle(.plain)
+                    if !hit.entries.isEmpty {
+                        SettingsGroup { ForEach(hit.entries) { $0.view } }
+                    }
+                }
+                .environment(\.settingsTint, hit.section.controls(app))
+            }
         }
     }
 }
 
 // MARK: - Building blocks
+
+/// The settings window's measures, once.
+enum SettingsLook {
+    static let sidebar: CGFloat = 190
+    /// The widest a page's rows get.
+    static let column: CGFloat = 620
+    /// Between one group and the next.
+    static let between: CGFloat = 26
+    /// A row's least height, so a row with a switch and one with a button are as tall.
+    static let row: CGFloat = 28
+    /// The sliders' labels: one column, so every slider starts on one line.
+    static let label: CGFloat = 132
+    /// A slider's value, right-aligned in tabular digits.
+    static let value: CGFloat = 40
+}
 
 /// What's behind a window's content. Petal's windows are Liquid Glass themselves (`NSWindow.setGlassContent`), so
 /// the windows and desktop behind them show through, blurred; this only adds a faint wash so text stays easy to read
@@ -289,39 +495,99 @@ extension NSWindow {
     }
 
     /// The window itself becomes Liquid Glass (AppKit's own `NSGlassEffectView`): what's behind it shows through,
-    /// blurred, and the content sits in the glass.
+    /// blurred, and the content sits in the glass. Its corner is the corner macOS gives a titled window.
     func setGlassContent<Content: View>(_ view: Content) {
         isOpaque = false
         backgroundColor = .clear
         let glass = (contentView as? NSGlassEffectView) ?? NSGlassEffectView()
         glass.style = .regular
-        glass.cornerRadius = 16
+        glass.cornerRadius = Radius.card
         glass.contentView = NSHostingView(rootView: view)
         contentView = glass
     }
 }
 
-/// A card of settings on glass.
-struct Card<Content: View>: View {
+/// A group of settings, right on the window's glass: a small label, its rows with hairlines between them, and under
+/// them, rarely, one line the person needs (a promise: "Nothing is deleted"). Each view given to it is a row.
+struct SettingsGroup<Content: View>: View {
     var title: String? = nil
     var footer: String? = nil
     @ViewBuilder var content: Content
+    /// Room kept at the sides and under the rows for what reaches past a row (a paper's shadow, a field's ring).
+    private static var slack: CGFloat { 12 }
 
     var body: some View {
-        let _ = BodyCount.hit("Card")
-        VStack(alignment: .leading, spacing: 12) {
-            if let title { Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary) }
-            content
-            if let footer { Text(footer).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+        let _ = BodyCount.hit("SettingsGroup")
+        VStack(alignment: .leading, spacing: 0) {
+            if let title {
+                Text(title).font(.system(size: TextSize.callout, weight: .semibold)).foregroundStyle(.secondary)
+                    .padding(.bottom, 4)
+            }
+            // Every row draws the hairline above itself, and the rows are cut along their top edge only, which takes
+            // the first row's away: hairlines between rows, none over the first. (Counting the rows to put a line
+            // between them made a long list, a vault of 300, many times slower to draw.)
+            VStack(alignment: .leading, spacing: 0) { content.modifier(SettingsGroupRow()) }
+                .padding(.horizontal, Self.slack).padding(.bottom, Self.slack)
+                .clipped()
+                .padding(.horizontal, -Self.slack).padding(.bottom, -Self.slack)
+            if let footer {
+                Text(footer).font(.system(size: TextSize.small)).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 6)
+            }
         }
-        .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassEffect(.regular, in: .rect(cornerRadius: 20))
+    }
+}
+
+/// One row of a group: as wide as the group, never shorter than a row with a switch, the hairline right above it.
+struct SettingsGroupRow: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .frame(maxWidth: .infinity, minHeight: SettingsLook.row, alignment: .leading)
+            .padding(.vertical, 5)
+            .overlay(alignment: .top) { Divider().offset(y: -1) }
+    }
+}
+
+/// A row: what it sets on the left, its control at the right edge, where every row's control is. `help` is one short
+/// line, only where the name can't say it or the switch is risky.
+struct SettingRow<Control: View>: View {
+    let title: String
+    var help: String? = nil
+    @ViewBuilder var control: Control
+
+    var body: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.system(size: TextSize.body))
+                if let help {
+                    Text(help).font(.system(size: TextSize.small)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 12)
+            control
+        }
+    }
+}
+
+/// A switch at the right edge of its row.
+struct SwitchRow: View {
+    @Environment(\.settingsTint) private var tint
+    let title: String
+    var help: String? = nil
+    let isOn: Binding<Bool>
+
+    var body: some View {
+        SettingRow(title: title, help: help) {
+            Toggle(title, isOn: isOn).labelsHidden().toggleStyle(.switch).controlSize(.small).tint(tint)
+        }
     }
 }
 
 /// A switch bound to a boolean setting.
-struct SettingToggle: View {
+struct SettingToggle: View, SettingControl {
     @Environment(PetalApp.self) private var app
     let key: String
     let title: String
@@ -329,388 +595,234 @@ struct SettingToggle: View {
 
     var body: some View {
         let _ = BodyCount.hit("SettingToggle")
-        Toggle(isOn: Binding(get: { app.config.bool(key) }, set: { app.config.set(key, $0) })) {
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                if let detail { Text(detail).font(.system(size: 11)).foregroundStyle(.secondary) }
-            }
-        }
-        .toggleStyle(.switch)
-        .controlSize(.small)
+        SwitchRow(title: title, help: detail, isOn: Binding(get: { app.config.bool(key) }, set: { app.config.set(key, $0) }))
     }
 }
 
-struct SettingSlider: View {
+/// A slider bound to a number: its label in the labels' column, its value in tabular digits at the right edge.
+struct SettingSlider: View, SettingControl {
     @Environment(PetalApp.self) private var app
+    @Environment(\.settingsTint) private var tint
     let key: String
     let title: String
     let range: ClosedRange<Double>
     var step: Double = 1
-    var format: (Double) -> String = { String(Int($0)) }
+    /// Shown as a percentage (a setting kept as 0 to 1).
+    var percent = false
 
     var body: some View {
         let _ = BodyCount.hit("SettingSlider")
-        HStack {
-            Text(title)
+        let value = app.config.number(key)
+        HStack(spacing: 12) {
+            Text(title).font(.system(size: TextSize.body)).frame(width: SettingsLook.label, alignment: .leading)
             Slider(value: Binding(get: { app.config.number(key) },
                                   set: { app.config.set(key, step >= 1 ? Double(Int($0)) : ($0 * 100).rounded() / 100) }),
-                   in: range, step: step)
-            Text(format(app.config.number(key))).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
-                .frame(width: 44, alignment: .trailing)
+                   in: range, step: step) { Text(title) }
+                .labelsHidden()
+                .tint(tint)
+            Text(percent ? "\(Int((value * 100).rounded()))%" : String(Int(value)))
+                .font(.system(size: TextSize.callout).monospacedDigit()).foregroundStyle(.secondary)
+                .frame(width: SettingsLook.value, alignment: .trailing)
         }
     }
 }
 
-// MARK: - Dock
-
-struct DockSettings: View {
+/// A color, or none: the well at the right edge, Clear beside it while one is set.
+struct ColorSetting: View, SettingControl {
     @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        let _ = BodyCount.hit("DockSettings")
-        HStack(spacing: 14) {
-            DockChoice(title: "Petal", detail: "Your apps, Petal Notes and Petal AI.", selected: app.config.whichDock == "petal") {
-                PetalDockSketch()
-            } choose: { app.useDock("petal") }
-            DockChoice(title: "macOS Dock", detail: "Apple's own. Petal stays off.", selected: app.config.whichDock == "macos") {
-                MacDockSketch()
-            } choose: { app.useDock("macos") }
-        }
-
-        Text("Your own Dock is kept safe: quitting Petal, or removing it, brings it back as it was.")
-            .font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 6)
-            .fixedSize(horizontal: false, vertical: true)
-
-        Card(title: "Where it sits") {
-            Picker("Position", selection: Binding(get: { app.config.position }, set: { app.config.setDock("position", $0) })) {
-                Text("Bottom").tag("bottom")
-                Text("Left").tag("left")
-                Text("Right").tag("right")
-            }
-            .pickerStyle(.segmented)
-            Toggle("Auto-hide", isOn: Binding(get: { app.config.autoHide }, set: { app.config.setDock("autoHide", $0) }))
-                .toggleStyle(.switch).controlSize(.small)
-            if !app.config.autoHide {
-                Toggle(isOn: Binding(get: { app.config.keepWindowsClear }, set: { app.config.setDock("keepWindowsClear", $0) })) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Keep windows clear of the dock")
-                        Text("Windows end above the dock instead of running under it.").font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                }
-                .toggleStyle(.switch).controlSize(.small)
-            }
-            Toggle("Open Petal at login", isOn: Binding(get: { app.openAtLogin }, set: { app.openAtLogin = $0 }))
-                .toggleStyle(.switch).controlSize(.small)
-            SettingToggle(key: "menuBarIcon", title: "Petal in the menu bar", detail: "Petal Notes, settings and updates.")
-        }
-
-        WindowsCard()
-        ShortcutsCard()
-
-        Card(title: "Bring your Dock along", footer: "Petal's dock gets the apps of macOS's Dock, in its order, in place of its own, and its folders as stacks. macOS's Dock itself doesn't change.") {
-            HStack(spacing: -6) {
-                ForEach(app.systemDockApps.prefix(9), id: \.self) { id in
-                    Image(nsImage: Apps.icon(id)).resizable().frame(width: 34, height: 34)
-                }
-            }
-            Button("Import Dock") { app.config.importSystemDock() }
-                .buttonStyle(.glassProminent)
-                .tint(SettingsSection.dock.tint)
-        }
-    }
-}
-
-struct DockChoice<Sketch: View>: View {
+    let key: String
     let title: String
-    let detail: String
-    let selected: Bool
-    @ViewBuilder var sketch: Sketch
-    let choose: () -> Void
 
     var body: some View {
-        Button(action: choose) {
-            VStack(alignment: .leading, spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14).fill(.black.opacity(0.18))
-                    sketch.padding(.horizontal, 10)
-                }
-                .frame(height: 96)
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(title).font(.system(size: 14, weight: .semibold))
-                        Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 18))
-                        .foregroundStyle(selected ? SettingsSection.dock.tint : .secondary)
-                }
+        SettingRow(title: title) {
+            if !app.config.string(key).isEmpty {
+                Button("Clear") { app.config.set(key, "") }.buttonStyle(.plain)
+                    .font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
             }
-            .padding(12)
-            .contentShape(.rect)
+            ColorPicker(title, selection: Binding(get: { Color(nsColor: NSColor(hex: app.config.string(key)) ?? .clear) },
+                                                  set: { app.config.set(key, NSColor($0).hex) }), supportsOpacity: false)
+                .labelsHidden()
         }
-        .buttonStyle(.plain)
-        .glassEffect(selected ? .regular.tint(SettingsSection.dock.tint.opacity(0.18)).interactive() : .regular.interactive(),
-                     in: .rect(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(selected ? SettingsSection.dock.tint : .clear, lineWidth: 2))
     }
 }
 
-/// A small drawing of Petal's dock, with its own apps.
-struct PetalDockSketch: View {
+/// One of a few, side by side (or, where their words are long, in a menu), at the right edge of its row.
+struct ChoiceRow: View {
+    let title: String
+    var help: String? = nil
+    let options: [(String, String)]
+    let selection: Binding<String>
+    var menu = false
+
+    var body: some View {
+        SettingRow(title: title, help: help) {
+            let picker = Picker(title, selection: selection) {
+                ForEach(options, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .labelsHidden()
+            if menu { picker.pickerStyle(.menu).fixedSize() } else { picker.pickerStyle(.segmented).fixedSize() }
+        }
+    }
+}
+
+/// A filled button in Petal's accent: the one thing to do next (Allow…, Import, Restart to update).
+struct AccentButton: View {
     @Environment(PetalApp.self) private var app
+    let title: String
+    let action: () -> Void
 
     var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "sparkle").font(.system(size: 10, weight: .bold)).foregroundStyle(.white)
-                .frame(width: 22, height: 22).background(SettingsSection.claude.tint.gradient, in: .circle)
-            ForEach(app.config.apps.filter(Apps.shows).prefix(7), id: \.self) { id in
-                DockIcon(id: id, size: 22)
-            }
-        }
-        .padding(6)
-        .glassEffect(.regular, in: .capsule)
+        Button(title, action: action).buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
     }
 }
 
-/// A small drawing of macOS's Dock, with its own apps.
-struct MacDockSketch: View {
-    @Environment(PetalApp.self) private var app
+/// A choice shown as a picture: a round mark under it, filled with a check on the one chosen.
+struct ChosenMark: View {
+    let on: Bool
+    var color: Color
 
     var body: some View {
-        HStack(spacing: 4) {
-            ForEach(app.systemDockApps.prefix(7), id: \.self) { id in
-                Image(nsImage: Apps.icon(id)).resizable().frame(width: 22, height: 22)
-            }
-            Rectangle().fill(.white.opacity(0.3)).frame(width: 1, height: 18)
-            Image(nsImage: NSWorkspace.shared.icon(forFile: Stacks.trash.path)).resizable().frame(width: 22, height: 22)
-        }
-        .padding(6)
-        .background(.white.opacity(0.18), in: .rect(cornerRadius: 10))
+        Image(systemName: on ? "checkmark.circle.fill" : "circle")
+            .font(.system(size: TextSize.subtitle))
+            .foregroundStyle(on ? AnyShapeStyle(color) : AnyShapeStyle(.tertiary))
     }
 }
 
-// MARK: - Claude
+// MARK: - The list of settings
 
-struct ClaudeSettings: View {
-    @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        let _ = BodyCount.hit("ClaudeSettings")
-        Card(title: "Your AI", footer: "Each is your own app and account. Choose one, both, or neither: without AI, Petal is still a whole dock.") {
-            ProviderList()
-        }
-        .onAppear { app.aiSetup.refreshAll() }
-        ForEach(app.providers) { APIKeyCard(provider: $0) }
-        if let provider = app.chatProvider {
-            if let spent = app.usage.spentText {
-                Card(footer: provider == .claude ? "What Claude Code reports for Petal's own chats and quick calls on your key. Anthropic's console has the bill."
-                     : "Estimated from Codex's tokens at OpenAI's list prices, for Petal's own chats and quick calls on your key. OpenAI's usage page has the bill.") {
-                    Text(spent).font(.system(size: 20, weight: .semibold).monospacedDigit())
-                }
-            } else {
-                Card {
-                    HStack(spacing: 18) {
-                        UsageRing(usage: app.usage, size: 64)
-                        VStack(alignment: .leading, spacing: 6) {
-                            if app.usage.limits.isEmpty {
-                                Text(app.usage.help.isEmpty ? "Checking your \(provider.name) usage…" : app.usage.help).foregroundStyle(.secondary)
-                            }
-                            ForEach(app.usage.limits, id: \.label) { limit in
-                                VStack(alignment: .leading, spacing: 3) {
-                                    HStack {
-                                        Text(limit.label).font(.system(size: 12, weight: .medium))
-                                        Spacer()
-                                        Text("\(Int(limit.percent * 100))%").font(.system(size: 12).monospacedDigit())
-                                        if let reset = limit.resetsAt {
-                                            Text("resets \(reset, style: .relative)").font(.system(size: 11)).foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    ProgressView(value: limit.percent).tint(UsageRing.color(limit.percent))
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Card(title: "Chat") {
-                Picker("Writing while it works", selection: Binding(get: { app.config.string("chatWhileWorking") }, set: { app.config.set("chatWhileWorking", $0) })) {
-                    Text("Steers it").tag("steer")
-                    Text("Waits its turn").tag("queue")
-                }
-                if app.providers.count > 1 {
-                    Picker("Chat with", selection: Binding(get: { provider.rawValue }, set: {
-                        app.config.set("chatProvider", $0)
-                        Task { await app.usage.refresh() }
-                    })) {
-                        ForEach(app.providers) { Text($0.name).tag($0.rawValue) }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                if app.models(for: provider).count > 1 {
-                    Picker("Model", selection: Binding(get: { app.currentModel(for: provider) }, set: { app.config.set(provider.modelSetting, $0) })) {
-                        ForEach(app.models(for: provider), id: \.0) { Text($0.1).tag($0.0) }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                Picker("Effort", selection: Binding(get: { app.config.string(provider.effortSetting) }, set: { app.config.set(provider.effortSetting, $0) })) {
-                    ForEach(app.efforts(for: provider), id: \.self) { Text($0.capitalized).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                Picker("Access", selection: Binding(get: { app.config.string("claudeAccess") }, set: { app.config.set("claudeAccess", $0) })) {
-                    Text(provider == .claude ? "Ask before risky steps" : "Safe steps only").tag("auto")
-                    Text("Full access").tag("full")
-                }
-                Button("Open \(provider.name)") { app.claude.open(asking: nil) }.buttonStyle(.glass)
-            }
-            Card(title: "Your other AI sessions", footer: "Petal's tools, skill and `petal` command are set up for Claude Code and Codex, so you can ask any session to change your dock.") {
-                SettingToggle(key: "otherAgents", title: "Let them change Petal", detail: "T3 Code, or Claude Code and Codex in a terminal.")
-            }
-            Card(title: "In the background") {
-                SettingToggle(key: "claudeUsage", title: "Usage ring", detail: "Around the \(provider.name) button, every 5 minutes.")
-                SettingToggle(key: "ai", title: "Small jobs", detail: "Routines that sort files by what they are, and notes that answer in a line, ask \(provider.name)'s small model.")
-            }
-            UsingAppsCard()
-            MemoryCard()
-            PrivacyCard()
-            AIHistoryCard()
-            if !app.config.strings("aiAllowed").isEmpty {
-                Card(title: "Allowed without asking", footer: "You chose Always for these. Take one away and Petal AI asks again.") {
-                    ForEach(app.config.strings("aiAllowed"), id: \.self) { kind in
-                        HStack {
-                            AllowedKindName(kind: kind)
-                            Spacer()
-                            RoundButton(symbol: "xmark") { app.config.set("aiAllowed", app.config.strings("aiAllowed").filter { $0 != kind }) }
-                        }
-                    }
-                }
-            }
-            Card(title: "Your notes for \(provider.name)", footer: "\(provider.name) reads these every time you ask it something.") {
-                InstructionsEditor()
-            }
-        }
-    }
-}
-
-/// Using the person's apps, and where a run's windows open: on their screen, or on a hidden display of its own.
-struct UsingAppsCard: View {
-    var body: some View {
-        Card(title: "Using your apps", footer: "Petal AI presses buttons, types and chooses menu items with a pink pointer of its own; yours stays where it is. It asks before it uses each app, and Stop or Esc ends it.") {
-            SettingToggle(key: "computerUse", title: "Let Petal AI use your apps", detail: "Never apps kept private, and never password fields.")
-            // A hidden display for each run. Where macOS can't make one, the switch says so and stays off.
-            SettingToggle(key: "runDisplays", title: "Give each run a display of its own",
-                          detail: RunDisplays.unavailableWords ?? "A helper's windows open where you don't see them, out of your way. Watch from the AI button, where Show me brings one to your screen.")
-                .disabled(RunDisplays.unavailableWords != nil)
-        }
-    }
-}
-
-/// What Petal AI remembers, each with a way to forget it.
-struct MemoryCard: View {
-    @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        Card(title: "Memory", footer: "Petal AI keeps what helps it help you, so you don't have to say it twice. All of it is here; ask it to forget anything.") {
-            SettingToggle(key: "aiMemory", title: "Remember what helps", detail: "What you ask it to, and what it notices along the way.")
-            if app.config.bool("aiMemory") {
-                if app.assist.memories.isEmpty {
-                    Text("Nothing yet.").font(.system(size: 12)).foregroundStyle(.secondary)
-                }
-                ForEach(app.assist.memories) { memory in
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Text(memory.text).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: 8)
-                        RoundButton(symbol: "xmark") { app.assist.forget(id: memory.id, matching: nil) }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Everything Petal AI did, newest first, with Undo where it can be undone.
-struct AIHistoryCard: View {
-    @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        Card(title: "What Petal AI did", footer: app.assist.history.isEmpty ? "Things it does on your Mac show here, each with a way back." : nil) {
-            if app.assist.history.isEmpty {
-                Text("Nothing yet.").font(.system(size: 12)).foregroundStyle(.secondary)
-            }
-            ForEach(app.assist.history.prefix(30)) { done in
-                HStack(spacing: 8) {
-                    Text(done.text).font(.system(size: 13)).strikethrough(done.undone).foregroundStyle(done.undone ? .secondary : .primary)
-                        .lineLimit(2)
-                    Spacer(minLength: 8)
-                    Text(done.at, style: .relative).font(.system(size: 11)).foregroundStyle(.secondary)
-                    if let undo = done.undo, !done.undone {
-                        if case .open = undo {
-                            Button("Open") { app.assist.undo(done) }.buttonStyle(.glass).controlSize(.small)
-                        } else {
-                            Button("Undo") { app.assist.undo(done) }.buttonStyle(.glass).controlSize(.small)
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Apps Petal AI never looks into: it gets their name, never their windows, text or a picture of them.
-struct PrivacyCard: View {
-    @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        let ids = app.config.strings("aiNeverLook")
-        Card(title: "Kept private", footer: "Petal AI sees only these apps' names: never their windows, text or a picture of them.") {
-            ForEach(ids, id: \.self) { id in
-                HStack(spacing: 8) {
-                    Image(nsImage: Apps.icon(id)).resizable().frame(width: 18, height: 18)
-                    Text(Apps.name(id)).font(.system(size: 13))
-                    Spacer()
-                    RoundButton(symbol: "xmark") { app.config.set("aiNeverLook", ids.filter { $0 != id }) }
-                }
-            }
-            Menu("Add an app") {
-                ForEach(NSWorkspace.shared.personsApplications.filter { $0.activationPolicy == .regular && !ids.contains($0.bundleIdentifier ?? "") }
-                    .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0) } }.sorted { $0.1 < $1.1 }, id: \.0) { id, name in
-                    Button(name) { app.config.set("aiNeverLook", ids + [id]) }
-                }
-            }
-            .fixedSize()
-        }
-    }
-}
-
-/// What the kinds of thing Petal AI asks about are called.
+/// A row's own control, bound to one setting by its key: its title is written once, on the control, and read from it.
 @MainActor
-enum AllowedKinds {
-    static func name(_ kind: String) -> String {
-        switch kind {
-        case "quit": "Quitting apps"
-        case "close": "Closing windows"
-        case "trash": "Moving files to the Trash"
-        case "tidy": "Tidying many files at once"
-        case RunBrowsers.kind: "Using a browser of its own"
-        default: kind.hasPrefix("computer:") ? "Using \(Apps.cachedName(String(kind.dropFirst(9))) ?? String(kind.dropFirst(9)))" : kind
+protocol SettingControl: View {
+    var key: String { get }
+    var title: String { get }
+}
+
+/// One row of the settings window, defined once: its page shows it, and the ask bar finds it by its title and a few
+/// more words.
+@MainActor
+struct SettingsEntry: Identifiable {
+    let id: String
+    let title: String
+    /// Whether it shows now (a row that only means something while another is on).
+    let when: (PetalApp) -> Bool
+    let view: AnyView
+    /// What the ask bar's words are looked for in, lowercased.
+    let found: String
+
+    /// A setting's own control.
+    init<Control: SettingControl>(_ control: Control, words: String = "", when: @escaping (PetalApp) -> Bool = { _ in true }) {
+        id = control.key
+        title = control.title
+        self.when = when
+        view = AnyView(control)
+        found = (control.title + " " + words).lowercased()
+    }
+
+    /// Any other row: built with its title, so the title is written once.
+    init<Row: View>(_ id: String, _ title: String, words: String = "", when: @escaping (PetalApp) -> Bool = { _ in true },
+                    @ViewBuilder row: (String) -> Row) {
+        self.id = id
+        self.title = title
+        self.when = when
+        view = AnyView(row(title))
+        found = (title + " " + words).lowercased()
+    }
+}
+
+/// A group of rows on a page.
+@MainActor
+struct SettingsBlock: Identifiable {
+    let id: String
+    let title: String?
+    /// The one line under the rows, if the group has one now.
+    let footer: (PetalApp) -> String?
+    let when: (PetalApp) -> Bool
+    let entries: [SettingsEntry]
+
+    /// `footer` always shows; `says` is a footer that depends on what's chosen.
+    init(_ title: String, footer: String? = nil, says: ((PetalApp) -> String?)? = nil, when: @escaping (PetalApp) -> Bool = { _ in true },
+         _ entries: [SettingsEntry]) {
+        id = title
+        self.title = title
+        self.footer = says ?? { _ in footer }
+        self.when = when
+        self.entries = entries
+    }
+
+    /// A group with no label: a page's first rows.
+    init(footer: String? = nil, when: @escaping (PetalApp) -> Bool = { _ in true }, _ entries: [SettingsEntry]) {
+        id = entries.first?.id ?? ""
+        title = nil
+        self.footer = { _ in footer }
+        self.when = when
+        self.entries = entries
+    }
+}
+
+/// A page's groups, drawn: each block that shows now, with the rows that show now (`whatever`: every one of them,
+/// for a snapshot of rows a setting hides).
+struct SettingsBlocks: View {
+    @Environment(PetalApp.self) private var app
+    let blocks: [SettingsBlock]
+    var whatever = false
+
+    var body: some View {
+        let _ = BodyCount.hit("SettingsBlocks")
+        ForEach(blocks.filter { whatever || $0.when(app) }) { block in
+            SettingsGroup(title: block.title, footer: block.footer(app)) {
+                ForEach(block.entries.filter { whatever || $0.when(app) }) { $0.view }
+            }
         }
     }
 }
 
-/// A kind's name in the Allowed list: an app's name is read off the main thread (its bundle id until then).
-struct AllowedKindName: View {
-    let kind: String
-    @State private var appName: String?
+/// Every page's rows, and the ask bar's search over them.
+@MainActor
+enum SettingsList {
+    /// A page's groups. The vault is its own view (`VaultSettings`): its name finds it.
+    static func blocks(_ section: SettingsSection) -> [SettingsBlock] {
+        switch section {
+        case .dock: dock
+        case .look: look
+        case .notes: notes
+        case .ai: ai
+        case .vault: []
+        case .routines: routines
+        case .privacy: privacy
+        case .about: about
+        }
+    }
 
-    var body: some View {
-        Text(appName.map { "Using \($0)" } ?? AllowedKinds.name(kind)).font(.system(size: 13))
-            .task(id: kind) {
-                guard kind.hasPrefix("computer:") else { return }
-                let id = String(kind.dropFirst(9))
-                if Apps.cachedName(id) == nil { Apps.loadName(id) { appName = $0 } }
+    /// What typed text searches for: its words, lowercased, once there are two letters; nil while there's nothing to
+    /// look for.
+    static func query(_ text: String) -> String? {
+        let words = text.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return words.count >= 2 ? words : nil
+    }
+
+    struct Hit: Identifiable {
+        let section: SettingsSection
+        let entries: [SettingsEntry]
+        var id: String { section.rawValue }
+    }
+
+    /// What the ask bar found: on each page, the rows that hold every word of `query` in their title, their extra
+    /// words or their group's label; and a page whose own name or words hold them, with or without rows.
+    static func find(_ query: String, app: PetalApp) -> [Hit] {
+        let words = query.split(separator: " ")
+        func holds(_ text: String) -> Bool { words.allSatisfy { text.contains($0) } }
+        return SettingsSection.allCases.compactMap { section in
+            let entries = blocks(section).filter { $0.when(app) }.flatMap { block in
+                let label = (block.title ?? "").lowercased() + " "
+                return block.entries.filter { $0.when(app) && holds(label + $0.found) }
             }
+            let named = holds((section.title + " " + section.words).lowercased())
+            return entries.isEmpty && !named ? nil : Hit(section: section, entries: entries)
+        }
     }
 }
+
+// MARK: - The notes for Petal AI
 
 struct InstructionsEditor: View {
     @Environment(PetalApp.self) private var app
@@ -727,7 +839,7 @@ struct InstructionsEditor: View {
             // until they pick.
             if notes.changedElsewhere {
                 HStack(spacing: 8) {
-                    Text("Changed elsewhere since you started typing.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("Changed elsewhere since you started typing.").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                     Button("Use theirs") { notes.useTheirs() }
                     Button("Keep mine") { notes.keepMine() }
@@ -740,11 +852,12 @@ struct InstructionsEditor: View {
 
     private func editor(_ notes: InstructionsText) -> some View {
         TextEditor(text: $text)
-            .font(.system(size: 12))
+            .font(.system(size: TextSize.callout))
             .scrollContentBackground(.hidden)
             .frame(minHeight: 110)
             .padding(8)
-            .background(.black.opacity(0.12), in: .rect(cornerRadius: 12))
+            // The field is clear glass of its own on the window's glass, as the ask bar is.
+            .glassEffect(.clear, in: .rect(cornerRadius: Radius.tile))
             // Nothing to type over until the file was first read: typing onto an empty editor while the notes are
             // still on their way would be lost, or write over them. It's empty until then, so it looks no different.
             .disabled(!notes.loaded)
@@ -982,334 +1095,5 @@ final class InstructionsStore: @unchecked Sendable {
 
     private static func contents(_ file: URL) -> String {
         (try? String(contentsOf: file, encoding: .utf8)) ?? ""
-    }
-}
-
-// MARK: - Apps, look
-
-struct AppsSettings: View {
-    @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        let _ = BodyCount.hit("AppsSettings")
-        Card(title: "Apps") {
-            SettingToggle(key: "thisWorkspaceOnly", title: "Only this Desktop's apps", detail: "Running apps from other Desktops stay out of the dock.")
-            SettingToggle(key: "previews", title: "Window previews", detail: "Hover a running app to see its windows.")
-            SettingToggle(key: "minimized", title: "Minimized windows")
-            SettingToggle(key: "badges", title: "Badges", detail: "Unread counts on app icons.")
-            SettingToggle(key: "bounce", title: "Bounce", detail: "Once, when an app wants you.")
-            SettingToggle(key: "progress", title: "Download progress")
-            SettingToggle(key: "quickActions", title: "Quick actions in the right-click menu")
-            SettingToggle(key: "recentFiles", title: "Recent files in the right-click menu")
-            SettingToggle(key: "dropToOpen", title: "Drop files on an app to open them")
-        }
-        Card(title: "Extras") {
-            SettingToggle(key: "nowPlaying", title: "Now playing", detail: "Music and Spotify, with album art.")
-            SettingToggle(key: "stacks", title: "Folder stacks")
-            ForEach(app.config.strings("stackFolders"), id: \.self) { folder in
-                HStack {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: Stacks.url(folder).path)).resizable().frame(width: 20, height: 20)
-                    Text(folder).font(.system(size: 12))
-                    Spacer()
-                    Button { app.config.set("stackFolders", app.config.strings("stackFolders").filter { $0 != folder }) } label: {
-                        Image(systemName: "minus.circle.fill").foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            Button("Add folder…") {
-                let panel = NSOpenPanel()
-                panel.canChooseDirectories = true
-                panel.canChooseFiles = false
-                guard panel.runModal() == .OK, let url = panel.url else { return }
-                let home = NSHomeDirectory()
-                let path = url.path.hasPrefix(home) ? "~" + url.path.dropFirst(home.count) : url.path
-                app.config.set("stackFolders", app.config.strings("stackFolders") + [path])
-            }
-            SettingToggle(key: "trash", title: "Trash")
-        }
-        NotesCard()
-    }
-}
-
-/// Petal Notes: on or off, paper or glass, the notebook new notes go to, and where the files are.
-struct NotesCard: View {
-    @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        Card(title: "Notes") {
-            SettingToggle(key: "notes", title: "Petal Notes", detail: "Your own notes on paper, stuck to a sentence, a tab, a window, an app, a file, a Desktop or the screen itself. ⌃⌥N makes one where you are.")
-            if app.config.bool("notes") {
-                SettingToggle(key: "notesPad", title: "Note pad in the dock", detail: "A pad of paper by the AI button: click it for a note on what's in front, or drag a paper off it and let go anywhere. Hold Option to keep it on screen.")
-                HStack {
-                    Text("Look").font(.system(size: 13))
-                    Spacer()
-                    Segments(options: [("paper", "Paper"), ("glass", "Glass")],
-                             selection: Binding(get: { app.config.string("notesLook") == "glass" ? "glass" : "paper" }, set: { app.config.set("notesLook", $0) }))
-                        .frame(width: 180)
-                }
-                HStack {
-                    Text("New notes go to").font(.system(size: 13))
-                    Spacer()
-                    Picker("", selection: Binding(get: { app.paper.defaultNotebook }, set: { app.config.set("notesNotebook", $0) })) {
-                        ForEach(Array(Set(app.paper.store.notebooks.map(\.name) + [app.paper.defaultNotebook])).sorted(), id: \.self) { Text($0).tag($0) }
-                    }
-                    .labelsHidden().frame(width: 180)
-                }
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Kept in").font(.system(size: 13))
-                        Text(app.paper.store.inICloud ? "iCloud Drive › Petal Notes" : (app.paper.store.root.path as NSString).abbreviatingWithTildeInPath)
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([app.paper.store.root]) }
-                }
-            }
-        }
-    }
-}
-
-struct LookSettings: View {
-    @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        let _ = BodyCount.hit("LookSettings")
-        Card(title: "Icons") {
-            SettingSlider(key: "iconSize", title: "Size", range: 24...72)
-            SettingSlider(key: "idleOpacity", title: "Apps not running", range: 0.2...1, step: 0.05,
-                          format: { "\(Int($0 * 100))%" })
-            SettingToggle(key: "magnification", title: "Magnification", detail: "Icons grow under the pointer, and their neighbours make room.")
-            if app.config.bool("magnification") {
-                SettingSlider(key: "magnificationAmount", title: "Grow", range: 0.1...1, step: 0.05, format: { "\(Int($0 * 100))%" })
-            } else {
-                SettingToggle(key: "hoverLift", title: "Lift on hover")
-                SettingSlider(key: "hoverLiftAmount", title: "Lift", range: 0...0.3, step: 0.01, format: { "\(Int($0 * 100))%" })
-            }
-            SettingToggle(key: "appGlow", title: "Glow", detail: "Running apps glow in their icon's color.")
-            SettingToggle(key: "tooltips", title: "Names on hover")
-            SettingToggle(key: "separators", title: "Dividers between sections")
-        }
-        Card(title: "Color", footer: "The dock is macOS's own Liquid Glass. A color tints it; leave it empty to keep it clear.") {
-            ColorSetting(key: "dockColor", title: "Dock tint")
-            ColorSetting(key: "accentColor", title: "Accent")
-            ColorSetting(key: "pointerColor", title: "Petal AI's pointer")
-        }
-    }
-}
-
-struct ColorSetting: View {
-    @Environment(PetalApp.self) private var app
-    let key: String
-    let title: String
-
-    var body: some View {
-        HStack {
-            Text(title)
-            Spacer()
-            if !app.config.string(key).isEmpty {
-                Button("Clear") { app.config.set(key, "") }.buttonStyle(.plain).foregroundStyle(.secondary)
-            }
-            ColorPicker("", selection: Binding(get: { Color(nsColor: NSColor(hex: app.config.string(key)) ?? .clear) },
-                                               set: { app.config.set(key, NSColor($0).hex) }), supportsOpacity: false)
-                .labelsHidden()
-        }
-    }
-}
-
-// MARK: - Permissions, about
-
-struct PermissionsSettings: View {
-    @Environment(PetalApp.self) private var app
-    /// Checked every 1.5 s; the page draws again only when one changes.
-    @State private var trusted = Windows.trusted
-    @State private var capture = Capture.allowed
-    let timer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
-
-    var body: some View {
-        let _ = BodyCount.hit("PermissionsSettings")
-        Permission(symbol: "accessibility", title: "Accessibility", detail: "Window previews, minimized windows, badges, notes on windows, and Petal AI using your apps.",
-                   granted: trusted) { Windows.askForPermission() }
-        Permission(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", detail: "A picture of each window in previews; without it, they list windows by name. Petal never records: it takes a still while you hover an app.",
-                   granted: capture) { Capture.askForPermission() }
-        Permission(symbol: "safari", title: "Browsers", detail: "Which site a tab is on, for notes on a tab and for Petal AI. Each browser asks once.",
-                   granted: Browsers.installed().isEmpty ? nil : app.browsers.allAllowed) { app.browsers.askAll {} }
-        Permission(symbol: "music.note", title: "Music and Spotify", detail: "Now playing. macOS asks the first time a player is open.",
-                   granted: nil) {}
-            .onReceive(timer) { _ in
-                let nowTrusted = Windows.trusted, nowCapture = Capture.allowed
-                if nowTrusted != trusted { trusted = nowTrusted }
-                if nowCapture != capture { capture = nowCapture }
-                app.browsers.refresh()
-            }
-    }
-}
-
-struct Permission: View {
-    let symbol: String
-    let title: String
-    let detail: String
-    let granted: Bool?
-    let ask: () -> Void
-
-    var body: some View {
-        HStack(spacing: 14) {
-            Image(systemName: symbol).font(.system(size: 18)).frame(width: 40, height: 40)
-                .glassEffect(.regular, in: .circle)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 14, weight: .semibold))
-                Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer()
-            if let granted {
-                if granted {
-                    Label("Allowed", systemImage: "checkmark.circle.fill").foregroundStyle(.green).font(.system(size: 12, weight: .medium))
-                } else {
-                    Button("Allow…", action: ask).buttonStyle(.glassProminent).tint(SettingsSection.dock.tint)
-                }
-            }
-        }
-        .padding(14)
-        .glassEffect(.regular, in: .rect(cornerRadius: 20))
-    }
-}
-
-struct AboutSettings: View {
-    @Environment(PetalApp.self) private var app
-
-    var body: some View {
-        let _ = BodyCount.hit("AboutSettings")
-        VStack(spacing: 10) {
-            Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 128, height: 128)
-                .shadow(color: .black.opacity(0.3), radius: 18, y: 8)
-            Text("Petal").font(.system(size: 30, weight: .bold))
-            Text("Version \(app.version)").foregroundStyle(.secondary)
-            Text("A dock with your notes and your AI built in. Free and open source, by Edgetr.")
-                .multilineTextAlignment(.center).font(.system(size: 13)).foregroundStyle(.secondary).frame(maxWidth: 380)
-            HStack {
-                Button("Website") { NSWorkspace.shared.open(URL(string: "https://petal.codes")!) }.buttonStyle(.glass)
-                Button("GitHub") { NSWorkspace.shared.open(URL(string: "https://github.com/edgetr/petal")!) }.buttonStyle(.glass)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 24)
-        .glassEffect(.regular, in: .rect(cornerRadius: 24))
-
-        DoctorCard()
-
-        Card(title: "Updates") {
-            SettingToggle(key: "autoUpdate", title: "Update automatically", detail: "New versions install themselves, then offer a restart.")
-            HStack {
-                if let ready = app.updater.ready {
-                    Button("Restart to update") { app.relaunch() }.buttonStyle(.glassProminent).tint(SettingsSection.dock.tint)
-                    Button("What’s new in \(ready)") { app.releaseNotes.show(ready) }.buttonStyle(.glass)
-                } else {
-                    Button("Check now") { app.updater.check(manual: true) }.buttonStyle(.glass)
-                    Text(app.updater.status).font(.system(size: 11)).foregroundStyle(.secondary)
-                }
-            }
-        }
-    }
-}
-
-/// "Check Petal": the doctor's findings, a button to fix what it can, and a way to report what it can't.
-struct DoctorCard: View {
-    @Environment(PetalApp.self) private var app
-    @State private var findings: [Doctor.Finding] = []
-    @State private var working = false
-    @State private var reporting = false
-
-    var body: some View {
-        Card(title: "Check Petal", footer: "Finds and fixes common problems. If something's still wrong, report it: you see the report before it goes anywhere.") {
-            ForEach(permissionFindings + findings) { finding in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: finding.level == "ok" ? "checkmark.circle.fill" : finding.level == "warn" ? "exclamationmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(finding.level == "ok" ? .green : finding.level == "warn" ? .orange : .red)
-                    Text(finding.text + (finding.fixed.map { " Fixed: \($0)." } ?? "")).font(.system(size: 12))
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            HStack {
-                Button(findings.isEmpty ? "Check Petal" : "Check again") { run(fix: false) }.buttonStyle(.glass)
-                if findings.contains(where: { $0.level != "ok" && $0.fixed == nil }) {
-                    Button("Fix what can be fixed") { run(fix: true) }.buttonStyle(.glassProminent).tint(SettingsSection.dock.tint)
-                }
-                Button("Report a problem…") { reporting = true }.buttonStyle(.glass)
-                if working { ProgressView().controlSize(.small) }
-            }
-        }
-        .sheet(isPresented: $reporting) { ReportSheet().environment(app) }
-    }
-
-    /// macOS grants these to the app itself, so the window checks them, not the doctor command.
-    private var permissionFindings: [Doctor.Finding] {
-        guard !findings.isEmpty else { return [] }
-        return [Doctor.Finding(level: Windows.trusted ? "ok" : "warn", area: "permissions",
-                               text: Windows.trusted ? "Petal can see your windows." : "Petal can't see your windows yet: allow it under Permissions."),
-                Doctor.Finding(level: Capture.allowed ? "ok" : "warn", area: "permissions",
-                               text: Capture.allowed ? "Window previews are allowed." : "Window previews need Screen Recording (optional).")]
-    }
-
-    private func run(fix: Bool) {
-        working = true
-        Task {
-            let result = await AISetup.run(Bundle.main.executablePath ?? "", ["doctor", "--json"] + (fix ? ["--fix"] : []),
-                                           environment: ProcessInfo.processInfo.environment, timeout: 120)
-            let json = result.output.split(separator: "\n").last { $0.hasPrefix("{") }.map(String.init) ?? ""
-            findings = (try? JSONDecoder().decode([String: [Doctor.Finding]].self, from: Data(json.utf8)))?["findings"] ?? []
-            working = false
-            app.docks.refresh()
-        }
-    }
-}
-
-struct ReportSheet: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var what = ""
-    @State private var preview = ""
-    @State private var status = ""
-    @State private var working = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Report a problem").font(.system(size: 18, weight: .semibold))
-            TextField("What happened?", text: $what, axis: .vertical).lineLimit(2...4)
-            if !preview.isEmpty {
-                ScrollView {
-                    Text(preview).font(.system(size: 11, design: .monospaced)).textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .frame(height: 220)
-                .padding(8)
-                .background(.black.opacity(0.12), in: .rect(cornerRadius: 10))
-                Text("This goes to github.com/edgetr/petal, where anyone can read it. Your username is replaced, and no window titles or file contents are included.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-            if !status.isEmpty { Text(status).font(.system(size: 12)).foregroundStyle(.secondary).textSelection(.enabled) }
-            HStack {
-                if working { ProgressView().controlSize(.small) }
-                Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
-                if preview.isEmpty {
-                    Button("Show the report") { run(["--preview"]) { preview = $0 } }
-                        .buttonStyle(.glassProminent).disabled(what.trimmingCharacters(in: .whitespaces).isEmpty || working)
-                } else {
-                    Button("Report it") { run(["--yes"]) { status = $0.split(separator: "\n").last.map(String.init) ?? "" } }
-                        .buttonStyle(.glassProminent).disabled(working || !status.isEmpty)
-                }
-            }
-        }
-        .padding(20)
-        .frame(width: 560)
-    }
-
-    private func run(_ flags: [String], done: @escaping (String) -> Void) {
-        working = true
-        Task {
-            let result = await AISetup.run(Bundle.main.executablePath ?? "", ["report", what] + flags,
-                                           environment: ProcessInfo.processInfo.environment, timeout: 120)
-            working = false
-            done(result.output.trimmingCharacters(in: .whitespacesAndNewlines))
-        }
     }
 }

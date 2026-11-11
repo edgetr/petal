@@ -1094,7 +1094,7 @@ final class ComputerUse {
         job.send(reply)
     }
 
-    /// What it did, for Settings › AI (never what it typed: that may be private).
+    /// What it did, for Settings › Privacy (never what it typed: that may be private).
     /// What an act did, for What Petal AI did: the control's name, the menu item, the app and the site are names
     /// (HistoryLine: redacted with the vault's index before the line is kept, left out while it can't be read).
     private func historyLine(_ job: Job, _ outcome: Acting.Outcome) -> HistoryLine {
@@ -2914,13 +2914,13 @@ struct ActingPill: View {
         HStack(spacing: 9) {
             Circle().fill(Color(nsColor: FakeCursor.tint)).frame(width: 7, height: 7)
             if let caption {
-                Text(caption).font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.middle)
+                Text(caption).font(.system(size: TextSize.callout, weight: .medium)).lineLimit(1).truncationMode(.middle)
                     .frame(maxWidth: 260, alignment: .leading).fixedSize()
             }
             Button(action: stop) {
                 HStack(spacing: 5) {
-                    Text("Stop").font(.system(size: 12, weight: .semibold))
-                    Text("esc").font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                    Text("Stop").font(.system(size: TextSize.callout, weight: .semibold))
+                    Text("esc").font(.system(size: TextSize.caption, weight: .medium)).foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)

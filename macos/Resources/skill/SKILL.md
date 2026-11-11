@@ -214,11 +214,16 @@ When the user says "get the Anthropic key from Petal to test this" or "use the l
 ## Things to know
 
 - Petal's AI is optional and uses the user's own Claude Code or Codex (`aiProviders`, `chatProvider`). Its usage
-  counts toward the user's own plan, or toward an API key (`claudeAuth` / `codexAuth`: `subscription` or `api`). The key is pasted in Settings › AI and kept in the Keychain; only Petal's own runs use it. Never ask for a
+  counts toward the user's own plan, or toward an API key (`claudeAuth` / `codexAuth`: `subscription` or `api`). The key is pasted in Settings › Petal AI and kept in the Keychain; only Petal's own runs use it. Never ask for a
   key, put one in a file or the environment, or change `~/.claude`, `~/.codex` or their logins to switch.
+- The settings window (the menu bar's mark, or the dock's right-click menu) has a page for each part of Petal: Dock,
+  Look, Notes, Petal AI, Vault, Routines, Privacy, About. The bar across its top finds any setting by name as the
+  user types, and Return hands what they typed to Petal AI. Point the user at a page by these names.
 - Petal hides macOS's Dock while it runs and gives it back on quit; `petal restore-dock` gives it back by
   hand. Permissions it may need: Accessibility (window lists, badges, notes on windows, using apps, tiling), Screen
-  Recording (previews) and Automation for each browser (reading a tab's address).
+  Recording (previews) and Automation for each browser (reading a tab's address) and for Music and Spotify (now
+  playing). Accessibility is asked in the welcome; the others where they're first used (a window's preview, a note's
+  place menu in a browser, a player's preview), and all four are listed in Settings › Privacy.
 
 ## Changing Petal itself
 
@@ -230,7 +235,9 @@ update is combined with, so the user's changes are never lost.
    (`personal.source` in `petal_get_state`): `~/Library/Application Support/Petal/source`. It needs Apple's command
    line tools; if they're missing, macOS shows its own installer, and the user runs it again once they're in.
 2. Edit the files there. The app is Swift in `macos/Sources/Petal/` (`files.source` in `petal_get_state`); what goes
-   into the app as it is (the AI's tools in `mcp/tools.json`, this skill) is in `macos/Resources/`.
+   into the app as it is (the AI's tools in `mcp/tools.json`, this skill) is in `macos/Resources/`. A new setting
+   is one line in `Settings.swift`; its row in the settings window is one entry in its page's list
+   (`SettingsList`, in `SettingsPages.swift`), which the window's search finds too.
 3. `petal personal save "<what changed, in the user's words>"` after each change that works. It builds first (an
    edit that doesn't build isn't saved: fix the errors it prints and save again), commits the edit as one of the
    user's changes, then installs the build and restarts Petal into it.

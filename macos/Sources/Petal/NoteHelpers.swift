@@ -462,7 +462,7 @@ final class NoteHelpers {
             release(run)
             letGo(run)
             guard !look else { return }
-            // Its reason is shielded like anything a helper produced (a key, a sign-in: Settings › AI's button on it).
+            // Its reason is shielded like anything a helper produced (a key, a sign-in: Settings › Petal AI's button on it).
             let opinion = run.reviewed != nil
             failureOutput(run, Said(who: opinion ? run.who : run.who + " · couldn't finish", text: opinion ? "No second opinion: " + reason : reason,
                                     form: .failure, settings: settings))
@@ -1649,7 +1649,7 @@ final class NoteHelpers {
         return NoteHelp.providerChoice(named: pick?.provider, available: available, chat: app.chatProvider?.rawValue)
     }
 
-    /// The provider, or the run fails saying which isn't set up (with Settings › AI's button).
+    /// The provider, or the run fails saying which isn't set up (with Settings › Petal AI's button).
     private func providerOrFail(_ run: Run, for pick: NoteHelp.Model?) -> Provider? {
         switch provider(for: pick) {
         case .use(let id): return Provider(rawValue: id)

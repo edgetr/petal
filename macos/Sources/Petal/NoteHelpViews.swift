@@ -92,29 +92,29 @@ struct InkView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(heading ?? ink.heading).font(.system(size: 11, weight: .semibold)).opacity(0.85)
+            Text(heading ?? ink.heading).font(.system(size: TextSize.small, weight: .semibold)).opacity(0.85)
             // The whole answer is kept in the note; only the paper shortens it (dragging it out gives all of it).
-            Text(ink.text).font(.system(size: 13.5)).lineSpacing(13.5 * 0.45 - 3).lineLimit(14).truncationMode(.tail)
+            Text(ink.text).font(.system(size: TextSize.body)).lineSpacing(PaperLook.openSpacing).lineLimit(14).truncationMode(.tail)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .help(ink.text.count > 600 ? "Drag it out for the whole answer" : "")
             // The finish line the person set, apart from the evidence; no "Proof:" line, said plainly (never a badge).
             if !ink.finish.isEmpty {
-                Text("Done means: " + ink.finish).font(.system(size: 11)).foregroundStyle(HelperLook.grey).padding(.top, 4)
+                Text("Done means: " + ink.finish).font(.system(size: TextSize.small)).foregroundStyle(HelperLook.grey).padding(.top, 4)
             }
             if ink.missingProof {
-                Text("No proof given").font(.system(size: 11)).foregroundStyle(HelperLook.grey).padding(.top, 2)
+                Text("No proof given").font(.system(size: TextSize.small)).foregroundStyle(HelperLook.grey).padding(.top, 2)
             }
             if ink.link == NoteHelp.settingsLink {
-                NoteButton(title: "Open Settings › AI") { PetalApp.shared.settings.show(.claude) }.padding(.top, 6)
+                NoteButton(title: "Open Settings › Petal AI") { PetalApp.shared.settings.show(.claude) }.padding(.top, 6)
             }
             if !ink.proof.isEmpty {
                 HStack(spacing: 6) {
                     ForEach(Array(ink.proof.enumerated()), id: \.offset) { _, item in
-                        Text(item).font(.system(size: 9, weight: .bold)).foregroundStyle(HelperLook.proofGreen).lineLimit(2).multilineTextAlignment(.center)
+                        Text(item).font(.system(size: TextSize.micro, weight: .semibold)).foregroundStyle(HelperLook.proofGreen).lineLimit(2).multilineTextAlignment(.center)
                             .frame(width: 52, height: 34)
-                            .background(Color(white: 0.949), in: .rect(cornerRadius: 5))
-                            .overlay { RoundedRectangle(cornerRadius: 5).stroke(.black.opacity(0.15), lineWidth: 0.5) }
+                            .background(Color(white: 0.949), in: .rect(cornerRadius: Radius.chip))
+                            .overlay { RoundedRectangle(cornerRadius: Radius.chip).stroke(.black.opacity(0.15), lineWidth: 0.5) }
                             .onTapGesture { NoteTasks.openWeb(ink.link) }
                     }
                 }
@@ -161,10 +161,10 @@ struct CalcLine: View {
         let currency = NoteHelp.amounts(body_).first?.currency ?? ""
         let result = NoteHelp.evaluate(calc.formula, values: values)
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(calc.label.isEmpty ? "Total" : calc.label).font(.system(size: 11, weight: .semibold)).opacity(0.85)
-            Text(result.map { NoteHelp.format($0, currency: currency, thousands: false) } ?? "can't add up").font(.system(size: 17, weight: .bold)).tracking(-0.3)
+            Text(calc.label.isEmpty ? "Total" : calc.label).font(.system(size: TextSize.small, weight: .semibold)).opacity(0.85)
+            Text(result.map { NoteHelp.format($0, currency: currency, thousands: false) } ?? "can't add up").font(.system(size: TextSize.subtitle, weight: .semibold)).tracking(-0.3)
             Spacer(minLength: 0)
-            Text("kept current").font(.system(size: 10.5)).foregroundStyle(HelperLook.grey)
+            Text("kept current").font(.system(size: TextSize.caption)).foregroundStyle(HelperLook.grey)
         }
         .foregroundStyle(glass ? Color.primary : HelperLook.ink(tint))
         .padding(.leading, 9)
@@ -208,10 +208,10 @@ struct SourceChipLabel: View {
     var underline = false
 
     var body: some View {
-        Text(text).font(.system(size: 11.5)).underline(underline).foregroundStyle(Color(white: 0.2)).lineLimit(1)
+        Text(text).font(.system(size: TextSize.small)).underline(underline).foregroundStyle(Color(white: 0.2)).lineLimit(1)
             .padding(.vertical, 3).padding(.horizontal, 8)
-            .background(HelperLook.chip(tint), in: .rect(cornerRadius: 6))
-            .overlay { RoundedRectangle(cornerRadius: 6).stroke(.black.opacity(0.12), lineWidth: 0.5) }
+            .background(HelperLook.chip(tint), in: .rect(cornerRadius: Radius.control))
+            .overlay { RoundedRectangle(cornerRadius: Radius.control).stroke(.black.opacity(0.12), lineWidth: 0.5) }
     }
 }
 
@@ -238,12 +238,12 @@ struct HelperBar: View {
         VStack(alignment: .leading, spacing: 8) {
             // A faint word (a bare @Petal asks nothing).
             if let hint = desk?.helpers.hints[noteID] {
-                Text(hint).font(.system(size: 11)).foregroundStyle(glass ? Color.secondary.opacity(0.7) : PaperLook.footer.opacity(0.7))
+                Text(hint).font(.system(size: TextSize.small)).foregroundStyle(glass ? Color.secondary.opacity(0.7) : PaperLook.footer.opacity(0.7))
             }
             if working {
                 HStack(spacing: 7) {
                     PulseDot(color: PaperLook.color(tint), pulsing: run.map { !$0.paused } ?? (helper?.state == .working))
-                    Text(Self.line(run: run, helper: helper, displays: app.displays)).font(.system(size: 11.5)).foregroundStyle(glass ? Color.secondary : PaperLook.footer).lineLimit(1)
+                    Text(Self.line(run: run, helper: helper, displays: app.displays)).font(.system(size: TextSize.small)).foregroundStyle(glass ? Color.secondary : PaperLook.footer).lineLimit(1)
                     Spacer(minLength: 6)
                     // It works on a hidden display of its own: its window comes to the person's screen.
                     if let caller = run?.sticky?.id.uuidString, app.displays.display(for: caller) != nil {
@@ -257,8 +257,8 @@ struct HelperBar: View {
             }
             if !denials.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("\(run?.who ?? "Petal") wants to run:").font(.system(size: 11.5, weight: .semibold))
-                    Text(denials.map(\.label).joined(separator: "\n")).font(.system(size: 11.5, design: .monospaced)).lineLimit(4)
+                    Text("\(run?.who ?? "Petal") wants to run:").font(.system(size: TextSize.small, weight: .semibold))
+                    Text(denials.map(\.label).joined(separator: "\n")).font(.system(size: TextSize.small, design: .monospaced)).lineLimit(4)
                     HStack(spacing: 6) {
                         Spacer()
                         NoteButton(title: "Don't", primary: true) { desk?.helpers.denyDenials(noteID) }
@@ -271,8 +271,8 @@ struct HelperBar: View {
                 // Its words scroll within what this screen has room for; its buttons, measured, always below them.
                 AskRequestView(request: request, room: formRoom).id(request.id).padding(10)
                     .onPreferenceChange(FormActionsHeight.self) { actionsHeight = $0 }
-                    .background(.white.opacity(0.6), in: .rect(cornerRadius: 10))
-                    .overlay { RoundedRectangle(cornerRadius: 10).stroke(.black.opacity(0.1), lineWidth: 0.5) }
+                    .background(.white.opacity(0.6), in: .rect(cornerRadius: Radius.control))   // a card on the paper: a step under the paper's own corner
+                    .overlay { RoundedRectangle(cornerRadius: Radius.control).stroke(.black.opacity(0.1), lineWidth: 0.5) }
                     .environment(\.colorScheme, .light)
             }
         }
@@ -302,9 +302,9 @@ struct NoteButton: View {
 
     var body: some View {
         Button(action: action) {
-            Text(title).font(.system(size: 12)).foregroundStyle(primary ? Color.white : Color(white: 0.13))
+            Text(title).font(.system(size: TextSize.callout)).foregroundStyle(primary ? Color.white : Color(white: 0.13))
                 .padding(.vertical, 4).padding(.horizontal, 12)
-                .background(primary ? Color(white: 0.114) : Color.black.opacity(0.07), in: .rect(cornerRadius: 7))
+                .background(primary ? Color(white: 0.114) : Color.black.opacity(0.07), in: .rect(cornerRadius: Radius.control))
                 .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -337,8 +337,8 @@ struct HelperBack: View {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(Array(file.steps.suffix(12).enumerated()), id: \.offset) { _, step in
                         HStack(alignment: .firstTextBaseline, spacing: 7) {
-                            Text("✓").font(.system(size: 11, weight: .bold)).foregroundStyle(HelperLook.mentionInk(tint))
-                            Text(step).font(.system(size: 12.5)).foregroundStyle(glass ? Color.primary : PaperLook.words).lineLimit(2)
+                            Text("✓").font(.system(size: TextSize.small, weight: .semibold)).foregroundStyle(HelperLook.mentionInk(tint))
+                            Text(step).font(.system(size: TextSize.callout)).foregroundStyle(glass ? Color.primary : PaperLook.words).lineLimit(2)
                         }
                         .frame(minHeight: 20, alignment: .leading)
                     }
@@ -352,7 +352,7 @@ struct HelperBack: View {
                         }
                     }
                 }
-                Text(footnote(file)).font(.system(size: 11)).foregroundStyle(glass ? Color.secondary : Color(white: 0.53))
+                Text(footnote(file)).font(.system(size: TextSize.small)).foregroundStyle(glass ? Color.secondary : Color(white: 0.53))
             }
         }
     }
@@ -370,9 +370,9 @@ struct StampView: View {
     let tint: NoteInk.RGB
 
     var body: some View {
-        Text(label).font(.system(size: 10, weight: .bold)).tracking(0.4).lineLimit(1)
+        Text(label).font(.system(size: TextSize.caption, weight: .semibold)).tracking(0.4).lineLimit(1)
             .padding(.vertical, 2).padding(.horizontal, 6)
-            .overlay { RoundedRectangle(cornerRadius: 5).stroke(lineWidth: 1.5) }
+            .overlay { RoundedRectangle(cornerRadius: Radius.chip).stroke(lineWidth: 1.5) }
             .foregroundStyle(HelperLook.stamp(tint))
             .opacity(0.75)
             .rotationEffect(.degrees(-4))
@@ -390,15 +390,15 @@ struct WatchCorner: View {
         let corner = NoteHelp.corner(watch)
         VStack(alignment: .trailing, spacing: 0) {
             if let number = corner?.number {
-                Text(number).font(.system(size: 24, weight: .bold)).tracking(-0.48)
+                Text(number).font(.system(size: TextSize.title, weight: .semibold)).tracking(-0.48)
                     .foregroundStyle(glass ? Color.primary : HelperLook.number(tint)).lineLimit(1).minimumScaleFactor(0.6)
             }
             if !watch.history.isEmpty {
-                Text(watch.history.prefix(2).joined(separator: " · ")).font(.system(size: 11)).strikethrough().foregroundStyle(Color(white: 0.6)).lineLimit(1)
+                Text(watch.history.prefix(2).joined(separator: " · ")).font(.system(size: TextSize.small)).strikethrough().foregroundStyle(Color(white: 0.6)).lineLimit(1)
             }
             // A crossing that couldn't be confirmed: its number, faint; the last accepted value stays above it.
             if let faint = corner?.faint {
-                Text(faint).font(.system(size: 10.5)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
+                Text(faint).font(.system(size: TextSize.caption)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
             }
         }
     }
@@ -467,14 +467,14 @@ enum MentionLine {
             if binding.at {
                 words.backgroundColor = HelperLook.mention(tint)
                 words.foregroundColor = HelperLook.mentionInk(tint)
-                words.font = .system(size: 13.5, weight: .semibold)
+                words.font = .system(size: TextSize.body, weight: .semibold)
             } else {
                 words.underlineStyle = Text.LineStyle(pattern: .dot, color: HelperLook.mentionInk(tint).opacity(0.6))
             }
             out += words
             if !binding.chip.isEmpty {
                 var chip = AttributedString(" " + binding.chip)
-                chip.font = .system(size: 10, weight: .medium)
+                chip.font = .system(size: TextSize.caption, weight: .medium)
                 chip.baselineOffset = 2
                 chip.foregroundColor = HelperLook.mentionInk(tint).opacity(0.65)
                 if binding.at { chip.backgroundColor = HelperLook.mention(tint) }

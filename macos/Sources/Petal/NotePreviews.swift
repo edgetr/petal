@@ -187,27 +187,27 @@ struct NoteTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack {
-                RoundedRectangle(cornerRadius: 10).fill(.black.opacity(0.25))
+                RoundedRectangle(cornerRadius: Radius.tile).fill(.black.opacity(0.25))
                 if item.display != nil {
                     // Its own display, live; before the first picture (or without Screen Recording), a plain mark.
                     if let shown = app.previews.displayThumb(item) {
                         Image(nsImage: shown).resizable().scaledToFit().padding(3)
                     } else {
-                        Image(systemName: "display").font(.system(size: 30, weight: .light)).foregroundStyle(.white.opacity(0.7))
+                        Image(systemName: "display").font(.system(size: TextSize.large, weight: .light)).foregroundStyle(.white.opacity(0.7))
                     }
                 } else if let image, item.pictured {
                     Image(nsImage: image).resizable().scaledToFit().padding(3)
                 } else if item.attached {
                     VStack(spacing: 6) {
                         AppIconView(id: item.app, size: 36)
-                        if item.hidden { Text("Kept private").font(.system(size: 11)).foregroundStyle(.secondary) }
+                        if item.hidden { Text("Kept private").font(.system(size: TextSize.small)).foregroundStyle(.secondary) }
                     }
                 } else {
                     ProviderMark(provider: app.chatProvider).foregroundStyle(.white.opacity(0.7)).frame(width: 30, height: 30)
                 }
             }
             .frame(width: 200, height: 124)
-            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(hovering ? Color(nsColor: app.accent) : .white.opacity(0.12),
+            .overlay(RoundedRectangle(cornerRadius: Radius.tile).strokeBorder(hovering ? Color(nsColor: app.accent) : .white.opacity(0.12),
                                                                     lineWidth: hovering ? 2 : 1))
             .overlay(alignment: .topTrailing) {
                 if item.working { RoundButton(symbol: "stop.fill", size: 22) { app.claude.stopFromPreview(item.id) }.padding(6).help("Stop") }
@@ -220,11 +220,11 @@ struct NoteTile: View {
             HStack(spacing: 6) {
                 if item.attached { AppIconView(id: item.app, size: 14) }
                 Text(item.title.isEmpty ? (item.appName.isEmpty ? "Petal AI" : item.appName) : item.title)
-                    .font(.system(size: 12, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                    .font(.system(size: TextSize.callout, weight: .medium)).lineLimit(1).truncationMode(.tail)
             }
             HStack(alignment: .firstTextBaseline, spacing: 5) {
                 if item.needsYou { Circle().fill(Color(nsColor: app.accent)).frame(width: 6, height: 6) }
-                Text(item.line).font(.system(size: 11.5)).foregroundStyle(item.needsYou ? .primary : .secondary)
+                Text(item.line).font(.system(size: TextSize.small)).foregroundStyle(item.needsYou ? .primary : .secondary)
                     .lineLimit(2).fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -242,7 +242,7 @@ struct ShowMeButton: View {
 
     var body: some View {
         Button(action: action) {
-            Text("Show me").font(.system(size: 11, weight: .medium))
+            Text("Show me").font(.system(size: TextSize.small, weight: .medium))
                 .padding(.horizontal, 9).frame(height: 22)
                 .glassEffect(hovering ? .clear.tint(Color(nsColor: PetalApp.shared.accent)).interactive() : .clear.interactive(), in: .capsule)
                 .contentShape(.capsule)
@@ -264,15 +264,15 @@ struct NoteActivityLine: View {
         HStack(spacing: 6) {
             if let needs = agent.needs {
                 Circle().fill(Color(nsColor: app.accent)).frame(width: 6, height: 6)
-                Text("Waiting for you: " + needs).font(.system(size: 11.5)).lineLimit(1).truncationMode(.tail)
+                Text("Waiting for you: " + needs).font(.system(size: TextSize.small)).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 8)
                 if note.attached, let place = note.place {
                     Button("Bring it forward") { panel.go(to: note, place: place) }
-                        .buttonStyle(.plain).font(.system(size: 11.5, weight: .medium)).foregroundStyle(Color(nsColor: app.accent))
+                        .buttonStyle(.plain).font(.system(size: TextSize.small, weight: .medium)).foregroundStyle(Color(nsColor: app.accent))
                 }
             } else {
-                Image(systemName: "moon.zzz").font(.system(size: 10)).foregroundStyle(.secondary)
-                Text("In the background · " + NoteStatus.step(agent.activity.text)).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                Image(systemName: "moon.zzz").font(.system(size: TextSize.caption)).foregroundStyle(.secondary)
+                Text("In the background · " + NoteStatus.step(agent.activity.text)).font(.system(size: TextSize.small)).foregroundStyle(.secondary)
                     .lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
             }

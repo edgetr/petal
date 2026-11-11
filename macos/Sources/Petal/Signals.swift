@@ -13,6 +13,8 @@ final class Signals {
     private(set) var progress: [String: Double] = [:]
     private(set) var nowPlaying: NowPlaying?
     private(set) var artwork: NSImage?
+    /// Music or Spotify, running and not yet asked whether Petal may see what's playing: its preview offers to ask.
+    private(set) var playersWaiting: Set<String> = []
     private(set) var trashEmpty = true
     /// Stack folders with something new since the stack was last opened: a dot on the stack.
     private(set) var fresh: Set<String> = []
@@ -80,9 +82,11 @@ final class Signals {
         asking = true
         NowPlaying.queue.async {
             let current = NowPlaying.current()
+            let waiting = NowPlaying.waiting()
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.asking = false
+                    if waiting != self.playersWaiting { self.playersWaiting = waiting }
                     if current != self.nowPlaying {
                         let newTrack = current?.title != self.nowPlaying?.title || current?.player != self.nowPlaying?.player
                         self.nowPlaying = current
@@ -176,11 +180,23 @@ final class Signals {
     /// The Trash after something is dropped on it or it's emptied, without waiting for the next look.
     func lookAtTrash() { folders.look(Stacks.trashFolder) }
 
+    /// "Show what's playing…" in a player's preview: macOS asks the person once for that player, then it's looked at
+    /// again. A player that isn't running any more is asked nothing.
+    func askPlayer(_ id: String) {
+        guard playersWaiting.contains(id) else { return }
+        PetalApp.shared.browsers.ask(id) { [weak self] _ in
+            guard let self else { return }
+            self.playersWaiting.remove(id)
+            if !self.asking { self.askNowPlaying() }
+        }
+    }
+
     /// What `Petal --snapshot` draws the dock with.
-    func preview(trashEmpty: Bool, fresh: Set<String>, nowPlaying: NowPlaying?) {
+    func preview(trashEmpty: Bool, fresh: Set<String>, nowPlaying: NowPlaying?, playersWaiting: Set<String> = []) {
         self.trashEmpty = trashEmpty
         self.fresh = fresh
         self.nowPlaying = nowPlaying
+        self.playersWaiting = playersWaiting
     }
 
     /// Bounces an app once (IPC testBounce).
@@ -279,7 +295,9 @@ final class Signals {
 }
 
 /// The track playing in Music or Spotify. macOS keeps its system-wide now playing to Apple's own apps, so Petal
-/// asks the two players directly; macOS asks the person once before Petal may (Automation).
+/// asks the two players directly; macOS asks the person once before Petal may (Automation). Never by surprise: only
+/// a player that already said yes is asked anything, and one that hasn't been asked yet gets a line in its preview
+/// ("Show what's playing…", `Signals.askPlayer`), or its row in settings.
 struct NowPlaying: Equatable {
     let player: String   // bundle id
     let title: String
@@ -291,7 +309,8 @@ struct NowPlaying: Equatable {
     static let queue = DispatchQueue(label: "petal.nowplaying")
 
     nonisolated static func current() -> NowPlaying? {
-        for id in players where NSRunningApplication.runningApplications(withBundleIdentifier: id).first != nil {
+        for id in players where NSRunningApplication.runningApplications(withBundleIdentifier: id).first != nil
+            && Browsers.access(id) == .allowed {
             let app = id == "com.spotify.client" ? "Spotify" : "Music"
             let artwork = id == "com.spotify.client" ? "artwork url of current track" : "\"\""
             let script = """
@@ -310,6 +329,12 @@ struct NowPlaying: Equatable {
                               artwork: parts.count > 3 ? URL(string: parts[3]) : nil)
         }
         return nil
+    }
+
+    /// The players running now that haven't been asked yet. Each is looked at here, without prompting, whatever
+    /// `current` did: it stops at the first player with a song, so a second one would never be looked at.
+    nonisolated static func waiting() -> Set<String> {
+        Set(players.filter { Browsers.access($0) == .notAsked })
     }
 
     /// "playpause", "next track", "previous track".

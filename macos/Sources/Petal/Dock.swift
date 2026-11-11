@@ -1521,7 +1521,7 @@ struct Badge: View {
         let height = icon * 0.42
         let label = (Int(text) ?? 0) > 99 ? "99+" : text
         Text(label)
-            .font(.system(size: height * 0.62, weight: .bold))
+            .font(.system(size: height * 0.62, weight: .semibold))
             .foregroundStyle(.white)
             .padding(.horizontal, 4)
             .frame(minWidth: height, minHeight: height)

@@ -89,12 +89,12 @@ struct VaultFormView: View {
     private var fields: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline) {
-                Text(request.title).font(.system(size: 13, weight: .semibold))
+                Text(request.title).font(.system(size: TextSize.body, weight: .semibold))
                 Spacer(minLength: 8)
                 RoundButton(symbol: "xmark") { app.assist.choose(.no, for: request.id) }
             }
             if !request.detail.isEmpty {
-                Text(request.detail).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(request.detail).font(.system(size: TextSize.callout)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if [.apiKey, .address].contains(form.kind) {
                 labelled(form.kind == .address ? "Label (Home, Work…)" : "Name") { TextField(form.kind == .address ? "Home" : "OpenAI", text: $answer.title) }
@@ -108,7 +108,7 @@ struct VaultFormView: View {
                 labelled("Service (website)") { TextField("platform.openai.com", text: $answer.site) }
             }
             if form.fills && form.kind == .login {
-                Toggle("Save to your vault", isOn: $answer.save).toggleStyle(.checkbox).font(.system(size: 13))
+                Toggle("Save to your vault", isOn: $answer.save).toggleStyle(.checkbox).font(.system(size: TextSize.body))
             }
         }
     }
@@ -116,7 +116,7 @@ struct VaultFormView: View {
     /// Submit (or Save): never inside the scroll.
     private var actions: some View {
             HStack(alignment: .center, spacing: 10) {
-                Text(form.footnote).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                Text(form.footnote).font(.system(size: TextSize.small)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
                 Button(form.fills ? "Submit" : "Save") { submit() }
                     .buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
@@ -143,7 +143,7 @@ struct VaultFormView: View {
 
     private func labelled<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(label).font(.system(size: 12)).foregroundStyle(.secondary)
+            Text(label).font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
             content().textFieldStyle(.roundedBorder).controlSize(.large)
         }
     }
@@ -191,9 +191,8 @@ struct VaultSettings: View {
 
     var body: some View {
         let _ = BodyCount.hit("VaultSettings")
-        VStack(alignment: .leading, spacing: 14) {
-            Card {
-                tabs
+        VStack(alignment: .leading, spacing: SettingsLook.between) {
+            VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     HStack(spacing: 6) {
                         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -210,26 +209,27 @@ struct VaultSettings: View {
                     }
                     .menuStyle(.button).buttonStyle(.glass).fixedSize()
                 }
+                tabs
             }
             if let editing {
                 VaultEditor(item: editing, isNew: isNew) { self.editing = nil }
                     .id(editing.id + editing.kind.rawValue)
             }
-            if tab == nil, model.loaded, !model.unreadable, !unsorted.isEmpty { sortCard }
-            Card {
+            if tab == nil, model.loaded, !model.unreadable, !unsorted.isEmpty { sortGroup }
+            SettingsGroup(footer: "Petal AI never sees a password, card number, security code or key.") {
                 let shown = filtered
                 if !model.loaded && !snapshotting {
                     ProgressView().controlSize(.small)
                 } else if model.unreadable {
                     HStack {
                         Text("Your vault can't be read right now. The Keychain didn't answer, or the Mac is locked.")
-                            .font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            .font(.system(size: TextSize.callout)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         Spacer()
                         Button("Try Again") { model.load() }.buttonStyle(.glass)
                     }
                 } else if shown.isEmpty {
-                    Text(model.items.isEmpty ? "Nothing yet. Add an item, import an export, or let Petal AI ask for what it needs." : "Nothing matches.")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(model.items.isEmpty ? "Nothing yet." : "Nothing matches.")
+                        .font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
                 }
                 // Every row, not lazily: a lazy list on this page sets AppKit's constraint updates looping as the
                 // page comes in (the window stops updating, or AppKit throws).
@@ -240,9 +240,6 @@ struct VaultSettings: View {
             }
             AgentsCard()
             transfer
-            Text("Petal AI never sees a password, card number, security code or key. It sees usernames, contact info and addresses so it can type them in for you.")
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, 4)
         }
         .onAppear { if !snapshotting { model.load() } }
         .modifier(DropExport(on: !snapshotting, dropping: $dropping) { importFile($0) })
@@ -253,9 +250,8 @@ struct VaultSettings: View {
         model.items.filter { $0.kind == .unsorted }.sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
     }
 
-    private var sortCard: some View {
-        Card(title: "Sort these: tell Petal what each one is",
-             footer: "Petal asks before filling these anywhere. Once you say what one is, it fills like the rest.") {
+    private var sortGroup: some View {
+        SettingsGroup(title: "Tell Petal what each one is", footer: "Until then, Petal asks before filling them.") {
             ForEach(unsorted) { item in
                 HStack(spacing: 8) {
                     Button { isNew = false; editing = item } label: { VaultRow(item: item) }
@@ -273,14 +269,16 @@ struct VaultSettings: View {
         }
     }
 
+    /// A kind, with how many it holds: the one showing is clear glass of its own, the others only their words.
     private func tabButton(_ kind: VaultKind?, _ title: String, _ count: Int) -> some View {
         Button { tab = kind } label: {
             HStack(spacing: 4) {
-                Text(title).font(.system(size: 12, weight: tab == kind ? .semibold : .regular))
-                Text("\(count)").font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                Text(title).font(.system(size: TextSize.callout, weight: tab == kind ? .semibold : .regular))
+                Text("\(count)").font(.system(size: TextSize.small).monospacedDigit()).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 9).padding(.vertical, 5)
-            .glassEffect(tab == kind ? .clear.tint(Color(nsColor: app.accent).opacity(0.55)).interactive() : .clear.interactive(), in: .capsule)
+            .contentShape(.capsule)
+            .glassEffect(tab == kind ? .clear.interactive() : .identity, in: .capsule)
         }
         .buttonStyle(.plain)
     }
@@ -305,35 +303,33 @@ struct VaultSettings: View {
     // MARK: Import and export
 
     private var transfer: some View {
-        Card(title: "Import and export", footer: "An export holds your passwords, cards and keys as plain text. Keep it somewhere safe, and move it to the Trash once you're done with it.") {
-            HStack(spacing: 8) {
-                Button("Import…") { chooseImport() }.buttonStyle(.glass)
-                Menu("Export…") {
+        SettingsGroup(title: "Import and export", footer: "An export holds your secrets as plain text.") {
+            SettingRow(title: "Import", help: "From Apple Passwords, Chrome, Proton Pass or Petal") {
+                Text(dropping ? "Drop it here" : "or drop a file here").font(.system(size: TextSize.small)).foregroundStyle(.secondary)
+                Button("Choose…") { chooseImport() }.buttonStyle(.glass)
+            }
+            if let imported { importedRow(imported) }
+            SettingRow(title: "Export") {
+                Menu("Choose…") {
                     Button("Everything, as a Petal file") { export(.petal) }
                     Button("Logins, as CSV (Apple Passwords, Chrome)") { export(.csv) }
                 }
                 .menuStyle(.button).buttonStyle(.glass).fixedSize()
-                Spacer()
-                Text(dropping ? "Drop it here" : "Or drop an export on this page")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
-            Text("Apple Passwords, Chrome and Proton Pass exports (CSV, or Proton Pass's unencrypted JSON or zip), and Petal's own file.")
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            if let imported { importedRow(imported) }
-            if let exported { Text(exported).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true) }
+            if let exported { Text(exported).font(.system(size: TextSize.callout)).fixedSize(horizontal: false, vertical: true) }
         }
     }
 
     @ViewBuilder private func importedRow(_ result: VaultModel.Imported) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if let failed = result.failed {
-                Text(failed).font(.system(size: 12)).foregroundStyle(.secondary)
+                Text(failed).font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
             } else {
-                Text(Self.summary(result)).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                Text(Self.summary(result)).font(.system(size: TextSize.callout)).fixedSize(horizontal: false, vertical: true)
                 if !result.conflicts.isEmpty {
                     HStack(spacing: 8) {
                         Text(result.usedImported ? Self.usedText(result.usedSkipped, of: result.conflicts.count) : Self.conflictText(result.conflicts))
-                            .font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                            .font(.system(size: TextSize.callout)).fixedSize(horizontal: false, vertical: true)
                         Spacer()
                         if !result.usedImported {
                             Button("Use the imported ones") {
@@ -347,10 +343,10 @@ struct VaultSettings: View {
                 }
             }
             if result.trashed {
-                Label("The export is in the Trash.", systemImage: "trash").font(.system(size: 12)).foregroundStyle(.secondary)
+                Label("The export is in the Trash.", systemImage: "trash").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
             } else if result.failed == nil {
                 HStack(spacing: 8) {
-                    Text("The file still holds every password as plain text.").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Text("The file still holds every password as plain text.").font(.system(size: TextSize.small)).foregroundStyle(.secondary)
                     Spacer()
                     Button("Move it to the Trash") {
                         model.trash(result.file) { ok in if ok { imported?.trashed = true } }
@@ -455,16 +451,17 @@ struct VaultRow: View {
     var body: some View {
         let _ = BodyCount.hit("VaultRow")
         HStack(spacing: 10) {
-            Image(systemName: item.kind.symbol).font(.system(size: 12, weight: .semibold))
-                .frame(width: 28, height: 28).glassEffect(.clear, in: .circle)
+            Image(systemName: item.kind.symbol).font(.system(size: TextSize.small, weight: .semibold))
+                .foregroundStyle(Part.vault.onColor)
+                .frame(width: 24, height: 24).background(Part.vault.color, in: .rect(cornerRadius: Radius.control))
             VStack(alignment: .leading, spacing: 1) {
-                Text(item.title.isEmpty ? item.kind.name : item.title).font(.system(size: 13))
+                Text(item.title.isEmpty ? item.kind.name : item.title).font(.system(size: TextSize.body))
                 let subtitle = Vault.subtitle(item)
-                if !subtitle.isEmpty { Text(subtitle).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1) }
+                if !subtitle.isEmpty { Text(subtitle).font(.system(size: TextSize.small)).foregroundStyle(.secondary).lineLimit(1) }
             }
             Spacer(minLength: 8)
-            if showKind { Text(item.kind.name).font(.system(size: 11)).foregroundStyle(.secondary) }
-            Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(.tertiary)
+            if showKind { Text(item.kind.name).font(.system(size: TextSize.small)).foregroundStyle(.secondary) }
+            Image(systemName: "chevron.right").font(.system(size: TextSize.caption, weight: .semibold)).foregroundStyle(.tertiary)
         }
         .contentShape(.rect)
         .padding(.vertical, 2)
@@ -522,52 +519,54 @@ struct VaultEditor: View {
     }
 
     var body: some View {
-        Card(title: isNew ? "New \(item.kind.name.lowercased())" : sorting ? "\(item.kind.name) (was unsorted)" : item.kind.name) {
-            row(titleLabel) { TextField(titlePrompt, text: $item.title) }
-            if item.kind == .unsorted {
-                row("What is it?") {
-                    HStack {
-                        Text("Petal asks before filling it anywhere until you say.").font(.system(size: 12)).foregroundStyle(.secondary)
-                        Spacer(minLength: 8)
-                        SortMenu(label: "Choose…") { kind in item = Vault.sort(item, as: kind) }
-                    }
-                }
-            }
-            if item.kind == .login || item.kind == .apiKey {
-                row(item.kind == .login ? "Websites" : "Service (website)") {
-                    TextField(item.kind == .login ? "github.com, gist.github.com" : "platform.openai.com", text: $sites)
-                }
-            }
-            if item.kind == .login { apps }
-            if item.kind == .address { contactPicker }
-            ForEach(item.kind.fields, id: \.self) { field in
-                if field == .relationship {
-                    row(field.label(item.kind)) {
+        SettingsGroup(title: isNew ? "New \(item.kind.name.lowercased())" : sorting ? "\(item.kind.name) (was unsorted)" : item.kind.name) {
+            VStack(alignment: .leading, spacing: 10) {
+                row(titleLabel) { TextField(titlePrompt, text: $item.title) }
+                if item.kind == .unsorted {
+                    row("What is it?") {
                         HStack {
-                            TextField("girlfriend, mom, friend…", text: binding(field)).disabled(item.isMe)
-                            Toggle("This is me", isOn: Binding(get: { item.isMe }, set: { item[.relationship] = $0 ? "me" : "" }))
-                                .toggleStyle(.checkbox).fixedSize()
+                            Text("Petal asks before filling it anywhere until you say.").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
+                            Spacer(minLength: 8)
+                            SortMenu(label: "Choose…") { kind in item = Vault.sort(item, as: kind) }
                         }
                     }
-                } else {
-                    row(field.label(item.kind)) { entry(field) }
                 }
-            }
-            row("Notes") { entry(.notes) }
-            if let problem {
+                if item.kind == .login || item.kind == .apiKey {
+                    row(item.kind == .login ? "Websites" : "Service (website)") {
+                        TextField(item.kind == .login ? "github.com, gist.github.com" : "platform.openai.com", text: $sites)
+                    }
+                }
+                if item.kind == .login { apps }
+                if item.kind == .address { contactPicker }
+                ForEach(item.kind.fields, id: \.self) { field in
+                    if field == .relationship {
+                        row(field.label(item.kind)) {
+                            HStack {
+                                TextField("girlfriend, mom, friend…", text: binding(field)).disabled(item.isMe)
+                                Toggle("This is me", isOn: Binding(get: { item.isMe }, set: { item[.relationship] = $0 ? "me" : "" }))
+                                    .toggleStyle(.checkbox).fixedSize()
+                            }
+                        }
+                    } else {
+                        row(field.label(item.kind)) { entry(field) }
+                    }
+                }
+                row("Notes") { entry(.notes) }
+                if let problem {
+                    HStack(spacing: 8) {
+                        Text(problem).font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
+                        if stale { Button("Reload") { reload() }.buttonStyle(.glass) }
+                    }
+                }
                 HStack(spacing: 8) {
-                    Text(problem).font(.system(size: 12)).foregroundStyle(.secondary)
-                    if stale { Button("Reload") { reload() }.buttonStyle(.glass) }
+                    if !isNew {
+                        Button("Delete", role: .destructive) { model.remove(item.id); close() }.buttonStyle(.glass).disabled(saving)
+                    }
+                    Spacer()
+                    Button("Cancel") { close() }.buttonStyle(.glass).disabled(saving)
+                    Button(saving ? "Saving…" : "Save") { save() }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
+                        .disabled(saving || stale)
                 }
-            }
-            HStack(spacing: 8) {
-                if !isNew {
-                    Button("Delete", role: .destructive) { model.remove(item.id); close() }.buttonStyle(.glass).disabled(saving)
-                }
-                Spacer()
-                Button("Cancel") { close() }.buttonStyle(.glass).disabled(saving)
-                Button(saving ? "Saving…" : "Save") { save() }.buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
-                    .disabled(saving || stale)
             }
         }
     }
@@ -603,7 +602,7 @@ struct VaultEditor: View {
                         Button {
                             item.apps.removeAll { $0 == id }
                             item.appSigners[id] = nil
-                        } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
+                        } label: { Image(systemName: "xmark").font(.system(size: TextSize.micro, weight: .bold)) }
                             .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 8).padding(.vertical, 3)
@@ -640,7 +639,7 @@ struct VaultEditor: View {
 
     private func row<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(label).font(.system(size: 12)).foregroundStyle(.secondary).frame(width: 130, alignment: .trailing)
+            Text(label).font(.system(size: TextSize.callout)).foregroundStyle(.secondary).frame(width: SettingsLook.label, alignment: .trailing)
             content().textFieldStyle(.roundedBorder)
         }
     }
@@ -655,7 +654,7 @@ struct VaultEditor: View {
                 if showing.contains(field) {
                     TextField("", text: binding(field), axis: field == .notes ? .vertical : .horizontal).lineLimit(field == .notes ? 1...6 : 1...1)
                 } else if field == .notes && !item[field].isEmpty {
-                    Text("Hidden").font(.system(size: 12)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Hidden").font(.system(size: TextSize.callout)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     SecureField("", text: binding(field))
                 }
@@ -767,7 +766,7 @@ private struct LinkedApp: View {
             } else {
                 Image(systemName: "app").frame(width: 16, height: 16)
             }
-            Text(name ?? Apps.cachedName(id) ?? id).font(.system(size: 12))
+            Text(name ?? Apps.cachedName(id) ?? id).font(.system(size: TextSize.callout))
         }
         .task(id: id) {
             Apps.loadName(id) { name = $0 }

@@ -403,16 +403,16 @@ enum NoteRich {
         var petal: NSColor        // Petal's ink
         var accent: NSColor       // the notebook's color
 
-        static let body = NSFont.systemFont(ofSize: 13.5)
-        static func heading(_ level: Int) -> NSFont {
-            NSFont.systemFont(ofSize: level == 1 ? 17 : level == 2 ? 15 : 14, weight: .bold)
-        }
+        static let body = NSFont.systemFont(ofSize: TextSize.body)
+        /// A heading's size: the first two levels are larger than the words, the third is the words' own size, heavier.
+        static func headingSize(_ level: Int) -> CGFloat { level == 1 ? TextSize.subtitle : level == 2 ? TextSize.heading : TextSize.body }
+        static func heading(_ level: Int) -> NSFont { NSFont.systemFont(ofSize: headingSize(level), weight: .semibold) }
     }
 
     static func paragraph(_ level: Int = 0, ink: Bool = false) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
-        // The sketch's 1.45 line height for the words, tighter for headings.
-        style.lineHeightMultiple = level > 0 ? 1.05 : 1.12
+        // The sketch's 1.45 line height for the words (a line every 18 points), tighter for headings.
+        style.lineHeightMultiple = level > 0 ? 1.05 : 1.16
         style.paragraphSpacing = level > 0 ? 4 : 1
         if ink { style.firstLineHeadIndent = 11; style.headIndent = 11; style.paragraphSpacingBefore = 4; style.paragraphSpacing = 4 }
         return style
@@ -678,7 +678,7 @@ final class CheckCell: NSTextAttachmentCell {
 
     override func draw(withFrame frame: NSRect, in view: NSView?) {
         let box = NSRect(x: frame.minX + 0.5, y: frame.minY + 1, width: 13, height: 13)
-        let path = NSBezierPath(roundedRect: box, xRadius: 3.5, yRadius: 3.5)
+        let path = NSBezierPath(roundedRect: box, xRadius: Radius.chip, yRadius: Radius.chip)
         if done {
             color.setFill()
             path.fill()
@@ -725,7 +725,7 @@ final class LinkCell: NSTextAttachmentCell {
 
     override func draw(withFrame frame: NSRect, in view: NSView?) {
         let card = frame.insetBy(dx: 0.5, dy: 2)
-        let shape = NSBezierPath(roundedRect: card, xRadius: 9, yRadius: 9)
+        let shape = NSBezierPath(roundedRect: card, xRadius: Radius.control, yRadius: Radius.control)
         NSColor(white: 1, alpha: 0.75).setFill()
         shape.fill()
         NSColor(white: 0, alpha: 0.12).setStroke()
@@ -733,7 +733,7 @@ final class LinkCell: NSTextAttachmentCell {
         shape.stroke()
         let icon = NSRect(x: card.minX + 9, y: card.midY - 15, width: 30, height: 30)
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(roundedRect: icon, xRadius: 7, yRadius: 7).addClip()
+        NSBezierPath(roundedRect: icon, xRadius: Radius.chip, yRadius: Radius.chip).addClip()   // inside the card's corner
         if let image = MainActor.assumeIsolated({ Sites.shared.cachedIcon(url) }) {
             NSColor.white.setFill()
             icon.fill()
@@ -747,8 +747,8 @@ final class LinkCell: NSTextAttachmentCell {
         let host = NoteText.host(url)
         let left = icon.maxX + 9
         let words = NSRect(x: left, y: card.minY, width: card.maxX - left - 9, height: card.height)
-        let titleAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12, weight: .medium), .foregroundColor: NSColor(white: 0.13, alpha: 1)]
-        let siteAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor(white: 0.53, alpha: 1)]
+        let titleAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: TextSize.callout, weight: .medium), .foregroundColor: NSColor(white: 0.13, alpha: 1)]
+        let siteAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: TextSize.callout), .foregroundColor: NSColor(white: 0.53, alpha: 1)]
         let flipped = view?.isFlipped ?? true
         let top = flipped ? words.midY - 15 : words.midY + 1
         let bottom = flipped ? words.midY + 1 : words.midY - 15
@@ -805,7 +805,7 @@ final class PictureCell: NSTextAttachmentCell {
 
     override func draw(withFrame frame: NSRect, in view: NSView?) {
         let rect = frame.insetBy(dx: 0, dy: 6)
-        let shape = NSBezierPath(roundedRect: rect, xRadius: 9, yRadius: 9)
+        let shape = NSBezierPath(roundedRect: rect, xRadius: Radius.control, yRadius: Radius.control)
         NSGraphicsContext.saveGraphicsState()
         shape.addClip()
         if let image = picture {
@@ -826,12 +826,12 @@ final class PictureCell: NSTextAttachmentCell {
         shape.lineWidth = 0.5
         shape.stroke()
         guard !caption.isEmpty else { return }
-        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10.5), .foregroundColor: NSColor.white]
+        let attrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: TextSize.caption), .foregroundColor: NSColor.white]
         let size = (caption as NSString).size(withAttributes: attrs)
         let flipped = view?.isFlipped ?? true
         let chip = NSRect(x: rect.minX + 8, y: flipped ? rect.maxY - 6 - size.height - 2 : rect.minY + 6, width: min(rect.width - 16, size.width + 12), height: size.height + 2)
         NSColor(white: 0, alpha: 0.38).setFill()
-        NSBezierPath(roundedRect: chip, xRadius: 4, yRadius: 4).fill()
+        NSBezierPath(roundedRect: chip, xRadius: Radius.chip, yRadius: Radius.chip).fill()
         (caption as NSString).draw(with: chip.insetBy(dx: 6, dy: 1), options: [.truncatesLastVisibleLine, .usesLineFragmentOrigin], attributes: attrs)
     }
 }

@@ -1233,7 +1233,7 @@ struct NotePlaceLine: View {
         HStack(spacing: 6) {
             AppIconView(id: place.app, size: 14)
             Text(words)
-                .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                .font(.system(size: TextSize.small)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             Spacer(minLength: 8)
             if !gone { NoteScopeChip(panel: panel, place: place) }
         }
@@ -1286,9 +1286,9 @@ struct NoteScopeChip: View {
             .labelsHidden()
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "pin.fill").font(.system(size: 8.5))
-                Text(Self.name(place.kind, app: place.appName)).font(.system(size: 11.5)).lineLimit(1)
-                Image(systemName: "chevron.down").font(.system(size: 8, weight: .bold))
+                Image(systemName: "pin.fill").font(.system(size: TextSize.micro))
+                Text(Self.name(place.kind, app: place.appName)).font(.system(size: TextSize.small)).lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: TextSize.micro, weight: .bold))
             }
             .foregroundStyle(.secondary)
             .padding(.leading, 8).padding(.trailing, 7)

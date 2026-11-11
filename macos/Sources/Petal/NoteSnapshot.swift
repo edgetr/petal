@@ -254,12 +254,12 @@ extension Snapshot {
         let head = app.paper.letterhead(kept)
         let width: CGFloat = 560, height: CGFloat = 400
         let screenScene = ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 14).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
-                .overlay { RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+            RoundedRectangle(cornerRadius: Radius.card).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
+                .overlay { RoundedRectangle(cornerRadius: Radius.card).stroke(.black.opacity(0.25), lineWidth: 0.5) }
                 .frame(width: width, height: height)
             Rectangle().fill(Color(white: 0.95)).frame(width: width, height: 52)
-                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 14, topTrailingRadius: 14))
-            Text("This week").font(.system(size: 26, weight: .bold)).foregroundStyle(Color(white: 0.07)).offset(x: 44, y: 88)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: Radius.card, topTrailingRadius: Radius.card))
+            Text("This week").font(.system(size: TextSize.large, weight: .semibold)).foregroundStyle(Color(white: 0.07)).offset(x: 44, y: 88)
             ForEach(0..<8, id: \.self) { row in
                 Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([460, 400, 430, 300, 450, 380, 420, 260][row]), height: 9)
                     .offset(x: 44, y: 140 + CGFloat(row) * 24)
@@ -290,7 +290,7 @@ extension Snapshot {
         let head = app.paper.letterhead(sentence)
         let color = app.paper.store.color(of: sentence.notebook)
         // The sentence: its words' place in the line, measured.
-        let font = NSFont.systemFont(ofSize: 14.5)
+        let font = NSFont.systemFont(ofSize: TextSize.heading)
         let before = "Registration is in the main hall. ", quote = "Doors open at 8.", after = " Talks start at 9."
         let measure = { (text: String) in ceil((text as NSString).size(withAttributes: [.font: font]).width) }
         let left: CGFloat = 44, line: CGFloat = 132, lineHeight: CGFloat = 20
@@ -298,20 +298,20 @@ extension Snapshot {
         let note = CGPoint(x: width + 26 + 120, y: 100)
         return ZStack(alignment: .topLeading) {
             // The window.
-            RoundedRectangle(cornerRadius: 14).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
-                .overlay { RoundedRectangle(cornerRadius: 14).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+            RoundedRectangle(cornerRadius: Radius.card).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
+                .overlay { RoundedRectangle(cornerRadius: Radius.card).stroke(.black.opacity(0.25), lineWidth: 0.5) }
                 .frame(width: width, height: height)
             Rectangle().fill(Color(white: 0.95)).frame(width: width, height: 52)
-                .clipShape(UnevenRoundedRectangle(topLeadingRadius: 14, topTrailingRadius: 14))
-            Text("Day one").font(.system(size: 26, weight: .bold)).foregroundStyle(Color(white: 0.07)).offset(x: left, y: 88)
-            RoundedRectangle(cornerRadius: 3).fill(Color(.sRGB, red: 0, green: 0.48, blue: 1, opacity: 0.24))
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: Radius.card, topTrailingRadius: Radius.card))
+            Text("Day one").font(.system(size: TextSize.large, weight: .semibold)).foregroundStyle(Color(white: 0.07)).offset(x: left, y: 88)
+            RoundedRectangle(cornerRadius: Radius.chip).fill(Color(.sRGB, red: 0, green: 0.48, blue: 1, opacity: 0.24))
                 .frame(width: quoteWidth + 4, height: lineHeight).offset(x: quoteX - 2, y: line - 1)
             Text(before + quote + after).font(Font(font)).foregroundStyle(Color(white: 0.27)).fixedSize()
                 .frame(height: lineHeight - 2).offset(x: left, y: line)
             ForEach(0..<3, id: \.self) { row in
                 Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([520, 440, 480][row]), height: 9).offset(x: left, y: 166 + CGFloat(row) * 20)
             }
-            Text("Where to eat").font(.system(size: 18, weight: .bold)).foregroundStyle(Color(white: 0.07)).offset(x: left, y: 242)
+            Text("Where to eat").font(.system(size: TextSize.subtitle, weight: .semibold)).foregroundStyle(Color(white: 0.07)).offset(x: left, y: 242)
             ForEach(0..<4, id: \.self) { row in
                 Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([500, 410, 470, 360][row]), height: 9).offset(x: left, y: 278 + CGFloat(row) * 20)
             }

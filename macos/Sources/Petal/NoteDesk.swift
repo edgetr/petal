@@ -2774,6 +2774,14 @@ final class NoteDesk {
             also.submenu = sub
             menu.addItem(also)
         }
+        // A browser in front that hasn't been asked for its tabs yet: until it is, a note there is on its window.
+        // Asked here, where a tab is first wanted (macOS shows its own prompt, once), never by surprise.
+        if app.viewers.front == nil, let browser = scene?.app, Browsers.kind(browser) != nil, Browsers.waiting(browser) {
+            if offers.isEmpty { menu.addItem(.separator()) }
+            menu.addItem(ActionItem("Let Petal see \(Apps.name(browser))’s tabs…") { [weak self] in
+                self?.app.browsers.ask(browser) { _ in self?.lookAgain(after: 0) }
+            })
+        }
         menu.addItem(.separator())
         // The Desktop the note's screen shows, read when chosen (off the main thread): only with its number is the note
         // moved there; its places stay as they are until then, and stay unknown.
@@ -2968,7 +2976,7 @@ final class NoteDesk {
     static func swatch(_ color: NSColor) -> NSImage {
         NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
             color.setFill()
-            NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: 3, yRadius: 3).fill()
+            NSBezierPath(roundedRect: rect.insetBy(dx: 1, dy: 1), xRadius: Radius.chip, yRadius: Radius.chip).fill()
             return true
         }
     }

@@ -263,8 +263,10 @@ final class PetalApp {
 
     // MARK: Claude
 
+    /// The AI button's tooltip: Petal AI, then whose usage the ring shows (the engine's own name: it's its plan).
     var usageTooltip: String {
-        (chatProvider?.name ?? "AI") + usage.limits.map { " · \($0.label.replacingOccurrences(of: " (7-day)", with: "")) \(Int(((1 - $0.percent) * 100).rounded()))% left" }.joined()
+        let used = !usage.limits.isEmpty || usage.spentText != nil
+        return "Petal AI" + (used ? (chatProvider.map { " · " + $0.name } ?? "") : "") + usage.limits.map { " · \($0.label.replacingOccurrences(of: " (7-day)", with: "")) \(Int(((1 - $0.percent) * 100).rounded()))% left" }.joined()
             + (usage.spentText.map { " · " + $0 } ?? "")
     }
 
@@ -481,7 +483,11 @@ final class PetalApp {
         ipc.on("allow") { [unowned self] _ in claude.agent.allow(); return "ok" }
         ipc.on("newChat") { [unowned self] _ in claude.agent.reset(); return "ok" }
         ipc.on("search") { [unowned self] _ in search.open(in: nil); return "ok" }
-        ipc.on("settings") { [unowned self] _ in settings.show(); return "ok" }
+        ipc.on("settings") { [unowned self] args in
+            // `petal settings privacy` opens that page; a name it doesn't know opens Settings as it was.
+            if let page = args.first.flatMap(SettingsSection.init(named:)) { settings.show(page) } else { settings.show() }
+            return "ok"
+        }
         ipc.on("reveal") { [unowned self] _ in docks.revealAll(); return "ok" }
         ipc.on("stack") { [unowned self] args in
             let folders = Stacks.resolve(config.strings("stackFolders"))

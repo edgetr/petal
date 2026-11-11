@@ -227,7 +227,7 @@ extension NoteFile {
 
 enum NoteHelp {
     static let stepsKept = 40
-    /// An ink's link that is Settings › AI (a key or a sign-in to fix), not an address.
+    /// An ink's link that is Settings › Petal AI (a key or a sign-in to fix), not an address.
     static let settingsLink = "petal:settings/ai"
     static let settingsInk: Shielded = "petal:settings/ai"
     static let historyKept = 5
@@ -1946,7 +1946,7 @@ struct FollowUpQueue<Line> {
 
 extension RunToken {
     /// A turn's outcome from how its process ended: an authentication failure is a failure (with its explanation
-    /// and Settings › AI), whatever ended the process; then a signal is an interruption; then a clean exit with no
+    /// and Settings › Petal AI), whatever ended the process; then a signal is an interruption; then a clean exit with no
     /// error event succeeds.
     static func classify(authFailed: Bool, errored: Bool, signaled: Bool, status: Int32) -> Outcome {
         if authFailed { return .failed }
@@ -2415,7 +2415,7 @@ struct Said: Codable, Equatable, Sendable {
     var form: Form = .answer
     /// The person's line it answered (a coding helper's finish line is derived from it, after redaction).
     var asked = ""
-    /// A failure Settings › AI fixes: its button on the ink.
+    /// A failure Settings › Petal AI fixes: its button on the ink.
     var settings = false
 }
 

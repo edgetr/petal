@@ -470,16 +470,16 @@ struct NotesWindowView: View {
         let books = store.notebooks
         return VStack(alignment: .leading, spacing: 1) {
             HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").font(.system(size: 11.5)).foregroundStyle(look.dim)
+                Image(systemName: "magnifyingglass").font(.system(size: TextSize.small)).foregroundStyle(look.dim)
                 if snapshotting {
-                    Text(model.query.isEmpty ? "Search every note" : model.query).font(.system(size: 12.5)).foregroundStyle(look.dim)
+                    Text(model.query.isEmpty ? "Search every note" : model.query).font(.system(size: TextSize.callout)).foregroundStyle(look.dim)
                     Spacer(minLength: 0)
                 } else {
-                    TextField("Search every note", text: Bindable(model).query).textFieldStyle(.plain).font(.system(size: 12.5))
+                    TextField("Search every note", text: Bindable(model).query).textFieldStyle(.plain).font(.system(size: TextSize.callout))
                 }
             }
             .padding(.horizontal, 10).frame(height: 30)
-            .background(look.field, in: .rect(cornerRadius: 8))
+            .background(look.field, in: .rect(cornerRadius: Radius.control))
             .padding(.bottom, 4)
 
             header("Coming up")
@@ -493,11 +493,11 @@ struct NotesWindowView: View {
             notebookList(books)
             Button { model.newNotebook() } label: {
                 HStack(spacing: 9) {
-                    Image(systemName: "plus").font(.system(size: 11, weight: .medium)).frame(width: 10)
+                    Image(systemName: "plus").font(.system(size: TextSize.small, weight: .medium)).frame(width: 10)
                     Text("Notebook")
                     Spacer()
                 }
-                .font(.system(size: 13.5)).foregroundStyle(look.dim)
+                .font(.system(size: TextSize.body)).foregroundStyle(look.dim)
                 .padding(.horizontal, 8).padding(.vertical, 6).contentShape(.rect)
             }
             .buttonStyle(.plain)
@@ -537,7 +537,7 @@ struct NotesWindowView: View {
     }
 
     private func header(_ text: String) -> some View {
-        Text(text.uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(look.header)
+        Text(text).font(.system(size: TextSize.small, weight: .semibold)).foregroundStyle(look.header)
             .padding(.top, 12).padding(.horizontal, 8).padding(.bottom, 5)
     }
 
@@ -545,14 +545,14 @@ struct NotesWindowView: View {
         let on = model.query.isEmpty && model.shelf == shelf
         return Button { model.query = ""; model.shelf = shelf } label: {
             HStack(spacing: 9) {
-                Image(systemName: symbol).font(.system(size: 11.5)).frame(width: 14)
+                Image(systemName: symbol).font(.system(size: TextSize.small)).frame(width: 14)
                 Text(title).fontWeight(on ? .semibold : .regular)
                 Spacer(minLength: 4)
                 if count > 0 { Text("\(count)").foregroundStyle(look.dim) }
             }
-            .font(.system(size: 13.5)).foregroundStyle(look.text)
+            .font(.system(size: TextSize.body)).foregroundStyle(look.text)
             .padding(.horizontal, 8).padding(.vertical, 6)
-            .background(on ? look.picked : .clear, in: .rect(cornerRadius: 7))
+            .background(on ? look.picked : .clear, in: .rect(cornerRadius: Radius.control))
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -620,8 +620,8 @@ struct NotesWindowView: View {
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(title).font(.system(size: 26, weight: .bold)).tracking(-0.26).foregroundStyle(look.dark ? Color.white : Color(white: 0.11))
-                    Text(subtitle).font(.system(size: 13)).foregroundStyle(look.dim).lineLimit(1)
+                    Text(title).font(.system(size: TextSize.large, weight: .bold)).tracking(-0.26).foregroundStyle(look.dark ? Color.white : Color(white: 0.11))
+                    Text(subtitle).font(.system(size: TextSize.body)).foregroundStyle(look.dim).lineLimit(1)
                 }
                 Spacer()
                 if let book { viewToggle(book) }
@@ -636,7 +636,7 @@ struct NotesWindowView: View {
                         }
                     }
                     if papers.isEmpty && cover == nil {
-                        Text("No notes here yet.").font(.system(size: 13)).foregroundStyle(look.dim).padding(.top, 20)
+                        Text("No notes here yet.").font(.system(size: TextSize.body)).foregroundStyle(look.dim).padding(.top, 20)
                     }
                 }
                 .padding(.horizontal, 36).padding(.top, 20).padding(.bottom, 30)
@@ -674,16 +674,16 @@ struct NotebookRow: View, Equatable {
     var body: some View {
         Button { model.query = ""; model.shelf = .notebook(book.name) } label: {
             HStack(spacing: 9) {
-                RoundedRectangle(cornerRadius: 3).fill(Color(nsColor: color)).frame(width: 10, height: 10)
+                RoundedRectangle(cornerRadius: Radius.chip).fill(Color(nsColor: color)).frame(width: 10, height: 10)
                 Text(book.name).fontWeight(on ? .semibold : .regular).lineLimit(1)
-                if isDefault { Text("default").font(.system(size: 11)).foregroundStyle(look.dim) }
-                if book.isPrivate { Text("private").font(.system(size: 11)).foregroundStyle(look.dim) }
+                if isDefault { Text("default").font(.system(size: TextSize.small)).foregroundStyle(look.dim) }
+                if book.isPrivate { Text("private").font(.system(size: TextSize.small)).foregroundStyle(look.dim) }
                 Spacer(minLength: 4)
                 Text("\(book.count)").foregroundStyle(look.dim)
             }
-            .font(.system(size: 13.5)).foregroundStyle(look.text)
+            .font(.system(size: TextSize.body)).foregroundStyle(look.text)
             .padding(.horizontal, 8).padding(.vertical, 6)
-            .background(on ? look.picked : .clear, in: .rect(cornerRadius: 7))
+            .background(on ? look.picked : .clear, in: .rect(cornerRadius: Radius.control))
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
@@ -741,12 +741,12 @@ struct NotesViewToggle: View {
         HStack(spacing: 0) {
             ForEach([NoteLibrary.View.grid, .canvas], id: \.self) { option in
                 Button { pick(option) } label: {
-                    Text(option == .grid ? "Grid" : "Canvas").font(.system(size: 12))
+                    Text(option == .grid ? "Grid" : "Canvas").font(.system(size: TextSize.callout))
                         .foregroundStyle(view == option ? (look.dark ? Color.white : Color(white: 0.07)) : look.dim)
                         .padding(.horizontal, 10).padding(.vertical, 4)
                         .background {
                             if view == option {
-                                RoundedRectangle(cornerRadius: 6).fill(look.toggleOn).shadow(color: .black.opacity(0.12), radius: 1, y: 1)
+                                RoundedRectangle(cornerRadius: Radius.chip).fill(look.toggleOn).shadow(color: .black.opacity(0.12), radius: 1, y: 1)
                             }
                         }
                         .contentShape(.rect)
@@ -755,7 +755,7 @@ struct NotesViewToggle: View {
             }
         }
         .padding(2)
-        .background(look.toggle, in: .rect(cornerRadius: 8))
+        .background(look.toggle, in: .rect(cornerRadius: Radius.control))
     }
 }
 
@@ -926,8 +926,8 @@ struct GridPaper: View, Equatable {
     var opening: () -> Void = {}
     /// Dragged out to another notebook or an app in the dock (not on a canvas, where dragging moves it).
     var draggable = true
-    /// Its words' size: 12.5 points in the grid, a note's own 13.5 on a canvas (the sketch's).
-    var words: CGFloat = 12.5
+    /// Its words' size: a step smaller in the grid, a note's own on a canvas (the sketch's).
+    var words: CGFloat = TextSize.callout
 
     var body: some View {
         let color = app.paper.store.color(of: paper.notebook)
@@ -937,17 +937,17 @@ struct GridPaper: View, Equatable {
         let titled = NoteText.titled(paper.file.body)
         VStack(alignment: .leading, spacing: 0) {
             if across {
-                Text(paper.notebook).font(.system(size: 10.5, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+                Text(paper.notebook).font(.system(size: TextSize.small, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
                     .lineLimit(1).padding(.bottom, 7)
             }
             VStack(alignment: .leading, spacing: 3) {
-                if titled { Text(paper.file.title).font(.system(size: 14, weight: .bold)).lineLimit(2) }
+                if titled { Text(paper.file.title).font(.system(size: TextSize.heading, weight: .semibold)).lineLimit(2) }
                 // (No more of its words than a paper this size can show: the rest would be laid out only to be cut off.)
                 Text(String((titled ? paper.file.preview : [paper.file.title, paper.file.preview].filter { !$0.isEmpty }.joined(separator: " ")).prefix(Self.shownWords)))
                     .font(.system(size: words, weight: .medium)).lineLimit(Self.shownLines)
             }
-            // The sketch's line height for a paper's words (1.32).
-            .lineSpacing(words * (1.32 - 1.193))
+            // The sketch's line pitch for a paper's words.
+            .lineSpacing(PaperLook.lineSpacing(words))
             .foregroundStyle(PaperLook.words)
             .padding(.top, watch == nil ? 0 : watch?.history.isEmpty == false ? 46 : 34)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -956,17 +956,17 @@ struct GridPaper: View, Equatable {
             if !tasks.isEmpty { TaskChips(items: tasks, tint: tint).padding(.bottom, 6) }
             HStack(spacing: 6) {
                 if footer.dot { Circle().fill(Color(nsColor: color)).frame(width: 7, height: 7).opacity(footer.working ? 0.6 : 1) }
-                Text(footer.text).font(.system(size: 11)).foregroundStyle(PaperLook.footer).lineLimit(1)
+                Text(footer.text).font(.system(size: TextSize.small)).foregroundStyle(PaperLook.footer).lineLimit(1)
             }
         }
         .padding(.top, 15).padding(.horizontal, 14).padding(.bottom, 12)
         .frame(width: size, height: size, alignment: .topLeading)
         .overlay(alignment: .topTrailing) { if let watch { WatchNumber(watch: watch, tint: tint).padding(14) } }
         .overlay(alignment: .top) { Rectangle().fill(Color(nsColor: color)).frame(height: 5) }
-        .clipShape(.rect(cornerRadius: 12))
-        .background { PaperLook.color(NoteInk.paper(tint)).clipShape(.rect(cornerRadius: 12)).modifier(PaperShadow(glass: false)) }
+        .clipShape(.rect(cornerRadius: Radius.tile))
+        .background { PaperLook.color(NoteInk.paper(tint)).clipShape(.rect(cornerRadius: Radius.tile)).modifier(PaperShadow(glass: false)) }
         .environment(\.colorScheme, .light)
-        .contentShape(.rect(cornerRadius: 12))
+        .contentShape(.rect(cornerRadius: Radius.tile))
         .onTapGesture { opening(); Self.open(paper, app: app) }
         .contextMenu {
             Button("Open") { opening(); Self.open(paper, app: app) }
@@ -1014,7 +1014,7 @@ struct TaskChips: View {
                 if items.count > 1 { chip("+\(items.count - 1)").fixedSize() }
             }
             Button { app.paper.openAll(items) } label: {
-                Text("Open all \(items.count)").underline().font(.system(size: 10.5, weight: .medium)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+                Text("Open all \(items.count)").underline().font(.system(size: TextSize.caption, weight: .medium)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
             }
             .buttonStyle(.plain)
             .help("Brings back its tabs, files and mail")
@@ -1022,10 +1022,10 @@ struct TaskChips: View {
     }
 
     private func chip(_ words: String) -> some View {
-        Text(words).font(.system(size: 10.5)).foregroundStyle(Color(white: 0.2)).lineLimit(1)
+        Text(words).font(.system(size: TextSize.caption)).foregroundStyle(Color(white: 0.2)).lineLimit(1)
             .padding(.horizontal, 6).padding(.vertical, 2)
-            .background(PaperLook.color(NoteInk.mix(tint, 0.12, NoteInk.paper)), in: .rect(cornerRadius: 5))
-            .overlay { RoundedRectangle(cornerRadius: 5).stroke(.black.opacity(0.12), lineWidth: 0.5) }
+            .background(PaperLook.color(NoteInk.mix(tint, 0.12, NoteInk.paper)), in: .rect(cornerRadius: Radius.chip))
+            .overlay { RoundedRectangle(cornerRadius: Radius.chip).stroke(.black.opacity(0.12), lineWidth: 0.5) }
     }
 }
 
@@ -1036,15 +1036,15 @@ struct WatchNumber: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 0) {
-            Text(watch.last.isEmpty ? "…" : watch.last).font(.system(size: 24, weight: .bold)).tracking(-0.48)
+            Text(watch.last.isEmpty ? "…" : watch.last).font(.system(size: TextSize.title, weight: .semibold)).tracking(-0.48)
                 .foregroundStyle(PaperLook.color(NoteInk.mix(tint, 0.65, NoteInk.black)))
             if !watch.history.isEmpty {
-                Text(watch.history.prefix(2).joined(separator: " · ")).font(.system(size: 11)).strikethrough().foregroundStyle(Color(white: 0.6))
+                Text(watch.history.prefix(2).joined(separator: " · ")).font(.system(size: TextSize.small)).strikethrough().foregroundStyle(Color(white: 0.6))
             }
             // A crossing that couldn't be confirmed: its number, faint, as on the note itself (WatchCorner); the last
             // accepted value stays above it.
             if !watch.unconfirmed.isEmpty {
-                Text(watch.unconfirmed + " · couldn't confirm").font(.system(size: 9.5)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
+                Text(watch.unconfirmed + " · couldn't confirm").font(.system(size: TextSize.micro)).foregroundStyle(Color(white: 0.6)).lineLimit(1)
             }
         }
     }
@@ -1060,32 +1060,32 @@ struct CoverPaper: View {
         let tint = PaperLook.rgb(color)
         let parts = NoteLibrary.cover(paper.file.body)
         VStack(alignment: .leading, spacing: 0) {
-            Text("About this notebook").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
+            Text("About this notebook").font(.system(size: TextSize.small, weight: .semibold)).foregroundStyle(PaperLook.color(NoteInk.letterhead(tint)))
                 .padding(.bottom, 9)
-            Text(parts.about.isEmpty ? "What this notebook is for." : parts.about).font(.system(size: 12.5)).foregroundStyle(PaperLook.words)
-                .lineSpacing(12.5 * (1.32 - 1.193)).lineLimit(6)
-            Text("PETAL REMEMBERS").font(.system(size: 11, weight: .semibold)).foregroundStyle(Color(white: 0.47)).padding(.top, 10).padding(.bottom, 2)
+            Text(parts.about.isEmpty ? "What this notebook is for." : parts.about).font(.system(size: TextSize.callout)).foregroundStyle(PaperLook.words)
+                .lineSpacing(PaperLook.lineSpacing(TextSize.callout)).lineLimit(6)
+            Text("Petal remembers").font(.system(size: TextSize.small, weight: .semibold)).foregroundStyle(Color(white: 0.47)).padding(.top, 10).padding(.bottom, 2)
             if parts.remembers.isEmpty {
-                Text("Nothing yet.").font(.system(size: 11.5)).foregroundStyle(Color(white: 0.55)).padding(.vertical, 4)
+                Text("Nothing yet.").font(.system(size: TextSize.small)).foregroundStyle(Color(white: 0.55)).padding(.vertical, 4)
                     .frame(maxWidth: .infinity, alignment: .leading).overlay(alignment: .top) { Rectangle().fill(.black.opacity(0.07)).frame(height: 1) }
             }
             ForEach(Array(parts.remembers.prefix(6).enumerated()), id: \.offset) { _, memory in
-                Text(memory).font(.system(size: 11.5)).foregroundStyle(PaperLook.words).lineLimit(1).padding(.vertical, 4)
+                Text(memory).font(.system(size: TextSize.small)).foregroundStyle(PaperLook.words).lineLimit(1).padding(.vertical, 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .overlay(alignment: .top) { Rectangle().fill(.black.opacity(0.07)).frame(height: 1) }
             }
             Spacer(minLength: 6)
-            Text("Helpers read this first. Edit it like any note.").font(.system(size: 11)).foregroundStyle(Color(white: 0.53))
+            Text("Helpers read this first. Edit it like any note.").font(.system(size: TextSize.small)).foregroundStyle(Color(white: 0.53))
                 .padding(.trailing, 20)
         }
         .padding(.top, 15).padding(.horizontal, 14).padding(.bottom, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .overlay(alignment: .top) { Rectangle().fill(Color(nsColor: color)).frame(height: 5) }
         .overlay(alignment: .bottomTrailing) { FoldCorner().fill(Color.black.opacity(0.13)).frame(width: 24, height: 24) }
-        .clipShape(.rect(cornerRadius: 12))
-        .background { PaperLook.color(NoteInk.paper(tint)).clipShape(.rect(cornerRadius: 12)).modifier(PaperShadow(glass: false)) }
+        .clipShape(.rect(cornerRadius: Radius.tile))
+        .background { PaperLook.color(NoteInk.paper(tint)).clipShape(.rect(cornerRadius: Radius.tile)).modifier(PaperShadow(glass: false)) }
         .environment(\.colorScheme, .light)
-        .contentShape(.rect(cornerRadius: 12))
+        .contentShape(.rect(cornerRadius: Radius.tile))
         .onTapGesture { GridPaper.open(paper, app: app) }
     }
 }
@@ -1097,9 +1097,9 @@ struct FadedLine: View {
     let look: NotesLook
 
     var body: some View {
-        Text(paper.file.title.isEmpty ? "A note" : paper.file.title).font(.system(size: 11)).foregroundStyle(look.dim).lineLimit(1)
+        Text(paper.file.title.isEmpty ? "A note" : paper.file.title).font(.system(size: TextSize.small)).foregroundStyle(look.dim).lineLimit(1)
             .padding(.horizontal, 9).frame(width: 150, height: 22, alignment: .leading)
-            .background(look.faded, in: .rect(cornerRadius: 6))
+            .background(look.faded, in: .rect(cornerRadius: Radius.control))
             .contentShape(.rect)
             .onTapGesture { GridPaper.open(paper, app: app) }
             .onDrag { NoteDrag.provider(paper) }
@@ -1127,12 +1127,12 @@ struct NotesCanvasView: View {
         VStack(spacing: 0) {
             ZStack {
                 HStack(spacing: 10) {
-                    Button { model.sidebar.toggle() } label: { Image(systemName: "sidebar.left").font(.system(size: 13)) }
+                    Button { model.sidebar.toggle() } label: { Image(systemName: "sidebar.left").font(.system(size: TextSize.body)) }
                         .buttonStyle(.plain).foregroundStyle(look.dim).padding(.leading, model.sidebar ? 16 : 84)
-                    Text(book.name).font(.system(size: 13, weight: .semibold)).foregroundStyle(look.text)
+                    Text(book.name).font(.system(size: TextSize.body, weight: .semibold)).foregroundStyle(look.text)
                     // Edits kept and tried again (NoteStore.editCanvas): never lost quietly.
                     if app.paper.store.canvasUnsaved.contains(book.name) {
-                        Text("Not saved yet: Petal keeps your changes and tries again").font(.system(size: 11))
+                        Text("Not saved yet: Petal keeps your changes and tries again").font(.system(size: TextSize.small))
                             .foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
                     }
                     Spacer()
@@ -1143,7 +1143,7 @@ struct NotesCanvasView: View {
             if let layout {
                 CanvasBoard(model: model, book: book, papers: papers, layout: layout, look: look)
             } else if model.canvas != nil {
-                Text("Petal can't read this notebook's canvas file, so it leaves it as it is.").font(.system(size: 13)).foregroundStyle(look.dim)
+                Text("Petal can't read this notebook's canvas file, so it leaves it as it is.").font(.system(size: TextSize.body)).foregroundStyle(look.dim)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 look.canvas.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1196,10 +1196,10 @@ struct CanvasBoard: View {
                 Text("\(Int((layout.zoom * 100).rounded()))%").monospacedDigit()
                 Button { model.edit(book.name, .zoom(NoteCanvas.zoomIn(layout.zoom))) } label: { Text("+") }.buttonStyle(.plain)
             }
-            .font(.system(size: 12)).foregroundStyle(Color(white: 0.53))
+            .font(.system(size: TextSize.callout)).foregroundStyle(Color(white: 0.53))
             .padding(.horizontal, 10).padding(.vertical, 4)
-            .background(look.dark ? Color(white: 0.2) : .white, in: .rect(cornerRadius: 8))
-            .overlay { RoundedRectangle(cornerRadius: 8).stroke(.black.opacity(0.15), lineWidth: 0.5) }
+            .background(look.dark ? Color(white: 0.2) : .white, in: .rect(cornerRadius: Radius.control))
+            .overlay { RoundedRectangle(cornerRadius: Radius.control).stroke(.black.opacity(0.15), lineWidth: 0.5) }
             .padding(.trailing, 20).padding(.bottom, 18)
         }
     }
@@ -1287,7 +1287,7 @@ struct CanvasPaper: View {
     @State private var start: NoteCanvas.Spot?
 
     var body: some View {
-        GridPaper(paper: paper, now: Date(), draggable: false, words: 13.5)
+        GridPaper(paper: paper, now: Date(), draggable: false, words: TextSize.body)
             .rotationEffect(.degrees(Self.turn(paper.noteID)))
             .offset(x: spot.x, y: spot.y)
             .gesture(DragGesture(minimumDistance: 3, coordinateSpace: .global)
@@ -1342,12 +1342,12 @@ struct CanvasArea: View {
         let tint = PaperLook.rgb(color)
         let w = max(160, area.w + sizing.dw), h = max(100, area.h + sizing.dh)
         ZStack(alignment: .topLeading) {
-            RoundedRectangle(cornerRadius: 18)
+            RoundedRectangle(cornerRadius: Radius.panel)
                 .fill(PaperLook.color(tint).opacity(0.05))
-                .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(PaperLook.color(tint).opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])) }
+                .overlay { RoundedRectangle(cornerRadius: Radius.panel).strokeBorder(PaperLook.color(tint).opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [6, 4])) }
                 .frame(width: w, height: h)
                 .allowsHitTesting(false)
-            Text(area.label).font(.system(size: 13, weight: .semibold)).foregroundStyle(Color(white: 0.33))
+            Text(area.label).font(.system(size: TextSize.body, weight: .semibold)).foregroundStyle(Color(white: 0.33))
                 .padding(.horizontal, 6).background(look.canvas)
                 .offset(x: 14, y: -9)
                 .gesture(DragGesture(coordinateSpace: .global)
@@ -1378,7 +1378,7 @@ struct CanvasArea: View {
                     }
                     Button("Remove the area") { model.edit(book.name, .removeArea(area.id)) }
                 }
-            Image(systemName: "arrow.down.right").font(.system(size: 9, weight: .semibold)).foregroundStyle(PaperLook.color(tint).opacity(0.5))
+            Image(systemName: "arrow.down.right").font(.system(size: TextSize.micro, weight: .semibold)).foregroundStyle(PaperLook.color(tint).opacity(0.5))
                 .frame(width: 18, height: 18).contentShape(.rect)
                 .offset(x: w - 20, y: h - 20)
                 .gesture(DragGesture(coordinateSpace: .global)
@@ -1404,7 +1404,7 @@ struct CanvasWords: View {
     @State private var moving: (dx: Double, dy: Double) = (0, 0)
 
     var body: some View {
-        Text(words.text).font(.custom("Georgia", size: 15).italic()).foregroundStyle(look.dark ? Color(white: 0.75) : Color(white: 0.33))
+        Text(words.text).font(.custom("Georgia", size: TextSize.heading).italic()).foregroundStyle(look.dark ? Color(white: 0.75) : Color(white: 0.33))
             .fixedSize()
             .offset(x: words.x + moving.dx, y: words.y + moving.dy)
             .gesture(DragGesture(coordinateSpace: .global)
