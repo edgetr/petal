@@ -12,6 +12,7 @@
 set -euo pipefail
 
 REPO="edgetr/petal"
+MAKER='identifier "tech.edgetr.petal" and certificate root = H"29feb33bdddb5686cbc597ca9706b0b8a6f3b36d"'
 
 fail() { echo "Petal: $1" >&2; exit 1; }
 
@@ -41,6 +42,9 @@ curl -fsSL "$url" -o "$tmp/Petal.zip" || fail "couldn't download Petal $version"
 [[ $(shasum -a 256 "$tmp/Petal.zip" | cut -d' ' -f1) == "$sha" ]] || fail "the download didn't match its checksum"
 ditto -x -k "$tmp/Petal.zip" "$tmp/unpacked" || fail "couldn't unpack Petal $version"
 [[ -d $tmp/unpacked/Petal.app ]] || fail "the download had no Petal.app"
+# The checksum came with the download. The signature can't be made by whoever made the download: every release is
+# signed with Petal's own certificate, by this hash (the same words as UpdateTrust.swift in the app).
+codesign --verify --deep --strict -R="$MAKER" "$tmp/unpacked/Petal.app" 2>/dev/null || fail "the download isn't signed by Petal's maker"
 
 # A Petal that's running quits first, so the new one can take its place.
 if pgrep -xq Petal; then osascript -e 'tell application id "tech.edgetr.petal" to quit' >/dev/null 2>&1 || true; sleep 1; fi

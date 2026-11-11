@@ -659,6 +659,16 @@ swiftc -parse-as-library -O -o "$out/routinestop" Sources/Petal/RoutineStop.swif
 # (PetalProcess; the Dock guard's shell test with pgrep and ps stood in for, never a real Petal).
 swiftc -parse-as-library -O -o "$out/petalprocess" Sources/Petal/PetalProcess.swift checks/PetalProcessCheck.swift
 "$out/petalprocess"
+# UpdateTrust.swift: a downloaded Petal is installed only when it's signed as asked, whole. On tiny bundles the check
+# makes and signs itself in the temporary folder. Then the three places that say whose signature that is (the app,
+# get.sh, the release workflow) must say it in the same words: a release one of them refused would strand the others.
+swiftc -parse-as-library -O -o "$out/updatetrust" Sources/Petal/UpdateTrust.swift checks/UpdateTrustCheck.swift
+"$out/updatetrust"
+maker=$(sed -n 's/^    static let maker = #"\(.*\)"#$/\1/p' Sources/Petal/UpdateTrust.swift)
+[ -n "$maker" ] || { echo "update trust: couldn't read the maker's requirement from UpdateTrust.swift"; exit 1; }
+grep -qF "MAKER='$maker'" ../get.sh || { echo "update trust: get.sh doesn't check the same signature as UpdateTrust.swift"; exit 1; }
+grep -qF "MAKER: '$maker'" ../.github/workflows/release-macos.yml || { echo "update trust: the release workflow doesn't check the same signature as UpdateTrust.swift"; exit 1; }
+echo "update trust: the app, get.sh and the release workflow ask for the same signature"
 # IPC.swift on a throwaway socket in the temporary folder (never Petal's): a request whose client hangs up first is
 # never done.
 swiftc -parse-as-library -O -o "$out/ipc" Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/IPCCheck.swift
