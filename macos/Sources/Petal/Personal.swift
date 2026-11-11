@@ -201,7 +201,9 @@ enum Personal {
         guard run("/usr/bin/ditto", ["-x", "-k", zip.path, work.appending(path: "unpacked").path]).status == 0 else {
             throw Failure("Couldn't unpack Petal \(version).")
         }
-        _ = try FileManager.default.replaceItemAt(Bundle.main.bundleURL, withItemAt: work.appending(path: "unpacked/Petal.app"))
+        let app = work.appending(path: "unpacked/Petal.app")
+        guard UpdateTrust.signed(app) else { throw Failure("Petal \(version)'s download isn't signed by Petal's maker, so it wasn't installed.") }
+        _ = try FileManager.default.replaceItemAt(Bundle.main.bundleURL, withItemAt: app)
     }
 
     // MARK: Updates

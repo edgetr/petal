@@ -104,6 +104,8 @@ final class Updater {
         guard unzip.terminationStatus == 0, FileManager.default.fileExists(atPath: app.path) else {
             throw UpdateError("the download had no Petal.app")
         }
+        // The checksum came with the download; the signature can't be made by whoever made the download.
+        guard UpdateTrust.signed(app) else { throw UpdateError("the download isn't signed by Petal's maker, so it wasn't installed") }
         _ = try FileManager.default.replaceItemAt(bundle, withItemAt: app)
     }
 

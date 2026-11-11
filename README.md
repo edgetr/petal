@@ -124,9 +124,14 @@ installed Petal checks for updates.
 - **Something's off:** run `petal doctor`, or ask the AI in the dock to fix Petal.
 - **The Dock didn't come back:** `petal restore-dock`.
 - **AI features do nothing:** check that `claude -p hi` (or `codex`) works in Terminal, then
-  Settings › AI.
+  Settings › Petal AI.
 
 To remove Petal, quit it from the mark in the menu bar and move Petal.app to the Trash.
+
+## Contributing and security
+
+[`CONTRIBUTING.md`](CONTRIBUTING.md) says how to set up, and what a pull request needs. To report a
+security problem privately, see [`SECURITY.md`](SECURITY.md), which also says what Petal keeps and where.
 
 ## Credits
 

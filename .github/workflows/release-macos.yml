@@ -53,6 +53,14 @@ jobs:
       - name: Build
         run: macos/build.sh
 
+      # Every installed Petal, and get.sh, install a download only when it's signed with Petal's own certificate
+      # (UpdateTrust.swift, the same words). A build they would refuse is never published: without the certificate
+      # the build is ad hoc, and this stops the release here.
+      - name: Check it's signed as installed Petals expect
+        env:
+          MAKER: 'identifier "tech.edgetr.petal" and certificate root = H"29feb33bdddb5686cbc597ca9706b0b8a6f3b36d"'
+        run: codesign --verify --deep --strict -R="$MAKER" macos/build/Petal.app
+
       - name: Package
         run: |
           v="${GITHUB_REF_NAME#macos-v}"
