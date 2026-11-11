@@ -618,7 +618,9 @@ struct PrivateApps: View {
 
     var body: some View {
         let ids = app.config.strings("aiNeverLook")
-        ForEach(ids, id: \.self) { id in
+        // Only the ones on this Mac are listed: one that isn't installed (the password managers kept private from
+        // the start) has no name or icon to show, only its identifier. It stays private all the same.
+        ForEach(ids.filter { Apps.url($0) != nil }, id: \.self) { id in
             HStack(spacing: 8) {
                 Image(nsImage: Apps.icon(id)).resizable().frame(width: 20, height: 20)
                 Text(Apps.name(id)).font(.system(size: TextSize.body))

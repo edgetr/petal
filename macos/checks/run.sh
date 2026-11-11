@@ -714,6 +714,11 @@ perl -0777 -ne '
 n=$(grep -n 'NSScreen\.screens\|NSScreen\.main\|CGGetActiveDisplayList\|CGGetOnlineDisplayList\|CGMainDisplayID' Sources/Petal/*.swift | grep -v '^Sources/Petal/Screens\.swift:\|^Sources/Petal/DisplayCheck\.swift:' || true)
 if [ -n "$n" ]; then echo "screens: read outside Screens (Screens.swift):"; echo "$n"; exit 1; fi
 echo "screens: only through Screens"
+# One scale (Scale.swift): a font size is a TextSize step and a corner a Radius step, by name, never a number. The
+# made-up documents drawn for checks and snapshots are content, not Petal's interface.
+n=$(grep -n '\.system(size: [0-9]\|cornerRadius: [0-9]' Sources/Petal/*.swift | grep -v '^Sources/Petal/\(ViewerSnapshot\|ViewerSamples\|HelpersCheck\|Scale\)\.swift:' || true)
+if [ -n "$n" ]; then echo "scale: a font size or corner radius that is a number, not a step of Scale.swift:"; echo "$n"; exit 1; fi
+echo "scale: every font size and corner is a named step"
 # A write into a helper program's input fails quietly when that program has gone (the throwing write): the other
 # one raises, which would end Petal now that a broken pipe no longer does (IPC.surviveBrokenPipes).
 n=$(grep -n 'fileHandleForWriting\.write(' Sources/Petal/*.swift | grep -v 'write(contentsOf:' || true)
