@@ -339,7 +339,7 @@ struct LiveDock: View {
         // What the dock holds besides its apps, as DockView counts it: Petal's buttons, "+", the extras, the dividers.
         let buttons = [!app.providers.isEmpty && (config.bool("ai") || config.bool("claudeUsage")), config.bool("finderInDock"),
                        config.bool("notes") && config.bool("notesPad")].filter { $0 }.count
-        let extras = (config.bool("stacks") ? Stacks.resolve(config.strings("stackFolders")).count : 0) + (config.bool("trash") ? 1 : 0)
+        let extras = (config.bool("stacks") ? stackCount(config.strings("stackFolders")) : 0) + (config.bool("trash") ? 1 : 0)
             + (config.bool("nowPlaying") && app.signals.nowPlaying != nil ? 1 : 0)
         let fixed = CGFloat(buttons + extras + 1) * slot + CGFloat((buttons > 0 ? 1 : 0) + (extras > 0 ? 1 : 0)) * 17 + 8
             + (vertical ? outer.top + outer.bottom : outer.leading + outer.trailing)
@@ -351,6 +351,17 @@ struct LiveDock: View {
                 : NSWorkspace.shared.personsApplications.filter { $0.activationPolicy == .regular }.compactMap(\.bundleIdentifier)
         }
         return Plan(ids: Array(ids.prefix(max(1, min(7, fits)))), icon: icon, thickness: thickness)
+    }
+
+    /// How many of the stacks' folders exist, asked of the disk once for each list of folders, never on every
+    /// drawing: a slider dragged on this page draws many times a second, and a folder on a slow disk would hold
+    /// each one up.
+    private static var stacksKnown: (folders: [String], count: Int)?
+    private static func stackCount(_ folders: [String]) -> Int {
+        if let known = stacksKnown, known.folders == folders { return known.count }
+        let count = Stacks.resolve(folders).count
+        stacksKnown = (folders, count)
+        return count
     }
 
     /// Gives the dock its apps and size, only where they changed.

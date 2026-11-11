@@ -331,9 +331,10 @@ struct NowPlaying: Equatable {
         return nil
     }
 
-    /// The players running now that haven't been asked yet, as `current` just found them.
+    /// The players running now that haven't been asked yet. Each is looked at here, without prompting, whatever
+    /// `current` did: it stops at the first player with a song, so a second one would never be looked at.
     nonisolated static func waiting() -> Set<String> {
-        Set(players.filter { NSRunningApplication.runningApplications(withBundleIdentifier: $0).first != nil && Browsers.waiting($0) })
+        Set(players.filter { Browsers.access($0) == .notAsked })
     }
 
     /// "playpause", "next track", "previous track".

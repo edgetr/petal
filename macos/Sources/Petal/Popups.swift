@@ -466,9 +466,12 @@ final class Previews {
         DispatchQueue.main.asyncAfter(deadline: .now() + (showing == nil ? 0.38 : 0), execute: work)
     }
 
-    /// The music controls belong over this app's icon: it's the player with a song.
+    /// This app's preview has something of the player's to show whatever its windows: the music controls (it's the
+    /// player with a song), or the line that offers to show what's playing (a player that hasn't been asked yet,
+    /// which may have no window at all).
     private func playing(_ id: String) -> Bool {
-        PetalApp.shared.config.bool("nowPlaying") && PetalApp.shared.signals.nowPlaying?.player == id
+        let signals = PetalApp.shared.signals
+        return PetalApp.shared.config.bool("nowPlaying") && (signals.nowPlaying?.player == id || signals.playersWaiting.contains(id))
     }
 
     private func open(_ id: String, in dock: ScreenDock) {
