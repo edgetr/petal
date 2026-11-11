@@ -263,32 +263,3 @@ enum Tiling {
         Windows.onScreen().first { $0.id == id }?.pid ?? 0
     }
 }
-
-// MARK: - Settings
-
-/// The settings rows for tiling.
-struct WindowsCard: View {
-    @Environment(PetalApp.self) private var app
-    /// Shows tiling's rows whatever the setting (for `--snapshot`).
-    var showTiling = false
-
-    var body: some View {
-        Card(title: "Windows", footer: "Quitting Petal, or turning this off, leaves every window where it is.") {
-            SettingToggle(key: "tiling", title: "Tile windows", detail: "Windows sit side by side and fill the screen, with no overlap.")
-            if showTiling || app.config.bool("tiling") {
-                SettingSlider(key: "tilingGaps", title: "Gaps", range: 0...32)
-                ForEach(Tiling.legend, id: \.keys) { row in
-                    HStack(spacing: 10) {
-                        KeyCaps(text: row.keys).frame(width: 104, alignment: .leading)
-                        Text(row.what).font(.system(size: TextSize.callout))
-                        Spacer()
-                        if row.ids.allSatisfy(Tiling.taken.contains) && !row.ids.isEmpty {
-                            Text("In use elsewhere").font(.system(size: TextSize.small)).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                Text("Drag a window onto another to swap them.").font(.system(size: TextSize.small)).foregroundStyle(.secondary)
-            }
-        }
-    }
-}
