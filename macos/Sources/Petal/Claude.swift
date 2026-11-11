@@ -1621,7 +1621,7 @@ final class AppSearch {
         panel?.load(AppSearchView(search: self))
     }
 
-    /// The panel. Closed, it goes back to its title and field, so the next opening is that size from its first frame.
+    /// The panel. Closed, its query is cleared, so the next opening lists the installed apps from its first frame.
     private func made() -> InputPanel {
         let panel = InputPanel()
         panel.onClose = { [weak self] in
@@ -1729,13 +1729,13 @@ struct AppSearchView: View {
     static let row: CGFloat = 42
     static let rows = 8
 
-    /// It opens as its title and its field. What's typed is found above the field, a row for each result up to
-    /// eight, so the panel grows upward over the dock and the field being typed in stays where it is.
+    /// It opens on the installed apps, which narrow as the person types. They sit above the field, a row for each
+    /// up to eight, so the panel grows and shrinks upward over the dock and the field being typed in stays where
+    /// it is.
     var body: some View {
         @Bindable var search = search
         let results = search.cachedResults
-        let typed = !search.query.trimmingCharacters(in: .whitespaces).isEmpty
-        let shown = typed ? max(1, min(results.count, Self.rows)) : 0
+        let shown = max(1, min(results.count, Self.rows))
         let accent = Color(nsColor: app.accent)
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -1743,7 +1743,7 @@ struct AppSearchView: View {
                 Spacer()
                 RoundButton(symbol: "xmark") { search.close() }
             }
-            if typed { list(results).frame(height: CGFloat(shown) * Self.row, alignment: .top) }
+            list(results).frame(height: CGFloat(shown) * Self.row, alignment: .top)
             TextField("Add an app, folder or website…", text: $search.query)
                 .textFieldStyle(.plain)
                 .font(.system(size: TextSize.heading))
