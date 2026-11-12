@@ -81,7 +81,7 @@ enum VaultField: String, CaseIterable, Codable {
     case value, notes
 
     /// Never told to the AI, never shown in Petal without Touch ID or the Mac's password, and searched for in
-    /// everything Petal AI reads (UIMap.SecretIndex), except notes.
+    /// everything Petal AI reads (UIMap.SecretIndex); of notes, only what reads as a code (Vault.noteCodes).
     var isSecret: Bool { [.password, .number, .securityCode, .value, .notes].contains(self) }
 
     func label(_ kind: VaultKind) -> String {
@@ -362,7 +362,7 @@ enum Vault {
 
     /// Every way an item's secrets may show up in text, for UIMap.SecretIndex: a password and key whole, a card
     /// number as typed, as digits and in fours (with spaces and dashes), and the security code. Not notes (they're the
-    /// person's words, too common to hide).
+    /// person's words, too common to hide): only what reads as a code in them, whole (`noteCodes`).
     static func secrets(_ item: VaultItem) -> [String] {
         var out: [String] = []
         for field in [VaultField.password, .value, .securityCode] where !item[field].isEmpty { out.append(item[field]) }
@@ -373,6 +373,25 @@ enum Vault {
         }
         var seen = Set<String>()
         return out.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    /// How many of a note's codes are looked for: a note is a few lines, not a file.
+    static let noteCodeCap = 100
+
+    /// What in an item's notes reads as a code (a recovery code, a key kept there): each run of letters, digits,
+    /// dashes and underscores that is 8 characters or more and has both a letter and a digit. UIMap.SecretIndex
+    /// looks for each whole, as a word of its own (its `words`), so the person's ordinary words, dates and numbers
+    /// are told as they are.
+    static func noteCodes(_ item: VaultItem) -> [String] {
+        var out: [String] = [], seen = Set<String>()
+        for run in item[.notes].split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }) {
+            let code = run.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+            guard code.count >= UIMap.SecretIndex.piece, code.contains(where: \.isLetter), code.contains(where: \.isNumber),
+                  seen.insert(code).inserted else { continue }
+            out.append(code)
+            if out.count == noteCodeCap { break }
+        }
+        return out
     }
 
     static func groups(_ text: String, by size: Int, _ separator: String) -> String {

@@ -738,6 +738,9 @@ perl -0ne '
 echo "run browser: no page writes the clipboard by itself, and a press is watched"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift
 "$out/vault"
+# What Petal AI's reads are searched with: every item's secrets, and what reads as a code in its notes (found whole).
+grep -q 'UIMap.SecretIndex(items.flatMap(Vault.secrets) + extra, words: items.flatMap(Vault.noteCodes))' Sources/Petal/AssistMore.swift \
+    || { echo "VaultIndex: the index holds each item's secrets and its notes' codes"; exit 1; }
 swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/AgentAccessCheck.swift
 "$out/agents"
 # Who is Petal AI is only what the check above proved, in the app too: each chat's AI process is recorded where it

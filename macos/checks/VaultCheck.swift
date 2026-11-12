@@ -46,6 +46,7 @@ struct VaultCheck {
         importConflicts()
         importPlaces()
         localPorts()
+        noteCodes()
         buyRevoked()
         buyTokens()
         joinedControls()
@@ -1200,6 +1201,40 @@ struct VaultCheck {
         expect(Vault.protonSites([["url": "http://localhost:5173/", "mode": "Exact"]] as [Any]).hosts == ["localhost:5173"], "Proton Pass's too")
         let again = Vault.merge(existing: [made], incoming: [rows[0]])
         expect(again.same == 1 && again.added == 0, "the same login on the same port is already here")
+    }
+
+    /// A vault item's notes are never told by the vault, and what reads as a code in them (recovery codes, a key
+    /// kept there) is hidden wherever Petal AI reads it, whole, as a word of its own. The person's ordinary words,
+    /// dates and numbers in a note stay as they are everywhere.
+    static func noteCodes() {
+        var login = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"])
+        login[.username] = "ada"; login[.password] = "Kq7-real-zebra-55"
+        login[.notes] = "Recovery codes: a1b2c-3d4e5, f6g7h-8i9j0 and (Zx9Qm4Lt7Kp2). Renewed 2026-11-12, phone 5551234567.\nMy password hint: the old street. key=tok_live_9f8e7d6c"
+        let codes = Vault.noteCodes(login)
+        expect(codes == ["a1b2c-3d4e5", "f6g7h-8i9j0", "Zx9Qm4Lt7Kp2", "tok_live_9f8e7d6c"], "what reads as a code in the notes (\(codes))")
+        expect(Vault.noteCodes(VaultItem(kind: .login, title: "Plain")).isEmpty, "no notes, no codes")
+        var long = VaultItem(kind: .login, title: "Many")
+        long[.notes] = (0..<300).map { "code\($0)x-abcd" }.joined(separator: " ")
+        expect(Vault.noteCodes(long).count == Vault.noteCodeCap, "at most \(Vault.noteCodeCap) of a note's codes")
+        expect(!Vault.secrets(login).contains { codes.contains($0) }, "they aren't secrets searched by their pieces")
+        // As Petal builds the index: every item's secrets, and its notes' codes as words.
+        let index = UIMap.SecretIndex(Vault.secrets(login), words: codes)
+        expect(index.matches("a1b2c-3d4e5") && index.matches("Use f6g7h-8i9j0 to sign in") && index.matches("code:Zx9Qm4Lt7Kp2.")
+               && index.matches("export KEY=tok_live_9f8e7d6c"), "a code from the notes is caught wherever it's read")
+        expect(index.redacted("Backup: a1b2c-3d4e5, then f6g7h-8i9j0.") == "Backup: \(UIMap.hidden), then \(UIMap.hidden).", "only the code is hidden, the words around it stay")
+        expect(index.matches("pw: Kq7-real-zebra-55"), "the password as before")
+        // Never by its pieces, and never the person's own words.
+        expect(!index.matches("a1b2c-3d") && !index.matches("xa1b2c-3d4e5") && !index.matches("a1b2c-3d4e56") && !index.matches("Zx9Qm4Lt"),
+               "part of a code, or a code run into other letters, isn't it")
+        for words in ["Recovery codes", "My password hint: the old street", "Renewed 2026-11-12", "phone 5551234567", "password", "Renewed", "tok_live"] {
+            expect(!index.matches(words), "the person's own words stay: \(words)")
+        }
+        // The vault itself never tells a note.
+        expect(Vault.shown(login)["notes"] == nil && !"\(Vault.shown(login))".contains("a1b2c"), "the notes are never in what the AI is told of an item")
+        // Without the words the index is as it was.
+        expect(!UIMap.SecretIndex(Vault.secrets(login)).matches("a1b2c-3d4e5"), "an index made without the notes' codes doesn't know them")
+        expect(UIMap.SecretIndex([], words: ["a1b2c-3d4e5"]).matches("x a1b2c-3d4e5") && !UIMap.SecretIndex([], words: []).matches("a1b2c-3d4e5")
+               && UIMap.SecretIndex([], words: []).isEmpty, "words alone make an index; none make an empty one")
     }
 
     /// Buy on tab A, tab B seen in that window (a petal_ui read, an act, a title change), back on A: the Buy is over.

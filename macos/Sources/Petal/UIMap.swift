@@ -287,7 +287,8 @@ enum UIMap {
 
     /// The vault's secrets as hashes (Swift's, seeded afresh in each process): a whole secret, every run of `piece`
     /// characters of a longer one, and a short one (`short` to `piece` - 1 characters, a PIN) as a word of its own
-    /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets. A card's
+    /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets. A code
+    /// written in an item's notes is caught whole, as a word of its own. A card's
     /// security code (any secret of 3 or 4 digits) is caught wherever it isn't part of a longer number ("CVV: 737",
     /// "cvc737", "CVV1234", not 737 in 17370). A card number is also caught across whatever separates its digits ("4242\u{00A0}4242", "4242.4242",
     /// full-width digits), and digits are digits in any script.
@@ -325,7 +326,7 @@ enum UIMap {
         private var wholes = Set<Int>()
         /// Every `piece` characters of a longer secret, as `window` hashes them.
         private var pieces = Set<UInt64>()
-        /// Short secrets by their length, as `window` hashes them.
+        /// Short secrets, and the words found only whole (`words`), by their length, as `window` hashes them.
         private var shorts: [Int: Set<UInt64>] = [:]
         /// 3- and 4-digit secrets (security codes), by their length, as `window` hashes them.
         private var numbers: [Int: Set<UInt64>] = [:]
@@ -342,7 +343,14 @@ enum UIMap {
             return index
         }
 
-        init(_ secrets: [String]) {
+        /// `words`: found only whole, as a word of its own, whatever its length (what reads as a code in an item's
+        /// notes), never by its pieces, so the person's other words stay as they are.
+        init(_ secrets: [String], words: [String] = []) {
+            for word in words where !word.isEmpty {
+                wholes.insert(word.hashValue)
+                let codes = Self.codes(Array(word))
+                shorts[codes.count, default: []].insert(Self.window(codes[...]))
+            }
             for secret in secrets where !secret.isEmpty {
                 wholes.insert(secret.hashValue)
                 let characters = Array(secret)
