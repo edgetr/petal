@@ -222,12 +222,15 @@ final class Config {
     /// that would turn on Full access or using apps, allow more without asking or take an app off the private list
     /// isn't taken, and the file is written to say what Petal goes by again. One that narrows any of them is taken.
     private func reload() {
-        var read = ConfigRules.reread(Self.parse(settingsFile), exists: FileManager.default.fileExists(atPath: settingsFile.path), before: settings)
+        let parsed = Self.parse(settingsFile), exists = FileManager.default.fileExists(atPath: settingsFile.path)
+        var read = ConfigRules.reread(parsed, exists: exists, before: settings)
         var refused: [String] = []
         if loaded { (read, refused) = ConfigRules.taken(read, over: settings, defaults: Settings.defaults) }
         settings = read
         dock = ConfigRules.reread(Self.parse(dockFile), exists: FileManager.default.fileExists(atPath: dockFile.path), before: dock)
-        loaded = true
+        // Only a read that said what the person chose counts as the first: one that couldn't read the file (a typo at
+        // launch) leaves the next good read to be taken as it is.
+        if parsed != nil || !exists { loaded = true }
         guard !refused.isEmpty else { return }
         // Once for the file as it is now: one that can't be written is left, and Petal goes by what it has.
         let stamp = Self.stamp(settingsFile) ?? .distantPast
