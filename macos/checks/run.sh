@@ -752,6 +752,11 @@ swiftc -parse-as-library -O -o "$out/instructions" Sources/Petal/InstructionsSta
 "$out/instructions"
 swiftc -parse-as-library -O -o "$out/routinestop" Sources/Petal/RoutineStop.swift checks/RoutineStopCheck.swift
 "$out/routinestop"
+# Where routines may take files from and file them into: a folder's path as written, and where it really is once
+# every link is followed (a subfolder that is a link, a named folder that leads out of the home folder or into its
+# Library, a link among the files), on throwaway folders in the temporary folder; the rule only answers, nothing moves.
+swiftc -parse-as-library -O -o "$out/routinerules" Sources/Petal/RoutineRules.swift checks/RoutineRulesCheck.swift
+"$out/routinerules"
 # Which Petal processes are a dock: a benchmark, snapshot, the AI's tools or a command never count as a second one
 # (PetalProcess; the Dock guard's shell test with pgrep and ps stood in for, never a real Petal).
 swiftc -parse-as-library -O -o "$out/petalprocess" Sources/Petal/PetalProcess.swift checks/PetalProcessCheck.swift

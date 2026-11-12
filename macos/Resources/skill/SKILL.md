@@ -172,9 +172,7 @@ Use, in this order:
   were made on: this Mac, its volume, inode and creation date), so they follow the file when it's renamed and a new
   file at its old path never gets them; keep it when editing by hand. The viewer tools' answers hide saved secrets
   as (hidden), and say nothing while the vault can't be read. A note changed in two places at once shows as two read-only papers (one may be a
-  "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac, and which watchers, chains and morning notes were set up on it, is in `~/Library/Application Support/Petal/notes-state.json`.
-- `routines.json`: the routines; change them with the routine tools rather than by hand. What they did is in
-  `~/Library/Application Support/Petal/routines-log.json`.
+  "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac, and which watchers, chains and morning notes were set up on it, is in `~/Library/Application Support/Petal/notes-state.json`.- `routines.json`: the routines; change them with the routine tools rather than by hand (one written there with  a folder outside the home folder, or in its Library, is listed and never runs). What they did is in  `~/Library/Application Support/Petal/routines-log.json`.
 
 Keep the JSON valid: Petal won't overwrite a file it can't read, and won't apply it either.
 
