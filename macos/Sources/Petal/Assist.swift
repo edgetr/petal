@@ -170,6 +170,11 @@ final class Assist {
         if pending?.owner == owner { settle(false) }
     }
 
+    /// That one card, if it's still up, is answered Don't.
+    func decline(card: UUID) {
+        if pending?.id == card { settle(false) }
+    }
+
     /// A request's asker went before its answer (an agent that gave up waiting, or quit): what that chat or AI
     /// session had going stops, its card is answered Don't, and what it was allowed this task goes, so nothing it
     /// asked for happens with nobody to hear of it; its next request starts afresh and asks again. (An AI session's
@@ -214,7 +219,9 @@ final class Assist {
         guard live() else { return }   // its client went before Petal got to it: nothing to answer
         // Who a caller outside Petal is goes with its requests to every card made for them (`ask`).
         if let note, let who {
-            if outside.count > 200 { outside.removeAll() }
+            if outside.count > 200 {
+                outside = outside.filter { name, _ in name.hasPrefix("mcp-") ? Int32(name.dropFirst(4)).map { kill($0, 0) == 0 } ?? false : true }
+            }
             outside[note] = who.agent == .petal ? nil : who
         }
         // An AI session outside Petal keeps its hidden display while it keeps asking (RunDisplays).
@@ -390,7 +397,9 @@ final class Assist {
             let realTitle: String = window.flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
             let frame = window.flatMap { Windows.frame(of: $0) } ?? .zero
             let focused: AXUIElement? = number == focusedID ? Windows.value(element, kAXFocusedUIElementAttribute) : nil
-            let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
+            // Never the selection in Petal's own windows: a note's words are told through the note tools, which keep
+            // a Private notebook's to itself.
+            let selected: String = pid == getpid() ? "" : focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
             // Nothing of the vault's secrets goes to the AI: not in the title, the selection, nor the clipboard.
             let title = Self.withoutSecrets(realTitle)
             // Nothing selected in a field holding a secret, not even part of one: a card number selected four

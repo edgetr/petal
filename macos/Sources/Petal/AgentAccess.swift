@@ -527,6 +527,9 @@ enum AgentAccess {
         /// One of Petal's own chats: the chat Petal started the AI above it for, by Petal's own record (`Started`),
         /// never by what the caller says. Nil for everyone else.
         var note: String? = nil
+        /// For `petal run` only: the chat of Petal's own it runs under (by the same record), where its card shows and
+        /// whose Stop answers it. Where it shows, never what it may do: it is asked and granted as the agent above it.
+        var chat: String? = nil
 
         /// "Codex in T3 Code", "Claude Code in Terminal", "An unknown program (nc)".
         var label: String {
@@ -555,6 +558,21 @@ enum AgentAccess {
     /// `started`: the AI processes Petal started for its chats. `tools`: it asks for one of Petal AI's tools
     /// (`assist`); only there is anyone Petal AI. `petal run` is always the agent that ran it, and asks as that agent.
     static func caller(chain: [Process], petalPID: Int32, peerIsPetal: Bool, project: String, started: [Started] = [], tools: Bool = true) -> Caller {
+        var caller = walk(chain: chain, petalPID: petalPID, peerIsPetal: peerIsPetal, project: project, started: started, tools: tools)
+        if !tools, caller.peerIsPetal { caller.chat = underChat(chain, petalPID: petalPID, started: started) }
+        return caller
+    }
+
+    /// The chat of Petal's own whose AI process (Petal's record of it, with Petal right above) is somewhere above
+    /// what connected, nearest first; nil when none is.
+    static func underChat(_ chain: [Process], petalPID: Int32, started: [Started]) -> String? {
+        for index in chain.indices.dropFirst() where index + 1 < chain.count && chain[index + 1].pid == petalPID && chain[index].start != 0 {
+            if let record = started.first(where: { $0.pid == chain[index].pid && $0.start == chain[index].start }) { return record.note }
+        }
+        return nil
+    }
+
+    private static func walk(chain: [Process], petalPID: Int32, peerIsPetal: Bool, project: String, started: [Started], tools: Bool) -> Caller {
         let host = hostApp(chain)
         let pid = chain.first?.pid ?? 0
         guard let peer = chain.first, peerIsPetal else {
@@ -581,19 +599,23 @@ enum AgentAccess {
         return Caller(agent: .command, host: host, project: project, program: peer.file, pid: pid)
     }
 
-    /// The chat of Petal's own that `chain` asks for, or nil. The process right above what connected must be Claude
-    /// Code or Codex signed by its maker, and the very process Petal started for that chat (the same pid and start),
-    /// with Petal right above it; or, where what Petal started is the agent's launcher and not the agent (npm's
-    /// `codex` is a script that runs the signed one), the process that launcher started. Petal being somewhere above
+    /// The chat of Petal's own that `chain` asks for, or nil. The process right above what connected must be the very
+    /// process Petal started for that chat (the same pid and start), with Petal right above it; or, where what Petal
+    /// started is the agent's launcher and not the agent (npm's `codex` is a script that runs the signed one), Claude
+    /// Code or Codex signed by its maker, started by that launcher. Petal being somewhere above
     /// is never enough: a shell, a hook, another tool server or a command the AI runs is further down, and the walk
     /// in `caller` says whose it is (the agent above it, asked as any agent outside Petal).
     static func ownChat(_ chain: [Process], petalPID: Int32, started: [Started]) -> Started? {
-        guard chain.count >= 3, let agent = chain[1].agent, agent.verified else { return nil }
+        guard chain.count >= 3 else { return nil }
         func record(_ process: Process) -> Started? {
             process.start == 0 ? nil : started.first { $0.pid == process.pid && $0.start == process.start }
         }
+        // The very process Petal started for the chat, whatever install of the AI it is (Petal chose and started it).
         if let chat = record(chain[1]) { return chain[2].pid == petalPID ? chat : nil }
-        guard chain.count >= 4, chain[2].role == .other, let chat = record(chain[2]), chain[3].pid == petalPID else { return nil }
+        // A launcher Petal started, and the agent it runs: only one signed by its maker counts, so nothing else the
+        // launcher's process runs (a shell, a hook) is ever taken for the chat.
+        guard chain.count >= 4, let agent = chain[1].agent, agent.verified, chain[2].role == .other,
+              let chat = record(chain[2]), chain[3].pid == petalPID else { return nil }
         return chat
     }
 
@@ -960,6 +982,9 @@ enum AgentAccess {
     /// person never allows a command by its beginning only. Nil when the title already says it whole.
     static func keyCommand(_ command: String) -> String? {
         let whole = clipped(visible(command), commandWhole)
+        if visible(command).count > commandWhole {
+            return "The command: “\(whole)”. It's longer than Petal can show: allow it only if you know all of what it runs."
+        }
         return whole == clipped(whole, commandShort) ? nil : "The whole command: “\(whole)”."
     }
 

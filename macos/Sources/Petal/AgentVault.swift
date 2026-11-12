@@ -183,9 +183,15 @@ extension Assist {
     /// granted like that agent anywhere else.
     /// `request`: `petal run` ended or gave up waiting (its socket closed), its card is answered Don't and no key goes.
     func agentKeys(_ json: String, from who: AgentAccess.Caller, request: IPC.Pending, reply: @escaping @MainActor (String) -> Void) {
-        let owner = "mcp-\(who.pid)"
+        // Under one of Petal's own chats (a coding helper's command), its card shows on that chat and its Stop answers
+        // it; it's still asked and granted as the agent that ran it.
+        let owner = who.chat ?? "mcp-\(who.pid)"
+        var asked: UUID?
         request.waiting = { [unowned self] in pending?.owner == owner }
-        request.onHangUp { [unowned self] in decline(owner: owner) }
+        request.onHangUp { [unowned self] in
+            // Its own card only: the chat it shows on may be asking about something else.
+            if who.chat == nil { decline(owner: owner) } else if let asked { decline(card: asked) }
+        }
         let send = { (object: [String: Any]) in
             let data = (try? JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])) ?? Data("{}".utf8)
             reply(String(decoding: data, as: UTF8.self))
@@ -199,7 +205,8 @@ extension Assist {
             guard let ref = entry["ref"] as? String, !ref.isEmpty else { return nil }
             return .init(ref: ref, variable: (entry["env"] as? String).flatMap { $0.isEmpty ? nil : $0 })
         }
-        let command = AgentAccess.clipped(AgentAccess.visible(args["command"] as? String ?? ""), AgentAccess.commandWhole)
+        let fullCommand = AgentAccess.visible(args["command"] as? String ?? "")
+        let command = AgentAccess.clipped(fullCommand, AgentAccess.commandWhole)
         let stdin = args["stdin"] as? Bool ?? false
         guard !wanted.isEmpty else { return fail("Say which key with --key.") }
         VaultStore.load { [self] read in
@@ -276,7 +283,7 @@ extension Assist {
                 var kept: [String: String] = [:]
                 // The title says the command's beginning: where that isn't all of it, the rest is said here.
                 let how = "It never sees \(it): Petal gives \(it) to the command and takes \(it) out of what the command prints."
-                let detail = [AgentAccess.keyCommand(command), self.agentDetail(who, said: "", how: how)].compactMap { $0 }.joined(separator: " ")
+                let detail = [AgentAccess.keyCommand(fullCommand), self.agentDetail(who, said: "", how: how)].compactMap { $0 }.joined(separator: " ")
                 self.ask("agent-key", AgentAccess.keyQuestion(who, titles: missing.map(\.item.title), command: command, home: self.home), detail: detail,
                          always: true, warn: true, allow: "Allow once", owner: owner, keep: keep ? "Always for this project" : nil, mark: who.agent,
                          kept: {
@@ -284,6 +291,7 @@ extension Assist {
                                  kept[pair.item.id] = grants.add(AgentAccess.Grant(item: pair.item.id, title: pair.item.title, project: who.project, agent: who.agent))
                              }
                          }) { allowed in
+                    asked = nil
                     guard allowed else {
                         passes.values.forEach(grants.finish)
                         return fail("The person didn't let \(who.label) use \(missing.count == 1 ? "that key" : "those keys"). Don't find another way; ask them.")
@@ -292,6 +300,7 @@ extension Assist {
                     for pair in missing { passes[pair.item.id] = pass(kept[pair.item.id].map { .grant($0) } ?? .allowOnce(card: card), pair.item.id) }
                     give(passes)
                 }
+                if self.pending?.kind == "agent-key", self.pending?.owner == owner { asked = self.pending?.id }
             }
         }
     }

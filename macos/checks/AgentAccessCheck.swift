@@ -394,15 +394,16 @@ struct AgentAccessCheck {
         let command = ask([tool, sh, node, zsh, chat, dock])
         expect(command.agent == .claude && command.note == nil, "a command the chat runs, and what that runs", "\(command)")
         if case .check = AgentAccess.gate(command) {} else { expect(false, "what a chat runs is checked like any agent outside Petal") }
-        // Anything Petal started that isn't Claude Code or Codex signed by its maker.
-        let stray = P(pid: 40, path: "/Users/me/Downloads/claude", start: 3_000)
-        let unsigned = ask([tool, stray, dock], started: [S(pid: 40, start: 3_000, note: "note-3")])
-        expect(unsigned.agent != .petal && unsigned.note == nil && !unsigned.grantable, "a program named like Claude Code that Petal started", "\(unsigned)")
-        let plain = P(pid: 41, path: "/Users/me/Downloads/x", start: 3_000)
-        let other = ask([tool, plain, dock], started: [S(pid: 41, start: 3_000, note: "note-3")])
-        expect(other.agent == .command && other.note == nil, "any other program Petal started", "\(other)")
-        let otherTeam = P(pid: 42, path: claudePath, team: "ABCDE12345", identifier: "com.anthropic.claude-code", start: 3_000)
-        expect(ask([tool, otherTeam, dock], started: [S(pid: 42, start: 3_000, note: "note-3")]).agent == .unknown, "Claude Code's name, another team")
+        // Any install of the AI that Petal itself started for the chat is that chat's (npm's Claude Code is node; a
+        // Homebrew formula's Codex is signed ad hoc): Petal chose and started it, and the record is that very process.
+        let npm = P(pid: 40, path: "/opt/homebrew/bin/node", start: 3_000)
+        let viaNode = ask([tool, npm, dock], started: [S(pid: 40, start: 3_000, note: "note-3")])
+        expect(viaNode.agent == .petal && viaNode.note == "note-3", "an unsigned install Petal started is still its chat's", "\(viaNode)")
+        let formula = P(pid: 42, path: "/opt/homebrew/Cellar/codex/0.167.0/bin/codex", start: 3_000)
+        expect(ask([tool, formula, dock], started: [S(pid: 42, start: 3_000, note: "note-3")]).note == "note-3", "a formula's Codex too")
+        // What such an install runs is never the chat: a shell or a hook under it is a command.
+        let underNode = ask([tool, sh, npm, dock], started: [S(pid: 40, start: 3_000, note: "note-3")])
+        expect(underNode.agent != .petal && underNode.note == nil, "a command under an unsigned install isn't the chat", "\(underNode)")
         // The real agent, but not a process Petal recorded: never by Petal being above it.
         expect(ask([tool, chat, dock], started: []).agent == .claude, "an agent Petal has no record of")
         expect(ask([tool, chat, dock], started: [S(pid: 20, start: 999, note: "note-1")]).agent == .claude, "a pid Petal recorded for an earlier process")
@@ -423,6 +424,12 @@ struct AgentAccessCheck {
         expect(run.agent == .claude && run.note == nil && run.grantable && run.label == "Claude Code in Petal", "petal run right under the chat's AI", "\(run)")
         let deeper = ask([tool, zsh, chat, dock], tools: false)
         expect(deeper.agent == .claude && deeper.grantable, "petal run in the chat's shell", "\(deeper)")
+        // Its card shows on the chat it runs under (where that chat's Stop answers it), by Petal's record only.
+        expect(run.chat == "note-1" && deeper.chat == "note-1" && ask([tool, sh, node, zsh, chat, dock], tools: false).chat == "note-1",
+               "petal run under a chat: its card on that chat", "\(run.chat ?? "none")")
+        expect(ask([tool, zsh, chat, dock], started: [], tools: false).chat == nil && ask([tool, chat, zsh, dock], tools: false).chat == nil,
+               "with no record of it, or not right under this Petal, no chat")
+        expect(own.chat == nil, "a chat's own tools carry their note, not a place for a card")
         let grant = AgentAccess.Grant(item: "k1", title: "Anthropic", project: "/p", agent: .claude)
         expect(AgentAccess.granted([grant], item: "k1", caller: run) != nil && AgentAccess.granted([grant], item: "k1", caller: own) == nil,
                "a grant for Claude Code in the project covers it; nothing is granted to Petal AI")
@@ -810,6 +817,7 @@ struct AgentAccessCheck {
         let longest = AgentAccess.keyCommand(String(repeating: "x", count: 500)) ?? ""
         expect(longest.contains(String(repeating: "x", count: AgentAccess.commandWhole - 1) + "…") && !longest.contains(String(repeating: "x", count: AgentAccess.commandWhole)),
                "as much as the card keeps, and a mark where it's cut")
+        expect(longest.contains("longer than Petal can show"), "and the card says it couldn't show all of it", longest)
         // What shows is what runs: nothing that turns the reading around, hides or looks like something else.
         let turned = AgentAccess.commandLine(["sh", "-c", "x\u{202E}y\u{200B}", "a\u{00A0}b", "tab\there", "line\nbreak", "it's\u{2066}", "\u{E0041}", "back\\slash\u{7}"])
         expect(turned == "sh -c $'x\\u202ey\\u200b' $'a\\xa0b' $'tab\\there' $'line\\nbreak' $'it\\'s\\u2066' $'\\U000e0041' $'back\\\\slash\\x07'",

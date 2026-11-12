@@ -58,3 +58,4 @@ These are how Petal works today, not holes:
 - A Private notebook is kept from Petal AI and from Petal's own pictures; it is not protection from another app recording the screen.
 - `petal run` takes a key out of what a command prints. A command written to leak a key in another form still can.
 - An agent's Always for a project covers anything that can start or set up that agent in that project.
+- Full access and an earlier Always for Petal AI also cover the person's own Claude Code and Codex outside Petal, and so whatever those run.
