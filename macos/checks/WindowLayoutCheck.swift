@@ -51,6 +51,12 @@ struct WindowLayoutCheck {
         for i in all.indices { for j in all.indices where i < j { expect(!all[i].intersects(all[j]), "no overlap", "\(all[i]) \(all[j])") } }
         expect(all.allSatisfy { area.contains($0) }, "all inside the area")
 
+        // A tiled window that moved: the person's drag only with the button down or pressed a moment ago; one its app
+        // moved by itself goes back to its place, whatever window the pointer rests on.
+        expect(TileLayout.dragged(buttonDown: true, sinceMouseDown: 30), "the button down: a drag")
+        expect(TileLayout.dragged(buttonDown: false, sinceMouseDown: 0.2), "let go a moment ago: a drag that just ended")
+        expect(!TileLayout.dragged(buttonDown: false, sinceMouseDown: 40), "nobody pressed: its app moved it, nothing swaps")
+
         // Splitting a window that isn't there splits the newest.
         var other = TileTree()
         other.insert(1); other.insert(2, splitting: 99)

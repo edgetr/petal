@@ -173,8 +173,10 @@ enum Tiling {
         case .moved, .resized:
             guard let id = event.window, let element = event.element, let done = applied[id],
                   let now = Windows.frame(of: element), !now.equalTo(done.actual, within: 2), layout(of: id) != nil else { return }
-            // Someone is dragging or resizing a tiled window: wait for the mouse to let go.
-            settle(id, attempts: 0)
+            // Someone is dragging or resizing a tiled window: wait for the mouse to let go. A window its app moved
+            // by itself (nobody pressed the mouse) only goes back to its place.
+            let since = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown)
+            settle(id, attempts: 0, dragged: TileLayout.dragged(buttonDown: NSEvent.pressedMouseButtons & 1 != 0, sinceMouseDown: since))
         case .missionControl, .missionControlEnded, .titleChanged, .tabSwitched:
             break
         }
@@ -190,11 +192,12 @@ enum Tiling {
     /// When the drag ends: dropped on another tiled window, the two swap; on another screen's layout, it joins it
     /// there; anywhere else, it goes back to its place. Resizing goes back too. Petal never moves the pointer: it
     /// only reads where it is.
-    private static func settle(_ id: CGWindowID, attempts: Int) {
+    private static func settle(_ id: CGWindowID, attempts: Int, dragged: Bool) {
         settling?.cancel()
         let item = DispatchWorkItem {
-            if NSEvent.pressedMouseButtons & 1 != 0 && attempts < 300 { settle(id, attempts: attempts + 1); return }
+            if NSEvent.pressedMouseButtons & 1 != 0 && attempts < 300 { settle(id, attempts: attempts + 1, dragged: dragged); return }
             guard active, let from = layout(of: id) else { return }
+            guard dragged else { applied[id] = nil; return retile() }
             let top = Screens.all.first?.frame.maxY ?? 0
             let mouse = NSEvent.mouseLocation
             let pointer = CGPoint(x: mouse.x, y: top - mouse.y)
