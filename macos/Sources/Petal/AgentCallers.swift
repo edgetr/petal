@@ -6,8 +6,9 @@ import Security
 /// signature, its folder (the project), and the processes above it, up to an agent signed by its maker (Claude Code,
 /// Codex) and the app it runs in (T3 Code, Terminal, Ghostty…). Off the main thread; the pure part is AgentAccess.
 enum AgentCallers {
-    /// The caller connected on `client`. Runs on the socket's thread.
-    nonisolated static func identify(client: Int32, petal: Int32 = getpid()) -> AgentAccess.Caller {
+    /// The caller connected on `client`. Runs on the socket's thread. `tools`: it asks for one of Petal AI's tools
+    /// (`assist`), the only place a caller can be one of Petal's own chats.
+    nonisolated static func identify(client: Int32, tools: Bool, petal: Int32 = getpid()) -> AgentAccess.Caller {
         var token = audit_token_t()
         var size = socklen_t(MemoryLayout<audit_token_t>.size)
         guard getsockopt(client, SOL_LOCAL, LOCAL_PEERTOKEN, &token, &size) == 0 else {
@@ -20,7 +21,7 @@ enum AgentCallers {
         var seen = Set<Int32>()
         while current > 1, chain.count < 24, seen.insert(current).inserted {
             guard let info = bsdInfo(current) else { break }
-            var process = AgentAccess.Process(pid: current, path: path(of: current))
+            var process = AgentAccess.Process(pid: current, path: path(of: current), start: info.start)
             // Who signed it, for everything above what connected that could be an agent (never a system shell).
             if !chain.isEmpty, !AgentAccess.systemProgram(process.path) {
                 (process.team, process.identifier) = signer(current, start: info.start)
@@ -30,7 +31,35 @@ enum AgentCallers {
         }
         let folder = workingFolder(pid).map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path } ?? "/"
         let project = AgentAccess.project(folder, files: disk)
-        return AgentAccess.caller(chain: chain, petalPID: petal, peerIsPetal: peerIsPetal, project: project)
+        return AgentAccess.caller(chain: chain, petalPID: petal, peerIsPetal: peerIsPetal, project: project, started: chats(), tools: tools)
+    }
+
+    // MARK: Petal's own chats
+
+    nonisolated(unsafe) private static var records: [AgentAccess.Started] = []
+
+    /// Petal just started the AI process `pid` for the chat `note` (a chat's turn, a note's helper, a coding helper):
+    /// recorded with when it started, so only that very process is ever taken for the chat's own. Records of
+    /// processes that are gone go at the same time.
+    nonisolated static func started(_ pid: Int32, for note: String) {
+        let start = bsdInfo(pid)?.start
+        lock.lock()
+        defer { lock.unlock() }
+        records.removeAll { $0.pid == pid || bsdInfo($0.pid)?.start != $0.start }
+        if let start { records.append(AgentAccess.Started(pid: pid, start: start, note: note)) }
+    }
+
+    /// That process ended: it's nobody's chat any more.
+    nonisolated static func ended(_ pid: Int32) {
+        lock.lock()
+        records.removeAll { $0.pid == pid }
+        lock.unlock()
+    }
+
+    nonisolated private static func chats() -> [AgentAccess.Started] {
+        lock.lock()
+        defer { lock.unlock() }
+        return records
     }
 
     /// Petal's own designated requirement: what connected is this very app (the same signature), checked now.

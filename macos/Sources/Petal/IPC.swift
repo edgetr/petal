@@ -144,7 +144,7 @@ final class IPC {
         let done = DispatchSemaphore(value: 0)
         let answer = Answer()
         // Who's asking, read here (off the main thread) from the socket itself.
-        let caller = Self.identified.contains(words.first ?? "") ? AgentCallers.identify(client: client) : nil
+        let caller = Self.identified.contains(words.first ?? "") ? AgentCallers.identify(client: client, tools: words.first == "assist") : nil
         let pending = Pending()
         // Its client watched from here on: one already gone is hung up before its handler is even queued.
         let peer = caller == nil ? nil : Peer(client)

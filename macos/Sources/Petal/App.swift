@@ -455,10 +455,10 @@ final class PetalApp {
         // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
         // person to allow it.
         ipc.onFrom("assist") { [unowned self] args, who, request, reply in
-            // Which chat asks: a note's id only from Petal's own chats (Petal started them); any other caller is the
-            // process that connected, whatever it says, so it never stands in for a note or another session.
-            let claimed = args.dropFirst(2).first ?? ""
-            let caller = who.agent == .petal && !claimed.isEmpty ? claimed : "mcp-\(who.pid)"
+            // Which chat asks: one of Petal's own only by Petal's record of the AI process it started for that chat
+            // (`who.note`, AgentCallers.started); any other caller is the process that connected. Never what the
+            // caller says, so nobody stands in for a note or another session.
+            let caller = who.note ?? "mcp-\(who.pid)"
             // Its card keeps it waiting however long the person takes; its asker gone, what it had going stops.
             // (Waiting its turn for a hidden display, or for an app another run or the person is using, keeps it
             // waiting the same way.)

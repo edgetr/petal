@@ -666,6 +666,16 @@ swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Pe
 "$out/vault"
 swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/AgentAccessCheck.swift
 "$out/agents"
+# Who is Petal AI is only what the check above proved, in the app too: each chat's AI process is recorded where it
+# starts, the socket says which function is asked for, a chat's id comes from that record (never from the caller's
+# words), and `petal run` asks for every caller alike (no way round its card for Petal AI).
+grep -qF 'AgentCallers.started(process.processIdentifier, for: noteID.uuidString)' Sources/Petal/Claude.swift \
+    && grep -qF 'AgentCallers.identify(client: client, tools: words.first == "assist")' Sources/Petal/IPC.swift \
+    && grep -qF 'let caller = who.note ?? "mcp-\(who.pid)"' Sources/Petal/App.swift \
+    || { echo "agents: a chat is Petal's own only by Petal's record of the AI process it started"; exit 1; }
+if grep -nE 'agent == \.petal|kind: \.petal|pass\(\.petal' Sources/Petal/AgentVault.swift; then echo "agents: petal run must ask for every caller, Petal's own chats too"; exit 1; fi
+if grep -nE 'who\.agent == \.petal' Sources/Petal/App.swift; then echo "agents: a chat's id comes from Petal's record, never from who claims it"; exit 1; fi
+echo "agents: Petal AI is only the tools of an AI Petal started; petal run always asks"
 # The notes for the AI in the settings window: typing, changes made elsewhere, picks and late answers (no file).
 swiftc -parse-as-library -O -o "$out/instructions" Sources/Petal/InstructionsState.swift checks/InstructionsCheck.swift
 "$out/instructions"

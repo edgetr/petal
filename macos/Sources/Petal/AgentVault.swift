@@ -178,7 +178,9 @@ extension Assist {
 
     /// `petal run` asks for keys (["agentKeys", json]): {"keys": [{"ref", "env"}], "command", "stdin"}. Only to
     /// Petal's own `petal run`, which puts them in the command's variables (or input) and takes them out of what it
-    /// prints; the agent that ran it never sees them. Asks first as `agentGate` does, one card for every key.
+    /// prints; the agent that ran it never sees them. Asks first as `agentGate` does, one card for every key, whoever
+    /// ran it: a command one of Petal's own chats runs is its agent's (Claude Code or Codex, in Petal), asked and
+    /// granted like that agent anywhere else.
     /// `request`: `petal run` ended or gave up waiting (its socket closed), its card is answered Don't and no key goes.
     func agentKeys(_ json: String, from who: AgentAccess.Caller, request: IPC.Pending, reply: @escaping @MainActor (String) -> Void) {
         let owner = "mcp-\(who.pid)"
@@ -259,9 +261,6 @@ extension Assist {
             }
             @MainActor func pass(_ kind: AgentAccess.Authorization.Kind, _ item: String) -> AgentPass {
                 grants.pass(.init(kind: kind, operation: operation, item: item), caller: who)
-            }
-            if who.agent == .petal {
-                return give(Dictionary(found.map { ($0.item.id, pass(.petal, $0.item.id)) }, uniquingKeysWith: { a, _ in a }))
             }
             grants.whenLoaded {
                 guard !request.hungUp else { return fail("petal run stopped waiting: no key was given.") }

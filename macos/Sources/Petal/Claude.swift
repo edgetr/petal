@@ -535,6 +535,7 @@ final class Agent {
             DispatchQueue.main.async { MainActor.assumeIsolated { self.errorText += text } }
         }
         process.terminationHandler = { finished in
+            AgentCallers.ended(finished.processIdentifier)
             // The last chunk (often the result, with any permission denials) may still be unread.
             output.fileHandleForReading.readabilityHandler = nil
             error.fileHandleForReading.readabilityHandler = nil
@@ -575,6 +576,8 @@ final class Agent {
         }
         do {
             try process.run()
+            // Whose tools this process's are: Petal's record of it, the only thing that makes them this chat's.
+            AgentCallers.started(process.processIdentifier, for: noteID.uuidString)
             running = true
             self.process = process
             // Bound to its run: paused or cancelled, the process ends (and if that happened meanwhile, now).

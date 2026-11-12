@@ -177,7 +177,7 @@ enum MCP {
             let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
             // Which chat asks: a Petal chat's note (PETAL_NOTE, set by Petal for its own chats), answered about the
             // note's window; any other AI session is this process, so two sessions never share what they looked at
-            // or were allowed.
+            // or were allowed. The running Petal goes by its own record of who this process is, never by this.
             let note = ProcessInfo.processInfo.environment["PETAL_NOTE"] ?? ""
             let caller = note.isEmpty ? "mcp-\(getpid())" : note
             // Petal answers within 150 seconds, or keeps saying it's waiting (a space every 10 s) while a card is up for

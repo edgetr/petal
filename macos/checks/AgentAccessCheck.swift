@@ -348,9 +348,7 @@ struct AgentAccessCheck {
         // What connected isn't Petal's own code: an unknown program, whatever is above it.
         let netcat = AgentAccess.caller(chain: [P(pid: 50, path: "/usr/bin/nc"), zsh, claude] + host, petalPID: 5, peerIsPetal: false, project: "/p")
         expect(netcat.agent == .unknown && netcat.label == "An unknown program (nc)" && !netcat.peerIsPetal, "nc on the socket", netcat.label)
-        // Petal's own chats: Petal is in the chain.
-        let own = AgentAccess.caller(chain: [P(pid: 60, path: petal), claude, P(pid: 5, path: petal)], petalPID: 5, peerIsPetal: true, project: "/p")
-        expect(own.agent == .petal && own.label == "Petal AI" && !own.grantable, "Petal's own chat")
+        ownChats()
         // No agent above: the person's own command.
         let mine = AgentAccess.caller(chain: [run, zsh, P(pid: 7, path: "/usr/bin/login"), terminal], petalPID: 5, peerIsPetal: true, project: "/p")
         expect(mine.agent == .command && mine.label == "A command in Terminal", "a command typed in Terminal", mine.label)
@@ -363,6 +361,74 @@ struct AgentAccessCheck {
         expect(AgentAccess.hostApp([P(pid: 1, path: "/Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)")])
                == "Visual Studio Code", "the outermost app, not a helper")
         expect(AgentAccess.hostApp([zsh]) == nil, "no app")
+    }
+
+    /// Petal's own chats: only the tool process an AI started itself, where that AI is the very process Petal started
+    /// for the chat (its pid and start, as Petal recorded them) and is signed by its maker. Petal somewhere above is
+    /// never enough: a shell, a hook, another tool server or a command the chat runs is the agent's, asked as it is
+    /// anywhere else; the chat is the one Petal recorded, whatever the caller says; and `petal run` is never Petal AI.
+    static func ownChats() {
+        typealias P = AgentAccess.Process
+        typealias S = AgentAccess.Started
+        let petal = "/Applications/Petal.app/Contents/MacOS/Petal"
+        let dock = P(pid: 5, path: petal)
+        let tool = P(pid: 60, path: petal)
+        let claudePath = "/Users/me/.local/share/claude/versions/2.1.144"
+        let chat = P(pid: 20, path: claudePath, team: "Q6L2SF6YDW", identifier: "com.anthropic.claude-code", start: 1_000)
+        let codexPath = "/Users/me/.codex/packages/standalone/releases/0.167.0-aarch64-apple-darwin/bin/codex"
+        let codexChat = P(pid: 21, path: codexPath, team: "2DC432GLL2", identifier: "codex", start: 2_000)
+        let records = [S(pid: 20, start: 1_000, note: "note-1"), S(pid: 21, start: 2_000, note: "note-2")]
+        let zsh = P(pid: 30, path: "/bin/zsh"), sh = P(pid: 31, path: "/bin/sh"), node = P(pid: 32, path: "/opt/homebrew/bin/node")
+        func ask(_ chain: [P], started: [S] = records, tools: Bool = true) -> AgentAccess.Caller {
+            AgentAccess.caller(chain: chain, petalPID: 5, peerIsPetal: true, project: "/p", started: started, tools: tools)
+        }
+        let own = ask([tool, chat, dock])
+        expect(own.agent == .petal && own.label == "Petal AI" && !own.grantable && own.note == "note-1", "the tools of an AI Petal started: its chat's", "\(own)")
+        expect(ask([tool, codexChat, dock]).note == "note-2", "each chat by its own process")
+        expect(AgentAccess.gate(own) == .petal, "and the vault's own rules")
+        // Further down than the AI's own tool process: the agent's, never Petal AI, and no chat's.
+        let hook = ask([tool, sh, P(pid: 33, path: "/Users/me/.claude/hooks/x"), chat, dock])
+        expect(hook.agent == .claude && hook.note == nil && hook.label == "Claude Code in Petal", "a hook's program under the chat", "\(hook)")
+        let server = ask([tool, node, chat, dock])
+        expect(server.agent == .claude && server.note == nil, "another tool server under the chat", "\(server)")
+        let command = ask([tool, sh, node, zsh, chat, dock])
+        expect(command.agent == .claude && command.note == nil, "a command the chat runs, and what that runs", "\(command)")
+        if case .check = AgentAccess.gate(command) {} else { expect(false, "what a chat runs is checked like any agent outside Petal") }
+        // Anything Petal started that isn't Claude Code or Codex signed by its maker.
+        let stray = P(pid: 40, path: "/Users/me/Downloads/claude", start: 3_000)
+        let unsigned = ask([tool, stray, dock], started: [S(pid: 40, start: 3_000, note: "note-3")])
+        expect(unsigned.agent != .petal && unsigned.note == nil && !unsigned.grantable, "a program named like Claude Code that Petal started", "\(unsigned)")
+        let plain = P(pid: 41, path: "/Users/me/Downloads/x", start: 3_000)
+        let other = ask([tool, plain, dock], started: [S(pid: 41, start: 3_000, note: "note-3")])
+        expect(other.agent == .command && other.note == nil, "any other program Petal started", "\(other)")
+        let otherTeam = P(pid: 42, path: claudePath, team: "ABCDE12345", identifier: "com.anthropic.claude-code", start: 3_000)
+        expect(ask([tool, otherTeam, dock], started: [S(pid: 42, start: 3_000, note: "note-3")]).agent == .unknown, "Claude Code's name, another team")
+        // The real agent, but not a process Petal recorded: never by Petal being above it.
+        expect(ask([tool, chat, dock], started: []).agent == .claude, "an agent Petal has no record of")
+        expect(ask([tool, chat, dock], started: [S(pid: 20, start: 999, note: "note-1")]).agent == .claude, "a pid Petal recorded for an earlier process")
+        let unread = P(pid: 20, path: claudePath, team: "Q6L2SF6YDW", identifier: "com.anthropic.claude-code")
+        expect(ask([tool, unread, dock], started: [S(pid: 20, start: 0, note: "note-1")]).agent == .claude, "a start Petal couldn't read matches nothing")
+        expect(ask([tool, chat, zsh, dock]).agent == .claude, "the recorded process must be Petal's own child")
+        expect(ask([tool, chat, P(pid: 6, path: petal)]).agent == .claude, "and under this Petal, not another")
+        // What Petal started is the agent's launcher (npm's codex is a script): the signed agent right under it.
+        let launcher = P(pid: 50, path: "/opt/homebrew/bin/node", start: 4_000)
+        let launched = [S(pid: 50, start: 4_000, note: "note-4")]
+        let native = P(pid: 51, path: "/opt/homebrew/lib/node_modules/@openai/codex/vendor/aarch64-apple-darwin/codex/codex", team: "2DC432GLL2", identifier: "codex", start: 4_001)
+        expect(ask([tool, native, launcher, dock], started: launched).note == "note-4", "the signed agent its launcher started")
+        expect(ask([tool, zsh, native, launcher, dock], started: launched).agent == .codex, "a command under it is still the agent's")
+        expect(ask([tool, P(pid: 52, path: "/Users/me/x"), launcher, dock], started: launched).agent == .command, "the launcher's other children aren't the agent")
+        expect(ask([tool, native, chat, dock]).agent == .codex, "an agent another agent started is itself, not the chat")
+        // `petal run` is never Petal AI: it's the agent that ran it, asked and granted as that agent.
+        let run = ask([tool, chat, dock], tools: false)
+        expect(run.agent == .claude && run.note == nil && run.grantable && run.label == "Claude Code in Petal", "petal run right under the chat's AI", "\(run)")
+        let deeper = ask([tool, zsh, chat, dock], tools: false)
+        expect(deeper.agent == .claude && deeper.grantable, "petal run in the chat's shell", "\(deeper)")
+        let grant = AgentAccess.Grant(item: "k1", title: "Anthropic", project: "/p", agent: .claude)
+        expect(AgentAccess.granted([grant], item: "k1", caller: run) != nil && AgentAccess.granted([grant], item: "k1", caller: own) == nil,
+               "a grant for Claude Code in the project covers it; nothing is granted to Petal AI")
+        // What connected isn't Petal's own code: an unknown program, wherever it runs.
+        let nc = AgentAccess.caller(chain: [P(pid: 61, path: "/usr/bin/nc"), chat, dock], petalPID: 5, peerIsPetal: false, project: "/p", started: records)
+        expect(nc.agent == .unknown && nc.note == nil && !nc.peerIsPetal, "nc under the chat's AI", "\(nc)")
     }
 
     /// A made-up disk: `marks` by folder, every path real as written, `files` by path.

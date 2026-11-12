@@ -460,12 +460,16 @@ enum AgentAccess {
         var path: String
         var team: String?
         var identifier: String?
+        /// When it started (as proc_pidinfo says, in microseconds; 0 when Petal didn't read it): with its pid, this
+        /// very process, never another that took its pid later.
+        var start: UInt64 = 0
 
-        init(pid: Int32, path: String, team: String? = nil, identifier: String? = nil) {
+        init(pid: Int32, path: String, team: String? = nil, identifier: String? = nil, start: UInt64 = 0) {
             self.pid = pid
             self.path = path
             self.team = team
             self.identifier = identifier
+            self.start = start
         }
 
         var file: String { (path as NSString).lastPathComponent }
@@ -520,6 +524,9 @@ enum AgentAccess {
         var peerIsPetal = true
         /// The process that connected.
         var pid: Int32 = 0
+        /// One of Petal's own chats: the chat Petal started the AI above it for, by Petal's own record (`Started`),
+        /// never by what the caller says. Nil for everyone else.
+        var note: String? = nil
 
         /// "Codex in T3 Code", "Claude Code in Terminal", "An unknown program (nc)".
         var label: String {
@@ -534,17 +541,28 @@ enum AgentAccess {
         var grantable: Bool { agent.verified }
     }
 
+    /// An AI process Petal itself started for a chat or a note's helper, as Petal recorded it when it started it:
+    /// the very process (its pid and when it started) and the chat it was started for.
+    struct Started: Equatable, Sendable {
+        var pid: Int32
+        var start: UInt64
+        /// The chat's id (its note's): what its tools are answered about.
+        var note: String
+    }
+
     /// Who's asking: `chain` is the process that connected to Petal's socket, then its parent, and so on up.
     /// `peerIsPetal`: what connected is Petal's own code (`petal run`, `Petal --mcp`), checked by its signature.
-    static func caller(chain: [Process], petalPID: Int32, peerIsPetal: Bool, project: String) -> Caller {
+    /// `started`: the AI processes Petal started for its chats. `tools`: it asks for one of Petal AI's tools
+    /// (`assist`); only there is anyone Petal AI. `petal run` is always the agent that ran it, and asks as that agent.
+    static func caller(chain: [Process], petalPID: Int32, peerIsPetal: Bool, project: String, started: [Started] = [], tools: Bool = true) -> Caller {
         let host = hostApp(chain)
         let pid = chain.first?.pid ?? 0
         guard let peer = chain.first, peerIsPetal else {
             return Caller(agent: .unknown, host: host, project: project, program: chain.first?.file ?? "", peerIsPetal: false, pid: pid)
         }
-        // Petal's own chats: Petal started them.
-        if chain.dropFirst().contains(where: { $0.pid == petalPID }) {
-            return Caller(agent: .petal, host: nil, project: project, program: peer.file, pid: pid)
+        // Petal's own chats: the tools of an AI Petal started, asked by the process that AI itself started for them.
+        if tools, let chat = ownChat(chain, petalPID: petalPID, started: started) {
+            return Caller(agent: .petal, host: nil, project: project, program: peer.file, pid: pid, note: chat.note)
         }
         // The maker whose helpers the walk passed through: only that maker's agent may be above them.
         var through: (agent: Agent, file: String)?
@@ -561,6 +579,22 @@ enum AgentAccess {
             }
         }
         return Caller(agent: .command, host: host, project: project, program: peer.file, pid: pid)
+    }
+
+    /// The chat of Petal's own that `chain` asks for, or nil. The process right above what connected must be Claude
+    /// Code or Codex signed by its maker, and the very process Petal started for that chat (the same pid and start),
+    /// with Petal right above it; or, where what Petal started is the agent's launcher and not the agent (npm's
+    /// `codex` is a script that runs the signed one), the process that launcher started. Petal being somewhere above
+    /// is never enough: a shell, a hook, another tool server or a command the AI runs is further down, and the walk
+    /// in `caller` says whose it is (the agent above it, asked as any agent outside Petal).
+    static func ownChat(_ chain: [Process], petalPID: Int32, started: [Started]) -> Started? {
+        guard chain.count >= 3, let agent = chain[1].agent, agent.verified else { return nil }
+        func record(_ process: Process) -> Started? {
+            process.start == 0 ? nil : started.first { $0.pid == process.pid && $0.start == process.start }
+        }
+        if let chat = record(chain[1]) { return chain[2].pid == petalPID ? chat : nil }
+        guard chain.count >= 4, chain[2].role == .other, let chat = record(chain[2]), chain[3].pid == petalPID else { return nil }
+        return chat
     }
 
     /// macOS's own programs (a shell, `env`), whose signer Petal doesn't read: never an agent. Not /usr/local or
