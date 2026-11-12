@@ -64,12 +64,12 @@ grep -q 'menuWords { UIMap.noMenu(path\[0\], menus: names, shown: \$0) }' Source
     && grep -q 'VaultIndex.settled { index in words { index.redacted(\$0) } } ?? words { _ in UIMap.hidden }' Sources/Petal/ComputerUse.swift \
     || { echo "petal_act: a menu's titles go through the vault's redaction before they're told"; exit 1; }
 # A menu item or key that hands what's selected to another app without the clipboard (UIMap.sends: a Service, Share,
-# Look Up) gets a copy's check right before it, in front; in the background it counts as opening something. And the
-# text Services (Ask Petal AI, Add to Petal AI) take no text holding a vault secret, as a paste doesn't.
+# Look Up) gets a copy's check right before it, in front and in the background alike. And the text Services (Ask
+# Petal AI, Add to Petal AI) take no text holding a vault secret, as a paste doesn't.
 grep -q 'case .send?: return copyRefusal(map, element, sending: true)' Sources/Petal/ComputerUse.swift \
     && grep -q 'return UIMap.sends(menu: title ?? own, appMenu: appMenu, character: character, modifiers: modifiers) ? .send : nil' Sources/Petal/ComputerUse.swift \
     && grep -q 'key.map { UIMap.sends(key: \$0, claimed: false) } ?? UIMap.sends(menu: title, appMenu: appMenu)' Sources/Petal/ComputerUse.swift \
-    && grep -q '&& (sends || options.key.map' Sources/Petal/BackgroundActing.swift \
+    && [ "$(grep -c 'if sends, let why = sendRefusal(map, ' Sources/Petal/BackgroundActing.swift)" = 2 ] \
     && grep -q 'guard Assist.vaultCheck(text) == .clean else { return }' Sources/Petal/TextServices.swift \
     || { echo "petal_act: what hands the selection to another app is checked as a copy; the text Services refuse a vault secret"; exit 1; }
 echo "menus: titles told redacted; handing the selection on checked as a copy"

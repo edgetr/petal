@@ -1833,8 +1833,6 @@ enum Acting {
     /// key none of the app's menus has), in those words.
     static func copyRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?, sending: Bool = false) -> String? {
         let done = sending ? "nothing was done" : "nothing was copied"
-        let wont = sending ? "Petal doesn't hand it to another app (a Service, Share, Look Up, or a key none of this app's menus has)"
-            : "Petal doesn't copy it"
         guard windowInFront(map) else { return "That window isn't in front anymore; \(done)." }
         let app = AXUIElementCreateApplication(map.pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
@@ -1842,7 +1840,24 @@ enum Acting {
         if let focused, let home: AXUIElement = Windows.value(focused, kAXWindowAttribute), !isWindow(home, of: map) {
             return "The keyboard is in another window of \(map.appName); \(done)."
         }
-        for control in [element, focused].compactMap({ $0 }) {
+        return heldSecret(map, [element, focused].compactMap { $0 }, sending: sending)
+    }
+
+    /// What a note's menu item or key would hand to another app (`UIMap.sends`) while its window is behind: the
+    /// same check of what has its app's keyboard (and `element`), without the window in front.
+    static func sendRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?) -> String? {
+        let app = AXUIElementCreateApplication(map.pid)
+        AXUIElementSetMessagingTimeout(app, 0.5)
+        let focused: AXUIElement? = Windows.value(app, kAXFocusedUIElementAttribute)
+        return heldSecret(map, [element, focused].compactMap { $0 }, sending: true)
+    }
+
+    /// Why what `controls` hold isn't copied (or, `sending`, handed to another app), or nil: a field Petal filled, a
+    /// vault secret in what's selected or in a value, or a piece of a secret the window shows in pieces.
+    static func heldSecret(_ map: ComputerUse.Map, _ controls: [AXUIElement], sending: Bool) -> String? {
+        let wont = sending ? "Petal doesn't hand it to another app (a Service, Share, Look Up, or a key none of this app's menus has)"
+            : "Petal doesn't copy it"
+        for control in controls {
             // A field Petal filled with a secret, whatever it shows now (part of a card number left after an edit).
             if Sensitive.isFilled(control, pid: map.pid) {
                 return "That field holds a secret Petal filled in: \(wont). petal_vault fills a saved one where it's needed (action: fill)."
@@ -1861,7 +1876,7 @@ enum Acting {
         }
         // Nor one piece of a secret the window shows in pieces (a card number as four fields of four digits): copied
         // a field at a time, it would be whole again.
-        if Reader.inJoinedSecret(pid: map.pid, window: map.windowID, controls: [element, focused].compactMap { $0 }) {
+        if Reader.inJoinedSecret(pid: map.pid, window: map.windowID, controls: controls) {
             return "What has the keyboard is part of a secret this window shows in pieces (a card number, a key): \(wont). petal_vault fills a saved one where it's needed (action: fill)."
         }
         return nil

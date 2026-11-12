@@ -67,7 +67,8 @@ extension Acting {
         let windowMain = windowSeen == .yes
         let nodes = [fresh, entry?.node].compactMap { $0 }
         let clipboard: Bool
-        // A menu item or key that hands what's selected to another app (a Service, Share, Look Up) opens something there.
+        // A menu item or key that hands what's selected to another app (a Service, Share, Look Up): what would go is
+        // checked right before it, as a copy's is.
         var sends = false
         switch action {
         // A Copy or Cut button (or one whose words say it copies) changes the person's clipboard.
@@ -83,7 +84,7 @@ extension Acting {
         // A menu item or key that opens something (File › Open, Open With, Show in Finder, ⌘O, ⌘↓ in Finder) could
         // bring another app or window forward: it needs the window in front.
         let opens = ["menu", "key"].contains(action)
-            && (sends || options.key.map { Background.keyOpens($0, finder: map.bundle == "com.apple.finder") } == true
+            && (options.key.map { Background.keyOpens($0, finder: map.bundle == "com.apple.finder") } == true
                 || menuOpens(prepared.menuItem, title: prepared.menuTitle))
         let step = Background.plan(Background.Target(action: action, text: text, web: web, clipboard: clipboard,
                                                       menuItem: prepared.menuItem != nil, opens: opens, element: element != nil,
@@ -290,6 +291,7 @@ extension Acting {
                 // Right before it: still the note's window its app acts on, and still not the app in front (read), then
                 // the gate and the item together.
                 guard windowOurs(.menu), stillBehind(.menu) else { return }
+                if sends, let why = sendRefusal(map, element) { outcome.error = why; break }
                 guard let chosen = gate.mutate({ AXUIElementPerformAction(item, kAXPressAction as CFString) }) else { return }
                 if chosen != .success {
                     outcome.error = "Couldn't choose \(prepared.menuShown ?? "that item"); its app didn't answer."
@@ -309,6 +311,7 @@ extension Acting {
                     guard windowOurs(.keys) else { return }
                     if let why = secretFieldRefusal(map, nil, pasting: false) { outcome.error = why; break }
                 }
+                if sends, let why = sendRefusal(map, element) { outcome.error = why; break }
                 guard gate.mutate({ post(key, to: pid, cancel: cancel) }) == true else { return }
             }
         }
