@@ -1238,7 +1238,7 @@ struct VaultCheck {
         }
         // Names with a number in them, an email address, a host name and the item's own username aren't codes, and
         // a contact's or an address's notes hold none.
-        let ordinary = "Recovery email john.smith2024@gmail.com, Instagram ada_love99, server web01-staging, Office365, covid-19 portal, renewed 12-Nov-2026, iPhone15Pro, host db1a2b3c.example.com, me j0hn5mith"
+        let ordinary = "Recovery email john.smith2024@example.com, Instagram ada_love99, server web01-staging, Office365, covid-19 portal, renewed 12-Nov-2026, iPhone15Pro, host db1a2b3c.example.com, me j0hn5mith"
         var plain = VaultItem(kind: .login, title: "Mail")
         plain[.username] = "j0hn5mith"; plain[.password] = "Kq7-real-zebra-55"; plain[.notes] = ordinary
         expect(Vault.noteCodes(plain).isEmpty, "ordinary words with digits aren't codes (\(Vault.noteCodes(plain)))")
