@@ -659,6 +659,10 @@ final class Routines {
                     case .launch:
                         NSWorkspace.shared.openApplication(at: real, configuration: NSWorkspace.OpenConfiguration())
                         outcome.opened.append(real.deletingPathExtension().lastPathComponent)
+                    case .folder:
+                        // A folder opens as a Finder window; nothing in it is opened.
+                        NSWorkspace.shared.open(real)
+                        outcome.opened.append(real.lastPathComponent)
                     case .never:
                         outcome.left.append(file.lastPathComponent)
                     }
@@ -1076,7 +1080,7 @@ final class Routines {
                         case .web: return item
                         case .file(let path):
                             if FileManager.default.fileExists(atPath: path), NoteTasks.routine(URL(fileURLWithPath: path)).1 == .never {
-                                problem = "open doesn't take \((path as NSString).lastPathComponent): a routine opens apps, web addresses and documents, never a script or a program"
+                                problem = "open doesn't take \((path as NSString).lastPathComponent): a routine opens apps, web addresses, folders and documents, never a script or a program"
                             }
                             return item
                         case .nothing:

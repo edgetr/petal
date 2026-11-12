@@ -94,6 +94,9 @@ struct RoutineRulesCheck {
         let dropbox = link("Users/me/Dropbox", to: "Library/CloudStorage/Dropbox")
         expect(refusal(photo, into: dropbox) == nil && refusal(photo, into: dropbox + "/Receipts", under: dropbox) == nil
                && refusal(photo, into: dropbox + "/New", under: dropbox) == nil, "a cloud folder the person keeps as a link in the home folder")
+        _ = folder("Users/me/Library/Mobile Documents/com~apple~CloudDocs/Receipts")
+        let icloud = link("Users/me/iCloud", to: "Library/Mobile Documents/com~apple~CloudDocs")
+        expect(refusal(photo, into: icloud + "/Receipts", under: icloud) == nil, "iCloud Drive kept as a link in the home folder")
         let shelf = link("Users/me/Shelf", to: "Documents/Taxes")
         expect(refusal(photo, into: shelf) == nil, "a link to another folder in the home folder")
         let agents = link("Users/me/Agents", to: "Library/LaunchAgents")

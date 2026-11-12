@@ -91,13 +91,14 @@ enum NoteTasks {
     }
 
     /// What a routine's open action may do with a file it names (Routines.perform), by Open all's own rule: a
-    /// document is opened, an app is started, and anything else is left: never a script, a program, an installer
-    /// or something that points elsewhere.
-    enum RoutineFile: Equatable { case open, launch, never }
+    /// document is opened, an app is started, a folder is shown in a Finder window, and anything else is left: never
+    /// a script, a program, an installer or something that points elsewhere.
+    enum RoutineFile: Equatable { case open, launch, folder, never }
 
     static func routineFile(type: UTType?, ext: String, isDirectory: Bool) -> RoutineFile {
         if fileAction(type: type, ext: ext, isDirectory: isDirectory) == .open { return .open }
         if isDirectory, ext.lowercased() == "app", let type, type.conforms(to: .applicationBundle) { return .launch }
+        if isDirectory, let type, type.conforms(to: .folder), !type.conforms(to: .package) { return .folder }
         return .never
     }
 

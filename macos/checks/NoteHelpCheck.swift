@@ -1247,10 +1247,11 @@ struct NoteHelpCheck {
         // started, and nothing else is: never a script, a program, an installer or something that points elsewhere.
         let routineFile = { (url: URL) -> NoteTasks.RoutineFile in NoteTasks.routine(url).1 }
         expect(routineFile(pdf) == .open && routineFile(png) == .open && routineFile(plainText) == .open, "a routine opens a PDF, a picture, text")
-        for blocked in [script, command, workflow, webloc, fileloc, dmg, pkg, folder] {
+        for blocked in [script, command, workflow, webloc, fileloc, dmg, pkg] {
             expect(routineFile(blocked) == .never, "a routine never opens: \(blocked.lastPathComponent)", "\(routineFile(blocked))")
         }
         expect(routineFile(app) == .launch, "a routine starts an app named by its path", "\(routineFile(app))")
+        expect(routineFile(scratch) == .folder && routineFile(folder) == .folder, "a routine shows a folder in Finder", "\(routineFile(folder))")
         expect(routineFile(linkToScript) == .never && routineFile(aliasToScript) == .never, "a link or an alias to a script is never opened by a routine")
         expect(routineFile(aliasToPDF) == .open && NoteTasks.routine(aliasToPDF).0.path == real(pdf).path, "an alias to a PDF: the PDF is what a routine opens")
         expect(routineFile(scratch.appending(path: "gone.pdf")) == .never, "a file that isn't there is nothing to open")

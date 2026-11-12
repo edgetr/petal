@@ -38,14 +38,15 @@ enum RoutineRules {
     }
 
     /// A place as it really is (`real`) that routines may move files out of or into: one `allowed` by the home
-    /// folder as it really is, or inside one of the cloud folders macOS keeps under the home's Library/CloudStorage
-    /// (where ~/Dropbox, ~/Google Drive and ~/OneDrive really are).
+    /// folder as it really is, or inside one of the cloud folders macOS keeps under the home's Library: CloudStorage
+    /// (where ~/Dropbox, ~/Google Drive and ~/OneDrive really are) and iCloud Drive.
     static func reaches(_ real: String, home: String, testing: Bool) -> Bool {
         if allowed(real, home: home, testing: testing) { return true }
-        let cloud = home + "/Library/CloudStorage/"
-        guard real.hasPrefix(cloud) else { return false }
-        let parts = real.dropFirst(cloud.count).split(separator: "/")
-        return !parts.isEmpty && !parts.contains { $0.hasPrefix(".") }
+        for cloud in [home + "/Library/CloudStorage/", home + "/Library/Mobile Documents/com~apple~CloudDocs/"] where real.hasPrefix(cloud) {
+            let parts = real.dropFirst(cloud.count).split(separator: "/")
+            return !parts.isEmpty && !parts.contains { $0.hasPrefix(".") }
+        }
+        return false
     }
 
     /// The thing at `path` is itself a link (never followed to find out).
