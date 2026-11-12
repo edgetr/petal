@@ -766,6 +766,25 @@ maker=$(sed -n 's/^    static let maker = #"\(.*\)"#$/\1/p' Sources/Petal/Update
 grep -qF "MAKER='$maker'" ../get.sh || { echo "update trust: get.sh doesn't check the same signature as UpdateTrust.swift"; exit 1; }
 grep -qF "MAKER: '$maker'" ../.github/workflows/release-macos.yml || { echo "update trust: the release workflow doesn't check the same signature as UpdateTrust.swift"; exit 1; }
 echo "update trust: the app, get.sh and the release workflow ask for the same signature"
+# An update rebuilt with the person's own changes to Petal's code takes its source from the release Petal checked:
+# Personal.update asks the updater for the commit that release's own Petal.app says (Updater.source, which checks the
+# download as an installed update is and reads the commit through UpdateTrust.source) and hands petal-personal that
+# commit. Then petal-personal itself, on a throwaway source with a stand-in for curl: with a commit it asks for that
+# commit's source and nothing else, and a version or commit that isn't plain asks for nothing.
+perl -0777 -ne '
+    if ($ARGV =~ /\/Personal\.swift$/) {
+        my ($update) = /(static func update\(to release: Updater\.Release.*?\n    \})/s;
+        $bad .= "Personal.update does not take its source from the release it checked\n"
+            unless defined $update && $update =~ /let commit = try await Updater\.source\(of: release\).*\["update", "--version", version, "--commit", commit,/s;
+    }
+    if ($ARGV =~ /\/Updater\.swift$/) {
+        my ($source) = /(static func source\(of release: Release\).*?\n    \})/s;
+        $bad .= "Updater.source does not check the release as an update is\n"
+            unless defined $source && $source =~ /Self\.checked\(file, release: release, running: running\).*UpdateTrust\.source\(of: app, is: release\.version, over: running\)/s;
+    }
+    END { if ($bad) { print "personal update: $bad"; exit 1 } print "personal update: its source is the checked release\x27s commit\n" }
+' Sources/Petal/Personal.swift Sources/Petal/Updater.swift
+bash checks/PersonalUpdateCheck.sh
 # IPC.swift on a throwaway socket in the temporary folder (never Petal's): a request whose client hangs up first is
 # never done.
 swiftc -parse-as-library -O -o "$out/ipc" Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/IPCCheck.swift

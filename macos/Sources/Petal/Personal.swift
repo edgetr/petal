@@ -10,8 +10,9 @@ import CryptoKit
 /// this Petal.
 ///
 /// Updates (Updater.check): while changes exist, a new release's source is combined with them and built, instead of
-/// the release's own Petal.app being installed. If that can't be done, this Petal keeps running and the person is
-/// told, with an offer to report it.
+/// the release's own Petal.app being installed. That Petal.app is still downloaded and checked first, as an update
+/// that's installed is (Updater.source): the source is the commit it says it was built from. If it can't be done,
+/// this Petal keeps running and the person is told, with an offer to report it.
 @MainActor
 enum Personal {
     /// PETAL_PERSONAL_HOME moves all of it elsewhere, and keeps a running Petal from being restarted (for testing).
@@ -212,7 +213,8 @@ enum Personal {
     /// Called by the updater when a newer release is out. Returns false when there are no changes of the person's
     /// own (the release's Petal.app is installed as usual); true when Petal was rebuilt with them. Throws, after
     /// telling the person, when it can't be done; this Petal keeps running either way.
-    static func update(to version: String, manual: Bool) async throws -> Bool {
+    static func update(to release: Updater.Release, manual: Bool) async throws -> Bool {
+        let version = release.version
         guard inUse, !isDevelopmentBuild else { return false }
         guard let tools = await Task.detached(operation: { developerTools }).value else {
             let message = "Your changes to Petal's code need Apple's command line tools to be rebuilt, and they aren't installed."
@@ -227,7 +229,11 @@ enum Personal {
         if (status["changes"] as? Int ?? 0) == 0 && (status["unsaved"] as? [Any] ?? []).isEmpty { return false }
         let provider = PetalApp.shared.chatProvider
         let aiPath = provider.flatMap { PetalApp.shared.paths[$0] }
-        let arguments = ["update", "--version", version, "--json", "--check", buildCheck, "--keep", buildOutput] + (manual ? [] : ["--auto"])
+        // The release itself first, checked as one that's installed is (its checksum, its maker's signature, the
+        // version it said): what's built with the person's changes is the source that Petal.app says it was built
+        // from, by its commit, and no other.
+        let commit = try await Updater.source(of: release)
+        let arguments = ["update", "--version", version, "--commit", commit, "--json", "--check", buildCheck, "--keep", buildOutput] + (manual ? [] : ["--auto"])
         let reply = try await Task.detached { () throws -> [String: Any] in
             try? FileManager.default.removeItem(at: built)
             let reply = result(core(arguments, tools: tools, aiPath: aiPath).output)
@@ -336,9 +342,12 @@ enum Personal {
             if command == "save" { print("Building Petal with your edits (a minute or two)…") }
             finish(pass([command] + rest + build))
         case "retry":
-            let target = ((state["failed"] as? [String: Any])?["version"] as? String) ?? version
+            let failed = state["failed"] as? [String: Any]
+            let target = (failed?["version"] as? String) ?? version
+            // The release that couldn't take them: the same source again, by the commit kept with it.
+            let commit = (failed?["commit"] as? String).flatMap { UpdateTrust.plainCommit($0) ? ["--commit", $0] : nil } ?? []
             print("Bringing your changes over to Petal \(target) and building it…")
-            finish(pass(["update", "--version", target] + build))
+            finish(pass(["update", "--version", target] + commit + build))
         case "restore":
             let status = pass(["restore"] + rest)
             guard status == 0 else { exit(status) }

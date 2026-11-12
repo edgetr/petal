@@ -42,6 +42,8 @@ Every release is signed with Petal's own certificate, "Petal (Edgetr)". It is no
 
 Petal, and the installer at `petal.codes/install.sh`, install a download only when it matches its release's checksum and is signed, whole, with that certificate (from Petal 2.1.3). The signing key is not in this repository.
 
+With changes of the person's own to Petal's code (`petal personal`), an update is built on their Mac from the source that signed release says it was built from.
+
 ## Worth reporting
 
 - A vault secret reaching the AI, a web page, an agent, another app, a log or a file.

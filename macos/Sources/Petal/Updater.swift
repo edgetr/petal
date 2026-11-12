@@ -44,7 +44,7 @@ final class Updater {
                 guard ready != latest.version else { status = "Petal \(latest.version) is ready. Restart Petal to finish."; return }
                 status = "Downloading Petal \(latest.version)…"
                 // With the person's own changes to Petal's code, it's rebuilt with them instead (Personal.swift).
-                if try await !Personal.update(to: latest.version, manual: manual) { try await install(latest) }
+                if try await !Personal.update(to: latest, manual: manual) { try await install(latest) }
                 status = "Petal \(latest.version) is ready. Restart Petal to finish."
                 ready = latest.version
             } catch {
@@ -84,7 +84,33 @@ final class Updater {
         try await Task.detached { try Self.swap(in: file, release: release, over: bundle, running: running) }.value
     }
 
+    /// The commit a release was built from, for an update rebuilt with the person's own changes (Personal.update):
+    /// the release's Petal.app is downloaded and checked exactly as one that's installed is, and the commit is the
+    /// one that app says (`UpdateTrust.source`). Nothing is installed.
+    static func source(of release: Release) async throws -> String {
+        let (file, _) = try await URLSession.shared.download(from: release.url)
+        let running = PetalApp.shared.version
+        return try await Task.detached {
+            defer { try? FileManager.default.removeItem(at: file) }
+            return try Self.checked(file, release: release, running: running) { app in
+                guard let commit = UpdateTrust.source(of: app, is: release.version, over: running) else {
+                    throw UpdateError("Petal \(release.version) doesn't say which source it was built from, so your changes couldn't be brought over")
+                }
+                return commit
+            }
+        }.value
+    }
+
     nonisolated private static func swap(in file: URL, release: Release, over bundle: URL, running: String) throws {
+        try checked(file, release: release, running: running) { app in
+            _ = try FileManager.default.replaceItemAt(bundle, withItemAt: app)
+        }
+    }
+
+    /// A release's download, checked: it matches its checksum, and the Petal.app in it is signed by Petal's maker
+    /// and is the version its release said, newer than the one running. `use` gets that app in a folder of its own,
+    /// which goes afterwards.
+    nonisolated private static func checked<T>(_ file: URL, release: Release, running: String, _ use: (URL) throws -> T) throws -> T {
         let data = try Data(contentsOf: file)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         guard digest == release.sha256 else { throw UpdateError("the download didn't match its checksum") }
@@ -107,7 +133,7 @@ final class Updater {
         guard UpdateTrust.update(app, is: release.version, over: running) else {
             throw UpdateError("the download isn't the Petal \(release.version) its release said, so it wasn't installed")
         }
-        _ = try FileManager.default.replaceItemAt(bundle, withItemAt: app)
+        return try use(app)
     }
 
     struct UpdateError: LocalizedError, Sendable {

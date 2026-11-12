@@ -1,8 +1,9 @@
 import Foundation
 
 // Checks UpdateTrust.swift, which decides whether a downloaded Petal may be installed: a bundle signed as asked is
-// accepted; one signed as something else, one changed after it was signed and one never signed are refused; and
-// nothing signed ad hoc is ever Petal's maker's. It makes its own tiny bundles in the temporary folder and signs
+// accepted; one signed as something else, one changed after it was signed and one never signed are refused;
+// nothing signed ad hoc is ever Petal's maker's; and only a release that may be installed says which source an
+// update with the person's own changes is built from. It makes its own tiny bundles in the temporary folder and signs
 // them ad hoc with `codesign`; it never touches a Petal. Run with macos/checks/run.sh.
 
 @main
@@ -27,7 +28,7 @@ struct UpdateTrustCheck {
 
     /// A bundle with a program and one resource, signed ad hoc under `identifier` (nil: left unsigned), saying it's
     /// `version` when given.
-    static func bundle(_ name: String, in folder: URL, identifier: String?, version: String? = nil) -> URL {
+    static func bundle(_ name: String, in folder: URL, identifier: String?, version: String? = nil, commit: String? = nil) -> URL {
         let app = folder.appending(path: "\(name).app")
         let contents = app.appending(path: "Contents")
         try? FileManager.default.createDirectory(at: contents.appending(path: "MacOS"), withIntermediateDirectories: true)
@@ -39,6 +40,7 @@ struct UpdateTrustCheck {
         <key>CFBundleExecutable</key><string>\(name)</string>
         <key>CFBundlePackageType</key><string>APPL</string>
         \(version.map { "<key>CFBundleShortVersionString</key><string>\($0)</string>" } ?? "")
+        \(commit.map { "<key>PetalSourceCommit</key><string>\($0)</string>" } ?? "")
         </dict></plist>
         """
         try? Data(plist.utf8).write(to: contents.appending(path: "Info.plist"))
@@ -119,6 +121,37 @@ struct UpdateTrustCheck {
                "a version changed in a bundle after it was signed is refused")
         let unversioned = bundle("Unversioned", in: folder, identifier: "check.petal.ours")
         expect(!UpdateTrust.release(unversioned, is: "2.1.4", as: asked), "a bundle that says no version is refused")
+
+        // An update rebuilt with the person's own changes: its source is the commit the release's own app says, and
+        // only when that app is one an update may install.
+        let sha = "0123456789abcdef0123456789abcdef01234567"
+        expect(UpdateTrust.plainCommit(sha), "40 lowercase hex characters are a commit")
+        let short = String(sha.dropLast())
+        let notCommits: [String] = ["", "main", short, "\(sha)0", sha.uppercased(), "\(short)g", "\(short)\n", "refs/tags/macos-v2.1.4",
+                                    "\(sha.dropLast(8))/../../x", "\(short)１", " \(short)"]
+        for bad in notCommits {
+            expect(!UpdateTrust.plainCommit(bad), "\(bad.debugDescription) is refused as a commit")
+        }
+        let built = bundle("Built", in: folder, identifier: "check.petal.ours", version: "2.1.4", commit: sha)
+        expect(UpdateTrust.commit(of: built) == sha, "a bundle's commit is read from its Info.plist")
+        expect(UpdateTrust.source(of: built, is: "2.1.4", over: "2.1.3", as: asked) == sha, "a release that may be installed gives its commit")
+        expect(UpdateTrust.source(of: built, is: "2.1.5", over: "2.1.3", as: asked) == nil, "not when it isn't the version its release said")
+        expect(UpdateTrust.source(of: built, is: "2.1.4", over: "2.1.4", as: asked) == nil, "not when it isn't newer than the one running")
+        expect(UpdateTrust.source(of: built, is: "2.1.4", over: "2.1.3", as: #"identifier "check.petal.theirs""#) == nil, "not when it's signed as something else")
+        expect(UpdateTrust.source(of: release, is: "2.1.4", over: "2.1.3", as: asked) == nil, "a release that names no commit gives none")
+        let branch = bundle("Branch", in: folder, identifier: "check.petal.ours", version: "2.1.4", commit: "main")
+        expect(UpdateTrust.source(of: branch, is: "2.1.4", over: "2.1.3", as: asked) == nil, "a name that isn't a whole commit gives none")
+        let elsewhere = bundle("Elsewhere", in: folder, identifier: "check.petal.ours", version: "2.1.4", commit: "0123456789abcdef/../../other/repo/archive/x")
+        expect(UpdateTrust.source(of: elsewhere, is: "2.1.4", over: "2.1.3", as: asked) == nil, "nor does anything else in its place")
+        let repointed = bundle("Repointed", in: folder, identifier: "check.petal.ours", version: "2.1.4", commit: sha)
+        let repointedInfo = repointed.appending(path: "Contents/Info.plist")
+        if let text = try? String(contentsOf: repointedInfo, encoding: .utf8) {
+            try? Data(text.replacingOccurrences(of: sha, with: String(sha.reversed())).utf8).write(to: repointedInfo)
+        }
+        expect(UpdateTrust.commit(of: repointed) == String(sha.reversed()) && UpdateTrust.source(of: repointed, is: "2.1.4", over: "2.1.3", as: asked) == nil,
+               "a commit changed in a bundle after it was signed gives none")
+        let unsignedBuild = bundle("UnsignedBuild", in: folder, identifier: nil, version: "2.1.4", commit: sha)
+        expect(UpdateTrust.source(of: unsignedBuild, is: "2.1.4", over: "2.1.3", as: asked) == nil, "a bundle that was never signed gives none")
 
         if failures > 0 { print("\(failures) update trust check(s) failed"); exit(1) }
         print("update trust: all checks passed")
