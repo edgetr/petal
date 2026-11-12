@@ -407,6 +407,41 @@ enum RunBrowserRules {
         return "The page tried to download \(what)\(host.isEmpty ? "" : " from \(host)"). A run's browser saves nothing to the Mac: it was refused. Tell the person the address if they'd want the file."
     }
 
+    // MARK: The clipboard
+
+    /// Something a page may ask the browser for, as the browser's remote control names it (Browser.setPermission).
+    struct Permission: Equatable {
+        let name: String
+        /// Anything at all, not only plain text and pictures the browser cleans first.
+        var unsanitized = false
+
+        var descriptor: [String: Any] {
+            unsanitized ? ["name": name, "allowWithoutSanitization": true] : ["name": name]
+        }
+    }
+
+    /// What a run's browser refuses every page, whatever its site, from before its first page loads: putting
+    /// anything on the clipboard by itself, and reading it. The clipboard is the person's, shared with everything
+    /// on the Mac, and nobody is at a run's page to mean a copy. A browser gives the first to any page it shows
+    /// without asking, so it's refused in so many words.
+    static let refused: [Permission] = [
+        Permission(name: "clipboard-write"),
+        Permission(name: "clipboard-write", unsanitized: true),
+        Permission(name: "clipboard-read"),
+    ]
+
+    /// One of them, as the request that refuses it for every site (no origin is named).
+    static func refusal(_ permission: Permission) -> [String: Any] {
+        ["permission": permission.descriptor, "setting": "denied"]
+    }
+
+    /// How long the clipboard is watched after a press went to a page (a click, a check, a submit, a key). A page
+    /// can still copy with the browser's older command while it holds a press, which is about five seconds: that
+    /// long, and a moment more.
+    static let copyWatch: TimeInterval = 6
+
+    static let copyCleared = "After a press of yours a page copied a saved secret (or more text than Petal can check for one); Petal cleared the clipboard. petal_vault fills a saved one where it's needed (action: fill)."
+
     // MARK: Words
 
     static let off = "A browser of your own needs hidden displays (runDisplays in Petal's settings), which are off; only the person turns them on. Use the person's own windows the usual way (petal_look, petal_ui), or your own web tools."

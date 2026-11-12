@@ -131,6 +131,22 @@ struct RunBrowserCheck {
         expect(named.contains("runBrowser") && named.contains("Google Chrome") && named != only, "and that the setting names it")
         expect(R.known("COM.GOOGLE.CHROME")?.team == "EQHXZ8M8AV" && R.known("com.apple.Safari") == nil, "each with who signs it")
 
+        // The clipboard: refused to every page, for every site.
+        let asked = R.refused.map { R.refusal($0) }
+        func refuses(_ name: String, unsanitized: Bool) -> Bool {
+            asked.contains { request in
+                let permission = request["permission"] as? [String: Any] ?? [:]
+                return permission["name"] as? String == name && (permission["allowWithoutSanitization"] as? Bool ?? false) == unsanitized
+            }
+        }
+        expect(refuses("clipboard-write", unsanitized: false), "a page writing plain text to the clipboard is refused")
+        expect(refuses("clipboard-write", unsanitized: true), "and anything else")
+        expect(refuses("clipboard-read", unsanitized: false), "and reading it")
+        expect(asked.allSatisfy { $0["setting"] as? String == "denied" && $0["origin"] == nil && $0["embeddedOrigin"] == nil }, "each denied, for every site (no origin named)")
+        expect(asked.allSatisfy { JSONSerialization.isValidJSONObject($0) && CDP.frame(id: 1, method: "Browser.setPermission", params: $0) != nil }, "as a request the pipe carries")
+        expect(R.copyWatch >= 5 && R.copyWatch <= 10, "the clipboard is watched for as long as a page holds a press, and not much longer")
+        expect(R.copyCleared.contains("cleared the clipboard") && R.copyCleared.contains("petal_vault"), "what's said when a copied secret was cleared")
+
         let frame = CGRect(x: 1512, y: 1032, width: 1280, height: 800)
         let windowed = R.arguments(profile: "/p/run-browsers/note-1-ab", frame: frame)
         expect(windowed.contains("--remote-debugging-pipe") && !windowed.contains { $0.hasPrefix("--remote-debugging-port") }, "the pipe, never a port")

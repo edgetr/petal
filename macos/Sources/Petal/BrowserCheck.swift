@@ -52,6 +52,8 @@ final class CheckServer: @unchecked Sendable {
     private var posted: [(path: String, body: String)] = []
     private var hits: [String] = []
     var pages: @Sendable (_ path: String, _ port: Int) -> (type: String, body: String, headers: [String])? = { _, _ in nil }
+    /// Called with each path asked for, before it's answered (on the thread that serves it).
+    var onHit: (@Sendable (_ path: String) -> Void)?
 
     func start() -> Bool {
         socket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
@@ -119,6 +121,7 @@ final class CheckServer: @unchecked Sendable {
             hits.append(plain)
             if method == "POST" { posted.append((plain, String(decoding: data, as: UTF8.self))) }
         }
+        onHit?(plain)
         var status = "200 OK", type = "text/html; charset=utf-8", body = "", extra: [String] = []
         if let page = pages(path, port) {
             type = page.type
@@ -331,6 +334,8 @@ private final class BrowserChecker {
     func alive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 }
 
     var current: RunBrowser? { app.runBrowsers.browser(for: caller) }
+    /// No press is still being watched for what its page copies (each watch ends by itself, in seconds).
+    func settled() -> Bool { wait(10) { self.app.runBrowsers.copyWatches == 0 } }
     func base(_ host: String = "127.0.0.1") -> String { "http://\(host):\(server.port)" }
 
     // MARK: The pages
@@ -428,6 +433,28 @@ private final class BrowserChecker {
                 var body = "<h1>Many links</h1>"
                 for index in 1...320 { body += "<p><a href=\"/two?n=\(index)\">Link number \(index)</a></p>" }
                 return html("Big", body)
+            case "/clip":
+                // A page that goes for the clipboard by itself, when it loads and on a press, and says what came of
+                // it. The headless shell keeps a clipboard of its own, so the copy a real browser would let a page
+                // make on a press (its older copy command) is stood in for: the page tells the check's server, which
+                // puts it on the check's clipboard.
+                return html("Clip", """
+                <h1>Clip</h1>
+                <p id="load">On load: waiting.</p><p id="press">On a press: nothing yet.</p><p id="state">Permission: unknown.</p>
+                <button onclick="tryWrite('press', 'On a press'); fetch('/copied-secret')">Copy the password</button>
+                <button onclick="fetch('/copied-words')">Copy the words</button>
+                <label for="k">Hot field</label><input id="k" onkeydown="fetch('/copied-secret')">
+                <script>
+                function tryWrite(id, words) {
+                    navigator.clipboard.writeText('written by the page').then(function () { document.getElementById(id).textContent = words + ': written.'; },
+                        function () { document.getElementById(id).textContent = words + ': refused.'; });
+                }
+                tryWrite('load', 'On load');
+                navigator.permissions.query({ name: 'clipboard-write' }).then(function (status) { document.getElementById('state').textContent = 'Permission: ' + status.state + '.'; });
+                </script>
+                """)
+            case "/copied-secret", "/copied-words":
+                return ("text/plain; charset=utf-8", "ok", [])
             case "/slow":
                 return html("Slow", "<h1>Slow</h1><p id=\"late\"></p><script>setTimeout(function(){ document.getElementById('late').textContent = 'It arrived.'; }, 700)</script>")
             default:
@@ -502,6 +529,12 @@ private final class BrowserChecker {
             .success(RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
                                      extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true }))
         }
+        // A clipboard of the check's own, and its own word that nobody is typing: the person's is never read or
+        // changed, and what they do at the Mac meanwhile changes no step.
+        let clipboard = NSPasteboard.withUniqueName()
+        defer { clipboard.releaseGlobally() }
+        app.runBrowsers.clipboard = clipboard
+        app.runBrowsers.copyHands = { false }
         let profiles = URL(fileURLWithPath: RunBrowsers.root)
 
         var pid: pid_t = 0
@@ -937,6 +970,63 @@ private final class BrowserChecker {
             expect((read["left"] as? String)?.isEmpty == false, "and says what was left out (\(read["left"] ?? "nothing"))")
             expect(text.contains("link \"A link after them\""), "a control past the cut is still listed")
             return "4000 long headings told in \(text.count) characters, the rest said to be left out"
+        }
+
+        step("the clipboard: no page writes it by itself, and a copied secret is cleared") {
+            // What a page copies on a press, stood in for by the check's server, onto the check's own clipboard.
+            nonisolated(unsafe) let board = clipboard
+            let secret = password
+            server.onHit = { path in
+                guard path == "/copied-secret" || path == "/copied-words" else { return }
+                board.clearContents()
+                board.setString(path == "/copied-secret" ? secret : "only words", forType: .string)
+            }
+            defer { server.onHit = nil }
+            expect(settled(), "no press from before is still watched")
+            for host in ["127.0.0.1", "localhost"] {
+                _ = browser("open", ["address": base(host) + "/clip"])
+                let waited = browser("wait", ["text": "Permission: denied.", "seconds": 5])
+                let read = page(browser("read"))
+                expect((waited["done"] as? String) == "The page shows that now." && read.contains("On load: refused."),
+                       "on \(host) a page is refused the clipboard, whatever it asks (\(read.components(separatedBy: "\n").filter { $0.contains("On load") || $0.contains("Permission") }))")
+            }
+            var read = page(browser("read"))
+            var count = clipboard.changeCount
+            let pressed = browser("click", ["id": id("button \"Copy the password\"", in: read)])
+            expect(error(pressed).isEmpty, "it pressed (\(pressed))")
+            expect(wait(10) { clipboard.changeCount == count + 2 } && clipboard.string(forType: .string) == nil,
+                   "a saved password a page copied on a press is cleared (the clipboard moved \(clipboard.changeCount - count), holds \(clipboard.string(forType: .string) == nil ? "nothing" : "something"))")
+            expect(settled(), "the watch ended")
+            let told = browser("read")
+            read = page(told)
+            // The press's own answer when the copy came that soon, else the next one.
+            let said = [pressed, told].filter { ($0["happened"] as? [String])?.contains(RunBrowserRules.copyCleared) == true }.count
+            expect(said == 1, "and an answer says so, once (\(pressed["happened"] ?? "nothing"); \(told["happened"] ?? "nothing"))")
+            expect(read.contains("On a press: refused."), "its own write on that press was refused too")
+            expect(app.assist.history.map(\.text).contains { $0.contains("Cleared the clipboard after a page copied one of your secrets") }, "and so does What Petal AI did")
+            // A key is a press too.
+            count = clipboard.changeCount
+            let keyed = browser("key", ["key": "down", "id": id("field \"Hot field\"", in: read)])
+            expect(error(keyed).isEmpty && wait(10) { clipboard.changeCount == count + 2 } && clipboard.string(forType: .string) == nil,
+                   "one copied on a key is cleared (\(error(keyed)); the clipboard moved \(clipboard.changeCount - count))")
+            expect(settled(), "the watch ended")
+            // Words that are nobody's secret stay.
+            read = page(browser("read"))
+            count = clipboard.changeCount
+            _ = browser("click", ["id": id("button \"Copy the words\"", in: read)])
+            expect(wait(10) { clipboard.changeCount == count + 1 } && settled() && clipboard.string(forType: .string) == "only words" && clipboard.changeCount == count + 1,
+                   "a copy with no secret in it is left alone (\(clipboard.string(forType: .string) ?? "nothing"))")
+            // The person typing or clicking meanwhile: a copy may be theirs, and is never cleared.
+            app.runBrowsers.copyHands = { true }
+            defer { app.runBrowsers.copyHands = { false } }
+            read = page(browser("read"))
+            count = clipboard.changeCount
+            _ = browser("click", ["id": id("button \"Copy the password\"", in: read)])
+            expect(wait(10) { clipboard.changeCount == count + 1 } && settled() && clipboard.string(forType: .string) == password && clipboard.changeCount == count + 1,
+                   "with the person at the keyboard nothing is cleared")
+            expect((browser("read")["happened"] as? [String])?.contains(RunBrowserRules.copyCleared) != true, "and nothing is said")
+            clipboard.clearContents()
+            return "two sites refused the clipboard on load and on a press; a password copied on a press and on a key was cleared and said; plain words, and a copy while the person types, were left"
         }
 
         step("no secret in any answer") {

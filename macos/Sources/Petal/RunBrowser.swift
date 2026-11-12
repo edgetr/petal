@@ -383,6 +383,11 @@ final class RunBrowser: @unchecked Sendable {
     let queue: DispatchQueue
     /// A page moved on, another tab was picked or one closed: a Buy said in this browser is over (on any thread).
     var onLeft: (@Sendable () -> Void)?
+    /// The clipboard a page's own copy would land on: the person's (a check hands in one of its own).
+    var clipboard: NSPasteboard = .general
+    /// A press went to a page (a click, a check, a submit, a key), on the browser's queue: with the clipboard's
+    /// count from right before it, for whoever watches what the page copies on it (RunBrowsers).
+    var onPress: (@Sendable (Acting.CopyMark) -> Void)?
 
     private let lock = NSLock()
     private var tabs: [String: Tab] = [:]
@@ -479,6 +484,13 @@ final class RunBrowser: @unchecked Sendable {
         }
         // Nothing is saved to the Mac from a run's browser.
         _ = pipe.call("Browser.setDownloadBehavior", ["behavior": "deny", "eventsEnabled": true])
+        // No page puts anything on the person's clipboard by itself, or reads it: refused for every site, before
+        // any page loads. A browser that won't take that is ended.
+        for permission in RunBrowserRules.refused {
+            guard case .success = pipe.call("Browser.setPermission", RunBrowserRules.refusal(permission)) else {
+                return Problem("\(spec.name) wouldn't keep its pages off the clipboard, so it was ended.")
+            }
+        }
         var target: String?
         if let frame {
             let made = pipe.call("Target.createTarget", ["url": "about:blank", "newWindow": true, "background": true,
@@ -658,6 +670,9 @@ final class RunBrowser: @unchecked Sendable {
     }
 
     private var unsaid = 0
+
+    /// Something Petal did about the page by itself, for the next answer.
+    func say(_ note: String) { lock.withLock { remember(note) } }
 
     /// What happened by itself since this was last asked (a message closed, a download refused, a new tab), once.
     func notes() -> [String] {
@@ -876,6 +891,9 @@ final class RunBrowser: @unchecked Sendable {
     private func run(_ expression: String, in frame: FrameAt, gesture: Bool = false, timeout: TimeInterval = 10) -> Ran {
         var params: [String: Any] = ["expression": expression, "contextId": frame.context, "returnByValue": true]
         if gesture { params["userGesture"] = true }
+        // A press lets the page copy: the clipboard's count from before it, for the watch after.
+        let mark = gesture ? Acting.CopyMark.now(clipboard) : nil
+        defer { if let mark { onPress?(mark) } }
         switch pipe.call("Runtime.evaluate", params, session: frame.session, timeout: timeout) {
         case .failure(.refused(let why)):
             // Its world went with its page.
@@ -1051,6 +1069,9 @@ final class RunBrowser: @unchecked Sendable {
         up["text"] = nil
         guard !cancel.stopped else { return Problem(ComputerUse.stoppedText) }
         lock.withLock { activity = Date() }
+        // A key is a press to the page too.
+        let mark = Acting.CopyMark.now(clipboard)
+        defer { onPress?(mark) }
         guard case .success = pipe.call("Input.dispatchKeyEvent", down, session: session) else { return .closed }
         _ = pipe.call("Input.dispatchKeyEvent", up, session: session)
         return nil
@@ -1309,6 +1330,12 @@ final class RunBrowsers {
     /// Which installed browser a run gets (`setting`: `runBrowser`), or why none, off the main thread. A check hands
     /// in its own.
     var finder: @Sendable (_ setting: String) -> Result<RunBrowser.Spec, RunBrowser.Problem> = { RunBrowsers.find(setting: $0) }
+    /// The clipboard a page's own copy lands on, and (a check only) its word on whether the person typed or
+    /// clicked: a check gives both, so it never reads or changes the person's clipboard.
+    var clipboard: NSPasteboard = .general
+    var copyHands: (@Sendable () -> Bool)?
+    /// The watches under way.
+    private(set) var copyWatches = 0
     private var watching: NSObjectProtocol?
     /// The app the person last had in front that isn't a run's browser.
     private var lastFront: pid_t = 0
@@ -1488,6 +1515,10 @@ final class RunBrowsers {
         browser.onLeft = { [weak self] in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.app.assist.computer.seen([], window: window) } }
         }
+        browser.clipboard = clipboard
+        browser.onPress = { [weak self, weak browser] mark in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.watchCopy(mark, browser) } }
+        }
         app.assist.did("Started \(named: browser.spec.name, else: "a browser") for a run, on a display of its own")
         guard !browser.spec.headless, Windows.trusted else { return }
         let pid = browser.pid
@@ -1508,6 +1539,21 @@ final class RunBrowsers {
                     self.app.displays.track(tracked, for: caller, bare: false)
                 }
             }
+        }
+    }
+
+    /// A press went to a page of a run's browser, and a page may copy on a press. So the clipboard is watched for a
+    /// while after, as after one of petal_act's Copy buttons (Acting.CopyWatch, by the same rule): a copy that came
+    /// with the press and holds a saved secret, or anything Petal typed for the vault, is cleared, never one the
+    /// person may have made (they typed or clicked meanwhile) and nothing is ever put back. The reply doesn't wait
+    /// for it: the run's next answer says so, and What Petal AI did.
+    private func watchCopy(_ mark: Acting.CopyMark, _ browser: RunBrowser?) {
+        copyWatches += 1
+        Acting.CopyWatch.start(mark, wait: RunBrowserRules.copyWatch, pasteboard: clipboard, hands: copyHands) { [weak self, weak browser] cleared in
+            self?.copyWatches -= 1
+            guard cleared != nil else { return }
+            browser?.say(RunBrowserRules.copyCleared)
+            self?.app.assist.did("Cleared the clipboard after a page copied one of your secrets (a browser of its own)")
         }
     }
 

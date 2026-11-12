@@ -673,6 +673,20 @@ grep -q 'opened.launched = RunDisplayRules.started(' Sources/Petal/RunDisplay.sw
     || { echo "run browser: RunDisplays.open doesn't ask RunDisplayRules.started which process it started"; exit 1; }
 grep -q 'personsOnly: true' Sources/Petal/RunDisplay.swift || { echo "run browser: RunDisplays.open may take a run's own browser window for one it made"; exit 1; }
 echo "run browser: an open through macOS never lands in a run's own copy"
+# No page of a run's browser writes or reads the clipboard by itself, and a press is watched: the browser is told
+# what's refused (RunBrowserRules.refused) before its first tab, and ended if it won't take it; every way a press
+# reaches a page (a script run with a gesture, a key) notes the clipboard's count first and hands it to the watch.
+perl -0ne '
+    $bad .= "open() doesn\x27t refuse the clipboard before the first tab\n"
+        unless /for permission in RunBrowserRules\.refused \{\s*guard case \.success = pipe\.call\("Browser\.setPermission", RunBrowserRules\.refusal\(permission\)\) else \{\s*return Problem.*?\n.*?Target\.createTarget/s;
+    $bad .= "a script run with a gesture isn\x27t watched\n" unless /let mark = gesture \? Acting\.CopyMark\.now\(clipboard\) : nil\s*defer \{ if let mark \{ onPress\?\(mark\) \} \}\s*switch pipe\.call\("Runtime\.evaluate"/;
+    $bad .= "a key isn\x27t watched\n" unless /let mark = Acting\.CopyMark\.now\(clipboard\)\s*defer \{ onPress\?\(mark\) \}\s*guard case \.success = pipe\.call\("Input\.dispatchKeyEvent"/;
+    $bad .= "a press isn\x27t handed to the watch\n" unless /browser\.onPress = .*?watchCopy\(mark, browser\)/s && /Acting\.CopyWatch\.start\(mark, wait: RunBrowserRules\.copyWatch, pasteboard: clipboard/;
+    @gestures = /"userGesture"|Input\.dispatch\w+/g;
+    $bad .= "a press reaches a page some other way (" . scalar(@gestures) . " places)\n" unless @gestures == 3;
+    END { print "run browser: $_\n" for split /\n/, $bad; exit($bad ? 1 : 0) }
+' Sources/Petal/RunBrowser.swift
+echo "run browser: no page writes the clipboard by itself, and a press is watched"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift
 "$out/vault"
 swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/AgentAccessCheck.swift

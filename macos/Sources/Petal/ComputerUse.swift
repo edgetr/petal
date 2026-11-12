@@ -1903,22 +1903,30 @@ enum Acting {
         private let until: TimeInterval
         private let pasteboard: NSPasteboard
         private let then: @MainActor (String?) -> Void
+        /// A check's own word on whether the person typed or clicked, in place of the keyboard's and mouse's.
+        private let hands: (@Sendable () -> Bool)?
         private let lock = NSLock()
         private var heard = false
         private var monitor: Any?
 
-        private init(_ mark: CopyMark, wait: TimeInterval, pasteboard: NSPasteboard, then: @escaping @MainActor (String?) -> Void) {
+        private init(_ mark: CopyMark, wait: TimeInterval, pasteboard: NSPasteboard, hands: (@Sendable () -> Bool)?,
+                     then: @escaping @MainActor (String?) -> Void) {
             self.mark = mark
             self.until = mark.at + wait
             self.pasteboard = pasteboard
+            self.hands = hands
             self.then = then
         }
 
+        /// `hands`: only a check gives one (with a clipboard of its own): whether the person typed or clicked is then
+        /// what it says, and nothing of theirs is listened to.
         @MainActor static func start(_ mark: CopyMark, wait: TimeInterval = 0.6, pasteboard: NSPasteboard = .general,
-                                     then: @escaping @MainActor (String?) -> Void) {
-            let watch = CopyWatch(mark, wait: wait, pasteboard: pasteboard, then: then)
-            watch.monitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { _ in
-                watch.lock.withLock { watch.heard = true }
+                                     hands: (@Sendable () -> Bool)? = nil, then: @escaping @MainActor (String?) -> Void) {
+            let watch = CopyWatch(mark, wait: wait, pasteboard: pasteboard, hands: hands, then: then)
+            if hands == nil {
+                watch.monitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { _ in
+                    watch.lock.withLock { watch.heard = true }
+                }
             }
             queue.async { watch.tick() }
         }
@@ -1926,6 +1934,7 @@ enum Acting {
         /// The person typed or clicked since the press: what the monitor heard, and the hardware's own times, which
         /// also cover the moment before the monitor was installed (never Petal's posted keys).
         private func input() -> Bool {
+            if let hands { return hands() }
             if lock.withLock({ heard }) { return true }
             let since = ProcessInfo.processInfo.systemUptime - mark.at
             return [CGEventType.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown].contains {
