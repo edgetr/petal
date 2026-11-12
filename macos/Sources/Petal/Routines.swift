@@ -1112,7 +1112,7 @@ final class Routines {
     /// that ran it (nil for a routine's own trigger).
     private func confirm(_ many: Bool, _ title: String, _ detail: String, owner: String?, done: @escaping (Bool) -> Void) {
         guard many, !standalone else { return done(true) }
-        PetalApp.shared.assist.ask("tidy", title, detail: detail, owner: owner, done: done)
+        PetalApp.shared.assist.ask("tidy", title, wants: title.prefix(1).lowercased() + title.dropFirst(), detail: detail, owner: owner, done: done)
     }
 
     nonisolated static func counts(_ plan: Plan) -> [(name: String, count: Int, new: Bool)] {

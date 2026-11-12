@@ -634,7 +634,7 @@ final class ComputerUse {
             : job.map.ownPlace
             ? "First, \(first). \(lasting) it can press and type in this note's \(name) window in the background, while you work elsewhere: nothing comes forward, and your pointer and keyboard stay yours. Stop it from its note."
             : "First, \(first). \(lasting) it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it."
-        assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?", detail: detail,
+        assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?", wants: "use \(name)", detail: detail,
                    owner: caller) { allowed in
             // The note was stuck somewhere else while the person was asked (its card was taken away): look again.
             if job.map.place != self.places[caller, default: 0] { return fail(Self.moved) }

@@ -503,12 +503,37 @@ struct NoteHelpCheck {
         expect(RunToken.classify(authFailed: false, errored: false, signaled: true, status: 15) == .interrupted, "a plain stop is an interruption")
         expect(RunToken.classify(authFailed: false, errored: true, signaled: false, status: 0) == .failed
                && RunToken.classify(authFailed: false, errored: false, signaled: false, status: 0) == .succeeded, "an error event fails; a clean exit succeeds")
-        expect(NoteHelp.autoGrant(kind: "computer:com.example", fullAccess: false, allowed: ["computer:com.example"]) == "always:computer:com.example",
+        expect(NoteHelp.autoGrant(kind: "computer:com.example", fullAccess: false, allowed: ["computer:com.example"], asker: .own) == "always:computer:com.example",
                "an Always given earlier is registered as that grant")
-        expect(NoteHelp.autoGrant(kind: "trash", fullAccess: true, allowed: []) == "full-access" && NoteHelp.autoGrant(kind: "trash", fullAccess: false, allowed: []) == nil,
-               "Full access, or asked")
+        expect(NoteHelp.autoGrant(kind: "trash", fullAccess: true, allowed: [], asker: .own) == "full-access"
+               && NoteHelp.autoGrant(kind: "trash", fullAccess: false, allowed: [], asker: .own) == nil, "Full access, or asked")
+        // Full access and Always are Petal AI's: a routine's own run keeps them, anyone outside Petal is asked.
+        expect(NoteHelp.asker(owner: nil, known: false) == .routine && NoteHelp.asker(owner: "A1B2", known: true) == .own
+               && NoteHelp.asker(owner: "mcp-501", known: false) == .outside && NoteHelp.asker(owner: "A1B2", known: false) == .outside,
+               "who a question is for: a chat Petal knows, no chat at all, or anyone else")
+        expect(NoteHelp.autoGrant(kind: "tidy", fullAccess: false, allowed: ["tidy"], asker: .routine) == "always:tidy"
+               && NoteHelp.autoGrant(kind: "tidy", fullAccess: true, allowed: [], asker: .routine) == "full-access", "a routine's own run goes by them too")
+        for kind in ["quit", "close", "trash", "tidy", "browser", "computer:com.apple.mail"] {
+            expect(NoteHelp.autoGrant(kind: kind, fullAccess: true, allowed: [], asker: .outside) == nil, "Full access never covers a caller outside Petal: \(kind)")
+            expect(NoteHelp.autoGrant(kind: kind, fullAccess: false, allowed: [kind], asker: .outside) == nil, "nor an Always: \(kind)")
+            expect(NoteHelp.autoGrant(kind: kind, fullAccess: true, allowed: [kind], asker: .outside) == nil, "nor both: \(kind)")
+        }
+        // Its card says who asks, and offers no Always (which would go on to cover Petal AI and everyone else).
+        let outsideCard = NoteHelp.card(title: "Let Petal AI use Mail?", wants: "use Mail", every: false, asker: .outside, label: "Codex in T3 Code")
+        expect(outsideCard.title == "Codex in T3 Code wants to use Mail" && outsideCard.every, "an outside caller's card: who asks, no Always", "\(outsideCard)")
+        let program = NoteHelp.card(title: "Quit Mail", wants: "quit Mail", every: false, asker: .outside, label: "An unknown program (python3)")
+        expect(program.title == "An unknown program (python3) wants to quit Mail" && program.every, "a program's card", "\(program)")
+        let nameless = NoteHelp.card(title: "Quit Mail", wants: "quit Mail", every: false, asker: .outside, label: nil)
+        expect(nameless.title == "Another program wants to quit Mail" && nameless.every, "one Petal has no name for is still never Petal AI", "\(nameless)")
+        let vaultCard = NoteHelp.card(title: "Codex in T3 Code wants to fill your login", wants: nil, every: true, asker: .outside, label: "Codex in T3 Code")
+        expect(vaultCard.title == "Codex in T3 Code wants to fill your login" && vaultCard.every, "a card that already says who asks keeps its words")
+        for asker in [NoteHelp.Asker.own, .routine] {
+            let mine = NoteHelp.card(title: "Let Petal AI use Mail?", wants: "use Mail", every: false, asker: asker, label: "Codex in T3 Code")
+            expect(mine.title == "Let Petal AI use Mail?" && !mine.every, "Petal AI's own card is as it was, with Always: \(asker)")
+            expect(NoteHelp.card(title: "Buy on shop.example?", wants: nil, every: true, asker: asker, label: nil).every, "a card asked every time stays so: \(asker)")
+        }
         let autoRun = RunToken()
-        autoRun.hold(NoteHelp.autoGrant(kind: "computer:com.example", fullAccess: false, allowed: ["computer:com.example"])!)
+        autoRun.hold(NoteHelp.autoGrant(kind: "computer:com.example", fullAccess: false, allowed: ["computer:com.example"], asker: .own)!)
         expect(autoRun.revoke("always:computer:com.example") && autoRun.state == .cancelled, "taking that Always back cancels a run that used it automatically")
         let home2 = "/Users/someone"
         expect(NoteHelp.chooseCheckout(["/Users/someone/garden"], words: "fix it in ~/garden-old", home: home2) == .mismatch("/Users/someone/garden-old"),

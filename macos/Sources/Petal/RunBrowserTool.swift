@@ -92,7 +92,7 @@ extension Assist {
     func browserAdmit(_ caller: String, token: Acting.Cancel, send: @escaping (Any) -> Void, fail: @escaping (String) -> Void, go: @escaping () -> Void) {
         if computer.allowed(caller, token: token, app: RunBrowsers.kind) { return go() }
         let lasting = caller.hasPrefix("mcp-") ? "For this task" : "Until this reply is done"
-        ask(RunBrowsers.kind, "Let Petal AI use a browser of its own?",
+        ask(RunBrowsers.kind, "Let Petal AI use a browser of its own?", wants: "use a browser of its own",
             detail: "\(lasting) it can open pages, press and type in a browser of its own, on a display you don't see. It starts fresh, signed in to nothing, and goes when the work is done. Nothing comes forward, and your pointer and keyboard stay yours. Stop it from its note or the AI button.",
             owner: caller) { [weak self] allowed in
             guard let self else { return }

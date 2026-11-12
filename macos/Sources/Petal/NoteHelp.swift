@@ -1956,11 +1956,33 @@ extension RunToken {
 }
 
 extension NoteHelp {
+    /// Who a question is asked for: one of Petal's own chats or helpers, a routine running by itself (no chat asked),
+    /// or anyone else who reached Petal's tools (an AI session or a program outside Petal).
+    enum Asker: Equatable { case own, routine, outside }
+
+    /// `owner`: the chat or session a question is for, nil when no chat asked. `known`: it's one of Petal's own chats.
+    static func asker(owner: String?, known: Bool) -> Asker {
+        guard owner != nil else { return .routine }
+        return known ? .own : .outside
+    }
+
     /// The authorization an automatic approval stands for (registered on the asking run's token before it goes on):
-    /// an Always given earlier, or Full access; nil when the person must be asked.
-    static func autoGrant(kind: String, fullAccess: Bool, allowed: [String]) -> String? {
+    /// an Always given earlier, or Full access; nil when the person must be asked. Full access and Always are what the
+    /// person said to Petal AI: anyone outside Petal is asked every time, whatever they are.
+    static func autoGrant(kind: String, fullAccess: Bool, allowed: [String], asker: Asker) -> String? {
+        guard asker != .outside else { return nil }
         if allowed.contains(kind) { return "always:" + kind }
         return fullAccess ? "full-access" : nil
+    }
+
+    /// A card for `asker`: whether it offers an Always kept for every chat (never to anyone outside Petal, whose
+    /// Always would go on to cover Petal AI and every other caller), and its title: Petal AI's own, or, for anyone
+    /// outside, who asks (`label`: "Codex in T3 Code", "An unknown program (python3)") and what for (`wants`: "use
+    /// Mail"), where the card says what it wants.
+    static func card(title: String, wants: String?, every: Bool, asker: Asker, label: String?) -> (title: String, every: Bool) {
+        guard asker == .outside else { return (title, every) }
+        guard let wants, !wants.isEmpty else { return (title, true) }
+        return ("\(label ?? "Another program") wants to \(wants)", true)
     }
 
     /// Which checkout a coding helper works in. A checkout named in the person's words is always checked, however
