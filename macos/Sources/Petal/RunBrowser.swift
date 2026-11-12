@@ -1549,11 +1549,11 @@ final class RunBrowsers {
     /// for it: the run's next answer says so, and What Petal AI did.
     private func watchCopy(_ mark: Acting.CopyMark, _ browser: RunBrowser?) {
         copyWatches += 1
-        Acting.CopyWatch.start(mark, wait: RunBrowserRules.copyWatch, pasteboard: clipboard, hands: copyHands) { [weak self, weak browser] cleared in
+        Acting.CopyWatch.start(mark, wait: RunBrowserRules.copyWatch, pasteboard: clipboard, hands: copyHands, any: true) { [weak self, weak browser] cleared in
             self?.copyWatches -= 1
             guard cleared != nil else { return }
             browser?.say(RunBrowserRules.copyCleared)
-            self?.app.assist.did("Cleared the clipboard after a page copied one of your secrets (a browser of its own)")
+            self?.app.assist.did("Cleared the clipboard after a page copied to it (a browser of its own)")
         }
     }
 

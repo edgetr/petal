@@ -1017,19 +1017,19 @@ private final class BrowserChecker {
             let said = [pressed, told].filter { ($0["happened"] as? [String])?.contains(RunBrowserRules.copyCleared) == true }.count
             expect(said == 1, "and an answer says so, once (\(pressed["happened"] ?? "nothing"); \(told["happened"] ?? "nothing"))")
             expect(read.contains("On a press: refused."), "its own write on that press was refused too")
-            expect(app.assist.history.map(\.text).contains { $0.contains("Cleared the clipboard after a page copied one of your secrets") }, "and so does What Petal AI did")
+            expect(app.assist.history.map(\.text).contains { $0.contains("Cleared the clipboard after a page copied to it") }, "and so does What Petal AI did")
             // A key is a press too.
             count = clipboard.changeCount
             let keyed = browser("key", ["key": "down", "id": id("field \"Hot field\"", in: read)])
             expect(error(keyed).isEmpty && wait(10) { clipboard.changeCount == count + 2 } && clipboard.string(forType: .string) == nil,
                    "one copied on a key is cleared (\(error(keyed)); the clipboard moved \(clipboard.changeCount - count))")
             expect(settled(), "the watch ended")
-            // Words that are nobody's secret stay.
+            // Words that are nobody's secret go too: a page never changes the person's clipboard.
             read = page(browser("read"))
             count = clipboard.changeCount
             _ = browser("click", ["id": id("button \"Copy the words\"", in: read)])
-            expect(wait(10) { clipboard.changeCount == count + 1 } && settled() && clipboard.string(forType: .string) == "only words" && clipboard.changeCount == count + 1,
-                   "a copy with no secret in it is left alone (\(clipboard.string(forType: .string) ?? "nothing"))")
+            expect(wait(10) { clipboard.changeCount == count + 2 } && settled() && clipboard.string(forType: .string) == nil,
+                   "a copy with no secret in it is cleared too (\(clipboard.string(forType: .string) ?? "nothing"))")
             // The person typing or clicking meanwhile: a copy may be theirs, and is never cleared.
             app.runBrowsers.copyHands = { true }
             defer { app.runBrowsers.copyHands = { false } }
@@ -1040,7 +1040,7 @@ private final class BrowserChecker {
                    "with the person at the keyboard nothing is cleared")
             expect((browser("read")["happened"] as? [String])?.contains(RunBrowserRules.copyCleared) != true, "and nothing is said")
             clipboard.clearContents()
-            return "two sites refused the clipboard on load and on a press; a password copied on a press and on a key was cleared and said; plain words, and a copy while the person types, were left"
+            return "two sites refused the clipboard on load and on a press; a password copied on a press and on a key was cleared and said, and so were plain words; a copy while the person types was left"
         }
 
         step("no secret in any answer") {

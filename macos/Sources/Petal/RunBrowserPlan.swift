@@ -440,7 +440,7 @@ enum RunBrowserRules {
     /// long, and a moment more.
     static let copyWatch: TimeInterval = 6
 
-    static let copyCleared = "After a press of yours a page copied a saved secret (or more text than Petal can check for one); Petal cleared the clipboard. petal_vault fills a saved one where it's needed (action: fill)."
+    static let copyCleared = "After a press of yours a page copied something to the clipboard; Petal cleared the clipboard: a page in this browser never changes the person's. petal_vault fills a saved secret where it's needed (action: fill)."
 
     // MARK: Words
 

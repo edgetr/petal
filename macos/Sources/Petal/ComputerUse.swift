@@ -1951,12 +1951,16 @@ enum Acting {
         private let then: @MainActor (String?) -> Void
         /// A check's own word on whether the person typed or clicked, in place of the keyboard's and mouse's.
         private let hands: (@Sendable () -> Bool)?
+        /// Whatever the press itself copied is cleared, a secret or not (a page in a run's browser has no say on the
+        /// person's clipboard).
+        private let any: Bool
         private let lock = NSLock()
         private var heard = false
         private var monitor: Any?
 
-        private init(_ mark: CopyMark, wait: TimeInterval, pasteboard: NSPasteboard, hands: (@Sendable () -> Bool)?,
+        private init(_ mark: CopyMark, wait: TimeInterval, pasteboard: NSPasteboard, hands: (@Sendable () -> Bool)?, any: Bool,
                      then: @escaping @MainActor (String?) -> Void) {
+            self.any = any
             self.mark = mark
             self.until = mark.at + wait
             self.pasteboard = pasteboard
@@ -1967,8 +1971,8 @@ enum Acting {
         /// `hands`: only a check gives one (with a clipboard of its own): whether the person typed or clicked is then
         /// what it says, and nothing of theirs is listened to.
         @MainActor static func start(_ mark: CopyMark, wait: TimeInterval = 0.6, pasteboard: NSPasteboard = .general,
-                                     hands: (@Sendable () -> Bool)? = nil, then: @escaping @MainActor (String?) -> Void) {
-            let watch = CopyWatch(mark, wait: wait, pasteboard: pasteboard, hands: hands, then: then)
+                                     hands: (@Sendable () -> Bool)? = nil, any: Bool = false, then: @escaping @MainActor (String?) -> Void) {
+            let watch = CopyWatch(mark, wait: wait, pasteboard: pasteboard, hands: hands, any: any, then: then)
             if hands == nil {
                 watch.monitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { _ in
                     watch.lock.withLock { watch.heard = true }
@@ -1999,7 +2003,7 @@ enum Acting {
                 // Counted but not written yet: the copy's contents are still coming.
                 if types.isEmpty { return late ? finish(nil) : again() }
                 // Too long to check counts as unsafe too: a "Copy all" of a big log may hold a saved secret.
-                let secret = Assist.isConcealed(pasteboard)
+                let secret = any || Assist.isConcealed(pasteboard)
                     || pasteboard.string(forType: .string).map { Assist.vaultCheck($0) != .clean } == true
                 if UIMap.clearsCopy(start: mark.count, seen: now, now: pasteboard.changeCount, input: input(), secret: secret) {
                     pasteboard.clearContents()
