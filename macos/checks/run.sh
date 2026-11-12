@@ -45,6 +45,9 @@ swiftc -parse-as-library -O -o "$out/configrules" Sources/Petal/ConfigRules.swif
 # fetched from the site again (SiteLoads).
 swiftc -parse-as-library -O -o "$out/siteloads" Sources/Petal/SiteLoads.swift checks/SiteLoadsCheck.swift
 "$out/siteloads"
+# A stack's thumbnails: made once at a time, and made again when asked for after the cache let them go (ThumbnailCache).
+swiftc -parse-as-library -O -o "$out/thumbnails" Sources/Petal/ThumbnailCache.swift checks/ThumbnailCacheCheck.swift
+"$out/thumbnails"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
