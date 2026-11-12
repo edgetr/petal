@@ -18,6 +18,8 @@ import SwiftUI
 /// against the person's own Claude Code (Haiku at low effort) or Codex, when it's installed and signed in: a few
 /// short calls.
 ///
+/// Its last step isn't about helpers: `settings.json` changed outside Petal while the real app runs (`Config`).
+///
 /// One line per step; exits non-zero when any fails.
 @MainActor
 enum HelpersCheck {
@@ -1316,6 +1318,66 @@ private final class HelpersChecker {
             expect(Screens.runIDs.isEmpty && world.askedToQuit.isEmpty, "nothing real was made, and no app the runs didn't start was asked to quit")
             app.config.set("runDisplays", false)
             return "the second run waited for Writer and said so on its note and in the preview, never had the first's window, a circle was refused in words, it got Writer when the first ended, and Show me handed it back while the run went on (none real)"
+        }
+    }
+
+    /// 18. settings.json changed outside Petal while it runs (an editor, another program): everything in it is taken
+    /// but what would let Petal AI do more (Full access, using apps, more allowed without asking, an app off the
+    /// private list), which stays as Petal has it and is written back; what lets it do less is taken.
+    func eighteenth() {
+        step("19", "settings.json changed outside Petal") {
+            let file = config.appending(path: "settings.json")
+            let onDisk = { () -> [String: Any] in ((try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] ?? [:] }
+            let write = { (settings: [String: Any]) in
+                if let data = try? JSONSerialization.data(withJSONObject: settings) { try? data.write(to: file, options: .atomic) }
+            }
+            let listed = { (settings: [String: Any], key: String) in settings[key] as? [String] ?? [] }
+            let config = app.config
+            let bounce = config.bool("bounce"), hidden = config.strings("aiNeverLook"), allowedBefore = config.strings("aiAllowed")
+            // As the person has them, set in Petal: using apps off, one thing allowed, an app of theirs kept private.
+            config.set("computerUse", false)
+            config.set("aiAllowed", ["quit"])
+            config.set("aiNeverLook", hidden + ["com.example.bank"])
+            expect(wait(10) { listed(onDisk(), "aiNeverLook").contains("com.example.bank") && listed(onDisk(), "aiAllowed") == ["quit"] }, "the person's own settings were written")
+            expect(config.string("claudeAccess") != "full", "the check starts without Full access")
+
+            // The file changed from outside to ask for more of all four, and to change one ordinary setting.
+            var more = onDisk()
+            more["claudeAccess"] = "full"
+            more["computerUse"] = true
+            more["aiAllowed"] = ["quit", "trash", "computer:com.apple.Safari"]
+            more["aiNeverLook"] = [String]()
+            more["bounce"] = !bounce
+            write(more)
+            // The ordinary setting arriving says the file was read; the file saying what Petal goes by again says it was put back.
+            expect(wait(15) { config.bool("bounce") == !bounce }, "the rest of the file was taken")
+            expect(wait(15) {
+                let disk = onDisk()
+                return disk["claudeAccess"] as? String != "full" && disk["computerUse"] as? Bool == false && listed(disk, "aiAllowed") == ["quit"]
+                    && Set(listed(disk, "aiNeverLook")) == Set(hidden + ["com.example.bank"])
+            }, "the file was written back to what Petal goes by (\(onDisk().filter { ConfigRules.personsOwn.contains($0.key) }))")
+            expect(config.string("claudeAccess") != "full", "Full access stayed off")
+            expect(!config.bool("computerUse"), "using apps stayed off")
+            expect(config.strings("aiAllowed") == ["quit"], "nothing more is allowed without asking (\(config.strings("aiAllowed")))")
+            expect(Set(config.strings("aiNeverLook")) == Set(hidden + ["com.example.bank"]), "every app kept private still is (\(config.strings("aiNeverLook")))")
+            expect(onDisk()["bounce"] as? Bool == !bounce, "and the ordinary setting stayed as the file said")
+
+            // The file changed from outside to ask for less: taken.
+            var less = onDisk()
+            less["aiAllowed"] = [String]()
+            less["aiNeverLook"] = hidden + ["com.example.bank", "com.example.other"]
+            less["bounce"] = bounce
+            write(less)
+            expect(wait(15) { config.bool("bounce") == bounce && config.strings("aiAllowed").isEmpty && config.strings("aiNeverLook").contains("com.example.other") },
+                   "less allowed and one more app kept private were taken (\(config.strings("aiAllowed")), \(config.strings("aiNeverLook")))")
+            expect(listed(onDisk(), "aiNeverLook").contains("com.example.other") && listed(onDisk(), "aiAllowed").isEmpty, "and the file was left as it was written")
+
+            // In Petal itself (the settings window, a card's Always) the same four still change both ways.
+            config.set("aiAllowed", allowedBefore)
+            config.set("aiNeverLook", hidden)
+            expect(wait(10) { listed(onDisk(), "aiNeverLook") == hidden }, "a change made in Petal lands as before")
+            expect(config.strings("aiNeverLook") == hidden, "and an app the person takes off the private list in Petal comes off")
+            return "Full access, using apps, more allowed and a shorter private list asked for in the file were put back; less was taken; the rest of the file was taken either way"
         }
     }
 
