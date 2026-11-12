@@ -346,6 +346,7 @@ private final class HelpersChecker {
         sixteenth()
         seventeenth()
         eighteenth()
+        nineteenth()
         if ai { real() }
         settle()
         print(failures == 0 ? "helpers-check: all passed" : "helpers-check: \(failures) failed")
@@ -1324,7 +1325,7 @@ private final class HelpersChecker {
     /// 18. settings.json changed outside Petal while it runs (an editor, another program): everything in it is taken
     /// but what would let Petal AI do more (Full access, using apps, more allowed without asking, an app off the
     /// private list), which stays as Petal has it and is written back; what lets it do less is taken.
-    func eighteenth() {
+    func nineteenth() {
         step("19", "settings.json changed outside Petal") {
             let file = config.appending(path: "settings.json")
             let onDisk = { () -> [String: Any] in ((try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] ?? [:] }
