@@ -326,8 +326,12 @@ enum UIMap {
         private var wholes = Set<Int>()
         /// Every `piece` characters of a longer secret, as `window` hashes them.
         private var pieces = Set<UInt64>()
-        /// Short secrets, and the words found only whole (`words`), by their length, as `window` hashes them.
+        /// Short secrets, by their length, as `window` hashes them.
         private var shorts: [Int: Set<UInt64>] = [:]
+        /// The words found only whole (`words`), as `window` hashes them, and their lengths, shortest first, with
+        /// `base` to each length's power.
+        private var words = Set<UInt64>()
+        private var wordLengths: [(length: Int, power: UInt64)] = []
         /// 3- and 4-digit secrets (security codes), by their length, as `window` hashes them.
         private var numbers: [Int: Set<UInt64>] = [:]
         /// Every `piece` digits of a card number (a secret that is 12 to 19 digits and separators), as `window`
@@ -346,11 +350,14 @@ enum UIMap {
         /// `words`: found only whole, as a word of its own, whatever its length (what reads as a code in an item's
         /// notes), never by its pieces, so the person's other words stay as they are.
         init(_ secrets: [String], words: [String] = []) {
+            var lengths = Set<Int>()
             for word in words where !word.isEmpty {
                 wholes.insert(word.hashValue)
                 let codes = Self.codes(Array(word))
-                shorts[codes.count, default: []].insert(Self.window(codes[...]))
+                self.words.insert(Self.window(codes[...]))
+                lengths.insert(codes.count)
             }
+            wordLengths = lengths.sorted().map { length in (length, (0..<length).reduce(UInt64(1)) { power, _ in power &* Self.base }) }
             for secret in secrets where !secret.isEmpty {
                 wholes.insert(secret.hashValue)
                 let characters = Array(secret)
@@ -423,6 +430,7 @@ enum UIMap {
         private func scan(_ characters: [Character], _ found: (Int, Int) -> Bool) {
             let codes = Self.codes(characters)
             var going = true
+            if !wordLengths.isEmpty { going = scanWords(characters, codes, found) }
             for (length, hashes) in shorts where going {
                 Self.roll(codes, length) { start, hash in
                     if hashes.contains(hash), Self.edge(characters, start), Self.edge(characters, start + length) { going = found(start, length) }
@@ -475,6 +483,44 @@ enum UIMap {
                 }
             }
             flush()
+        }
+
+        /// The words found only whole, in one pass however many lengths they have: a word is letters, digits, dashes
+        /// and underscores (Vault.noteCodes), so it can only be inside a run of those at least as long as the shortest
+        /// word, starting at a letter or digit after the run's start or a dash or underscore, and ending where a word
+        /// ends. Each such span of a word's length is hashed from the run's running hashes. False once `found` says stop.
+        private func scanWords(_ characters: [Character], _ codes: [UInt64], _ found: (Int, Int) -> Bool) -> Bool {
+            guard let shortest = wordLengths.first?.length else { return true }
+            func inWord(_ character: Character) -> Bool { Self.letterOrDigit(character) || character == "-" || character == "_" }
+            var prefix: [UInt64] = []
+            var start = 0
+            while start < characters.count {
+                guard inWord(characters[start]) else { start += 1; continue }
+                var end = start
+                while end < characters.count, inWord(characters[end]) { end += 1 }
+                defer { start = end }
+                guard end - start >= shortest else { continue }
+                // prefix[k]: the hash of the run's first k characters, so any span's is prefix[e] - prefix[s]·base^length.
+                prefix.removeAll(keepingCapacity: true)
+                prefix.append(0)
+                for index in start..<end { prefix.append(prefix[prefix.count - 1] &* Self.base &+ codes[index]) }
+                for from in start..<end where Self.letterOrDigit(characters[from]) {
+                    guard from == start || !Self.letterOrDigit(characters[from - 1]) else { continue }
+                    for (length, power) in wordLengths {
+                        let to = from + length
+                        guard to <= end else { break }
+                        let hash = prefix[to - start] &- prefix[from - start] &* power
+                        if words.contains(hash), Self.edge(characters, to), !found(from, length) { return false }
+                    }
+                }
+            }
+            return true
+        }
+
+        /// A letter or a digit of any script, ASCII's told at once.
+        @inline(__always) static func letterOrDigit(_ character: Character) -> Bool {
+            if let ascii = character.asciiValue { return (48...57).contains(ascii) || (65...90).contains(ascii) || (97...122).contains(ascii) }
+            return character.isLetter || character.isNumber
         }
 
         /// `text` is a secret, holds `piece` characters or more of one, or holds a short one whole, not run into the

@@ -1214,7 +1214,7 @@ struct VaultCheck {
         expect(codes == ["a1b2c-3d4e5", "f6g7h-8i9j0", "Zx9Qm4Lt7Kp2", "tok_live_9f8e7d6c"], "what reads as a code in the notes (\(codes))")
         expect(Vault.noteCodes(VaultItem(kind: .login, title: "Plain")).isEmpty, "no notes, no codes")
         var long = VaultItem(kind: .login, title: "Many")
-        long[.notes] = (0..<300).map { "code\($0)x-abcd" }.joined(separator: " ")
+        long[.notes] = (0..<300).map { "c\($0)x9-abcd" }.joined(separator: " ")
         expect(Vault.noteCodes(long).count == Vault.noteCodeCap, "at most \(Vault.noteCodeCap) of a note's codes")
         expect(!Vault.secrets(login).contains { codes.contains($0) }, "they aren't secrets searched by their pieces")
         // As Petal builds the index: every item's secrets, and its notes' codes as words.
@@ -1229,6 +1229,21 @@ struct VaultCheck {
         for words in ["Recovery codes", "My password hint: the old street", "Renewed 2026-11-12", "phone 5551234567", "password", "Renewed", "tok_live"] {
             expect(!index.matches(words), "the person's own words stay: \(words)")
         }
+        // Names with a number in them, an email address, a host name and the item's own username aren't codes, and
+        // a contact's or an address's notes hold none.
+        let ordinary = "Recovery email john.smith2024@gmail.com, Instagram ada_love99, server web01-staging, Office365, covid-19 portal, renewed 12-Nov-2026, iPhone15Pro, host db1a2b3c.example.com, me j0hn5mith"
+        var plain = VaultItem(kind: .login, title: "Mail")
+        plain[.username] = "j0hn5mith"; plain[.password] = "Kq7-real-zebra-55"; plain[.notes] = ordinary
+        expect(Vault.noteCodes(plain).isEmpty, "ordinary words with digits aren't codes (\(Vault.noteCodes(plain)))")
+        for kind in [VaultKind.contact, .address] {
+            var item = VaultItem(kind: kind, title: "Ada")
+            item[.notes] = "Her recovery code a1b2c-3d4e5"
+            expect(Vault.noteCodes(item).isEmpty, "a \(kind.rawValue)'s notes give no codes")
+        }
+        let both = UIMap.SecretIndex(Vault.secrets(plain), words: codes)
+        expect(both.redacted(ordinary) == ordinary, "an email, a name or a host with digits in them is told as it is")
+        expect(Vault.turns("a1b2c-3d4e5") == 9 && Vault.turns("Office365") == 1 && Vault.turns("12-Nov-2026") == 2 && Vault.turns("XK7P-9QRT") == 4,
+               "turns between letters and digits")
         // The vault itself never tells a note.
         expect(Vault.shown(login)["notes"] == nil && !"\(Vault.shown(login))".contains("a1b2c"), "the notes are never in what the AI is told of an item")
         // Without the words the index is as it was.

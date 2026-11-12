@@ -379,19 +379,48 @@ enum Vault {
     static let noteCodeCap = 100
 
     /// What in an item's notes reads as a code (a recovery code, a key kept there): each run of letters, digits,
-    /// dashes and underscores that is 8 characters or more and has both a letter and a digit. UIMap.SecretIndex
-    /// looks for each whole, as a word of its own (its `words`), so the person's ordinary words, dates and numbers
-    /// are told as they are.
+    /// dashes and underscores that is 8 characters or more and goes from letters to digits and back at least three
+    /// times ("a1b2c-3d4e5", "XK7P-9QRT"), as a random code does. UIMap.SecretIndex looks for each whole, as a word of
+    /// its own (its `words`), so the person's ordinary words, dates and numbers are told as they are; so are names
+    /// with a number in them ("Office365", "web01-staging", "12-Nov-2026"), what's part of an email address or a host
+    /// name, the item's own username, and anything in a contact's or an address's notes.
     static func noteCodes(_ item: VaultItem) -> [String] {
+        guard item.kind != .contact, item.kind != .address else { return [] }
+        let own = Set([item[.username], item[.email], item.title].map { $0.lowercased() })
         var out: [String] = [], seen = Set<String>()
-        for run in item[.notes].split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }) {
-            let code = run.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
-            guard code.count >= UIMap.SecretIndex.piece, code.contains(where: \.isLetter), code.contains(where: \.isNumber),
-                  seen.insert(code).inserted else { continue }
-            out.append(code)
-            if out.count == noteCodeCap { break }
+        for token in item[.notes].split(whereSeparator: \.isWhitespace) where !token.contains("@") && !hostLike(token) {
+            for run in token.split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }) {
+                let code = run.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+                guard code.count >= UIMap.SecretIndex.piece, turns(code) >= 3, !own.contains(code.lowercased()),
+                      seen.insert(code).inserted else { continue }
+                out.append(code)
+                if out.count == noteCodeCap { return out }
+            }
         }
         return out
+    }
+
+    /// How many times `text` goes from a letter to a digit or back, the dashes and underscores between aside.
+    static func turns(_ text: String) -> Int {
+        var count = 0
+        var last: Bool?
+        for character in text where character.isLetter || character.isNumber {
+            let digit = character.isNumber
+            if let last, last != digit { count += 1 }
+            last = digit
+        }
+        return count
+    }
+
+    /// A word with a dot between two letters or digits: a host or file name ("web01.example.com", "v2.3.1").
+    static func hostLike(_ token: Substring) -> Bool {
+        let characters = Array(token)
+        guard characters.count > 2 else { return false }
+        for index in 1..<(characters.count - 1) where characters[index] == "." {
+            let before = characters[index - 1], after = characters[index + 1]
+            if (before.isLetter || before.isNumber) && (after.isLetter || after.isNumber) { return true }
+        }
+        return false
     }
 
     static func groups(_ text: String, by size: Int, _ separator: String) -> String {
