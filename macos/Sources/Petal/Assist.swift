@@ -924,6 +924,9 @@ final class Assist {
             var found: [AppWindow] = []
             // A run's own display too: whose windows each caller sees is decided below.
             for pid in pids { found += Windows.windows(of: pid, everywhere: true) }
+            // Each title as the AI may be told it: the vault's secrets taken out, as petal_look's are (here, off the
+            // main thread, since it may read the Keychain).
+            let titles = Dictionary(found.map { ($0.id, Self.withoutSecrets($0.title)) }, uniquingKeysWith: { first, _ in first })
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Its asker gone while the windows were read: nothing is asked or done for it.
@@ -935,7 +938,7 @@ final class Assist {
                         let hidden = self.privatePIDs
                         return send(["windows": found.map { w in
                             var item: [String: Any] = ["id": w.id, "app": NSRunningApplication(processIdentifier: w.pid)?.localizedName ?? "",
-                                                       "title": hidden.contains(w.pid) ? "" : w.title,
+                                                       "title": hidden.contains(w.pid) ? "" : titles[w.id] ?? UIMap.hidden,
                                                        "minimized": w.minimized, "here": self.app.docks.isOnScreen(w)]
                             if mine(w) { item["display"] = "yours" }
                             return item
@@ -950,7 +953,8 @@ final class Assist {
                     }
                     let appName = NSRunningApplication(processIdentifier: window.pid)?.localizedName ?? "the window"
                     // A private app's window is called by its app's name only, in replies and the history.
-                    let label = window.title.isEmpty || self.privatePIDs.contains(window.pid) ? appName : window.title
+                    let title = titles[window.id] ?? UIMap.hidden
+                    let label = title.isEmpty || self.privatePIDs.contains(window.pid) ? appName : title
                     switch action {
                     case "focus": Windows.focus(window, onScreen: self.app.docks.isOnScreen(window)); send(["focused": label])
                     case "minimize":
