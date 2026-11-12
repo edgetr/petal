@@ -220,6 +220,8 @@ final class ComputerUse {
             target = assist.frontApp(named: named)
         }
         guard let target else { return fail(named.isEmpty ? "Nothing's in front." : "\(named) isn't open.") }
+        // Never Petal's own windows (a note in Petal's viewer has that viewer as its place): said in words.
+        if let own = UIMap.petalsOwn(target.processIdentifier) { return fail(own) }
         let name = target.localizedName ?? named
         let bundle = target.bundleIdentifier ?? ""
         if assist.neverLook(bundle) {
@@ -358,6 +360,8 @@ final class ComputerUse {
             return fail("The last petal_ui looked at \(map.appName). Call petal_ui with app: \(named) first: Petal only uses a window it has looked at.")
         }
         guard let target = NSRunningApplication(processIdentifier: map.pid), !target.isTerminated else { return fail("\(map.appName) isn't open.") }
+        // Never in Petal's own windows (petal_ui reads none of them, so no id leads there; checked all the same).
+        if let own = UIMap.petalsOwn(map.pid) { return fail(own) }
         let name = map.appName
         let bundle = target.bundleIdentifier ?? "\(target.processIdentifier)"
         if let refusal = refusal(for: bundle, name: name) { return fail(refusal) }

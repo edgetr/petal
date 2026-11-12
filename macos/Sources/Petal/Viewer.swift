@@ -88,7 +88,8 @@ final class Viewers {
     }
 
     /// A viewer's own window as a note's helper sees its place (NoteHelpers.place): Petal's window showing that file,
-    /// by its window number, so `petal_look` and `petal_ui` read the viewer for a note in its margin. Nil: no window.
+    /// by its window number, so `petal_look` reads the viewer for a note in its margin (`petal_ui` and `petal_act` refuse
+    /// Petal's own windows: `UIMap.petalsOwn`). Nil: no window.
     func place(of model: ViewerModel) -> NotePlace? {
         guard let window = windows[model.id], window.windowNumber > 0 else { return nil }
         return NotePlace(pid: getpid(), app: NSRunningApplication.current.bundleIdentifier ?? "", appName: "Petal's viewer",

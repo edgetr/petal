@@ -43,6 +43,12 @@ enum UIMap {
     static let valueRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXCheckBox",
                                           "AXRadioButton", "AXSlider", "AXPopUpButton", "AXIncrementor", "AXDateField", "AXStepper"]
 
+    /// Petal's own windows (its notes and their editors, its viewer, its settings) are never read or used through
+    /// `petal_ui` and `petal_act`: they aren't an app to work in, and a note's words go only through the note tools.
+    /// The refusal in words for a window of the process `pid` when it is Petal itself (`petal`), else nil.
+    static func petalsOwn(_ pid: pid_t, petal: pid_t = getpid()) -> String? { pid == petal ? ownWords : nil }
+    static let ownWords = "That's one of Petal's own windows: petal_ui and petal_act never read or use Petal itself. For a document in Petal's viewer, petal_view gives its words; a note's are petal_note_read's."
+
     static func isSecure(_ node: UINode) -> Bool { node.subrole == "AXSecureTextField" }
 
     static func isActionable(_ node: UINode) -> Bool {

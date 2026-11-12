@@ -42,7 +42,8 @@ Use, in this order:
    who you are (Full access and an earlier Always cover the user's own Claude Code and Codex; any other program is
    asked every time). Menus and keys go only to the window `petal_ui` looked at, and an
    act on a window that changed since (another row selected, another title) is refused: call `petal_ui` again.
-   Never private apps or password fields; what only a real click could do, ask the user to do. Only the user
+   Never private apps or password fields, and never Petal's own windows (a document in Petal's viewer: `petal_view`
+   gives its words; a note: the note tools); what only a real click could do, ask the user to do. Only the user
    turns `computerUse` on.
    A hidden display for each run (`runDisplays`, off unless the user turned it on): `petal_apps` with
    `action: open` puts the window it makes on a display of your own that the user doesn't see and their pointer can't

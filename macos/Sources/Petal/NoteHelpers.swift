@@ -1710,7 +1710,7 @@ final class NoteHelpers {
     /// `required`: the run's own place; the window in front is its tools' target only as that very place (on another
     /// of the note's places there's none: its tools then say what they look at). A note in the margin of Petal's
     /// viewer is on its document there: the viewer's own window showing that file is its tools' target (`petal_look`
-    /// and `petal_ui` read the viewer), the one with the keyboard before the window in front, any other open one after.
+    /// reads the viewer; `petal_ui` and `petal_act` never Petal's own windows), the one with the keyboard before the window in front, any other open one after.
     private func place(of paper: PaperNote, on required: NoteStick) -> NotePlace? {
         let viewing = viewer(showing: paper.noteID, on: required)?.model
         if let viewing, viewing === app.viewers.front, let place = app.viewers.place(of: viewing) { return place }

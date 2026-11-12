@@ -2620,7 +2620,7 @@ extension NoteHelp {
         if computerUse { words = words + "\n\nYou may use the user's apps with petal_ui and petal_act; call petal_ui first and again after anything changes the window." }
         if runDisplays { words = words + "\n\n" + ownDisplay }
         if t.placeIsFile {
-            words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look and petal_ui read it there, and petal_view gives the words of the page it shows (page: another one). Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
+            words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look reads it there, and petal_view gives the words of the page it shows (page: another one); petal_ui and petal_act never read or use Petal's own windows. Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
         }
         if !t.place.isEmpty {
             words = words + "\n\nThe note is on: \(t.place). This, here, this page and this sentence mean that place, even after the user has gone elsewhere."

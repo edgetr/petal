@@ -794,7 +794,7 @@ private final class HelpersChecker {
             expect(place != nil && place?.pid == getpid() && place?.window != nil && place?.window == window, "its tools' target is the viewer's own window (\(String(describing: place)))")
             expect(place?.title == "Report.pdf" && place?.kind == .window, "by that window, titled for the file")
             expect(helpers.runs[id]?.sticky.map { self.app.claude.placed($0.id.uuidString) == place && self.app.claude.helperWaiting($0.id.uuidString) == nil } == true,
-                   "petal_look and petal_ui are given that window, not told to wait")
+                   "its tools are given that window, not told to wait")
             expect(calls("chat").last?.arguments.contains("Petal's viewer") == true && calls("chat").last?.arguments.contains("petal_view") == true, "it's told the viewer is its place")
             expect(wait(20) { self.state(id) == .done }, "its answer landed (\(String(describing: state(id))))")
 

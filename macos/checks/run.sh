@@ -88,6 +88,10 @@ perl -0777 -ne '
 if grep -n 'NSWorkspace.shared.open' Sources/Petal/NoteEditor.swift Sources/Petal/NoteViews.swift; then echo "A note's link opened outside NoteTasks"; exit 1; fi
 grep -q 'NoteTasks.openLink(link)' Sources/Petal/NoteEditor.swift || { echo "NoteEditor: a clicked link goes through NoteTasks.openLink"; exit 1; }
 echo "notes: a link in a note opens only through NoteTasks"
+# petal_ui, petal_act and a vault fill never read or use Petal's own windows (UIMap.petalsOwn, checked above).
+[ "$(grep -c 'if let own = UIMap.petalsOwn(' Sources/Petal/ComputerUse.swift)" = 2 ] && grep -q 'UIMap.petalsOwn(map.pid) == nil' Sources/Petal/VaultFill.swift \
+    || { echo "ComputerUse: petal_ui, petal_act and vault fills refuse Petal's own process"; exit 1; }
+echo "computer use: never Petal's own windows"
 # The Shielded boundary is the compiler's: what a helper tells an AI can't be made from a raw string. Each of these
 # must fail to compile (a raw string interpolated into a prompt, put into what a helper is told, or made Shielded
 # outside NoteShield), and the shielded way must compile.

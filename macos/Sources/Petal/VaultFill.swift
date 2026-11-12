@@ -466,7 +466,8 @@ extension Assist {
     /// the caller's window from petal_ui and its controls; or nil.
     private func vaultWindow(_ caller: String?, ids: [String]) -> VaultSurface? {
         if let page = vaultPage(caller, ids: ids) { return page }
-        guard let caller, let map = computer.maps[caller], Date().timeIntervalSince(map.made) <= UIMap.lifetime else { return nil }
+        guard let caller, let map = computer.maps[caller], Date().timeIntervalSince(map.made) <= UIMap.lifetime,
+              UIMap.petalsOwn(map.pid) == nil else { return nil }   // never a field of Petal's own windows
         var entries: [ComputerUse.Entry] = []
         for id in ids {
             guard let entry = map.entries[id] else { return nil }

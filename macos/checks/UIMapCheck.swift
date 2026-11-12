@@ -439,6 +439,11 @@ struct UIMapCheck {
 
         wholeSpan()
 
+        // Petal's own windows are never read or used: the refusal says where a document's and a note's words are.
+        expect(UIMap.petalsOwn(getpid()) == UIMap.ownWords && UIMap.petalsOwn(4242, petal: 4242) != nil, "Petal's own process is refused, in words")
+        expect(UIMap.petalsOwn(getpid() + 1) == nil && UIMap.petalsOwn(4242, petal: 4243) == nil, "any other app is read as before")
+        expect(UIMap.ownWords.contains("petal_view") && UIMap.ownWords.contains("petal_note_read"), "and names the tools that give those words")
+
         print("UIMap: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }
     }

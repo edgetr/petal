@@ -856,6 +856,9 @@ final class NoteTextView: NSTextView {
     private var pendingEdits: [(location: Int, inserted: String, person: Bool)] = []
     /// Inside an automatic correction (spelling, quotes, dashes): not the person's typing.
     private var correcting = false
+    /// Inside a change made through Accessibility (another program setting this editor's text or its selection's):
+    /// not the person's typing, so it never makes a line one Return runs.
+    private var setFromOutside = 0
     var mentionNames: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
     var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
     let mentions = MentionState()
@@ -906,8 +909,8 @@ final class NoteTextView: NSTextView {
     }
 
     private func record(_ ranges: [NSRange], _ strings: [String]) {
-        // The person's own change: not an undo or redo, not an automatic correction.
-        let person = !history.isUndoing && !history.isRedoing && !correcting
+        // The person's own change: not an undo or redo, not an automatic correction, not text set through Accessibility.
+        let person = !history.isUndoing && !history.isRedoing && !correcting && setFromOutside == 0
         var delta = 0
         for (range, text) in zip(ranges, strings).sorted(by: { $0.0.location < $1.0.location }) {
             pendingEdits.append((range.location + delta, text, person))
@@ -920,6 +923,23 @@ final class NoteTextView: NSTextView {
         correcting = true
         defer { correcting = false }
         super.handleTextCheckingResults(results, forRange: range, types: checkingTypes, options: options, orthography: orthography, wordCount: wordCount)
+    }
+
+    // Text and selections set through Accessibility: each one changes the editor as before, but as text from
+    // outside (`setFromOutside`), whichever of AppKit's two ways in it arrives by.
+    private func fromOutside(_ change: () -> Void) {
+        setFromOutside += 1
+        defer { setFromOutside -= 1 }
+        change()
+    }
+
+    override func setAccessibilityValue(_ value: Any?) { fromOutside { super.setAccessibilityValue(value) } }
+    override func setAccessibilitySelectedText(_ text: String?) { fromOutside { super.setAccessibilitySelectedText(text) } }
+    override func setAccessibilitySelectedTextRange(_ range: NSRange) { fromOutside { super.setAccessibilitySelectedTextRange(range) } }
+    override func setAccessibilitySelectedTextRanges(_ ranges: [NSValue]?) { fromOutside { super.setAccessibilitySelectedTextRanges(ranges) } }
+    @available(macOS, deprecated: 10.10)
+    override func accessibilitySetValue(_ value: Any?, forAttribute attribute: NSAccessibility.Attribute) {
+        fromOutside { super.accessibilitySetValue(value, forAttribute: attribute) }
     }
 
     /// The lines a change touched lose their mark (they can't run any more); the lines the person's own typing or
