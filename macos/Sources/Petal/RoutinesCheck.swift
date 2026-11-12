@@ -4,8 +4,10 @@ import AppKit
 /// Petal (no dock, no settings, nothing in ~/.config/petal): making one through Petal AI's tool, a dry run, tidying
 /// what's there, putting it back, new files settling (a growing file, a Chrome and a Firefox download), a second,
 /// pickier routine winning, the file-name patterns and times, links (a subfolder that is a link never filed into, a
-/// link among the files left alone, a named folder that really is elsewhere), routines saved when the Mac had modes
-/// (kept as written, never run), and routines written by hand with a folder outside the home folder (never run). With --ai, sorting asks Claude Haiku (the person's own `claude`, a few quick calls); without,
+/// link among the files left alone, a named folder that really is elsewhere), the card before a routine that opens
+/// something or runs a Shortcut is saved, changed or run by hand (answered by the check; nothing is opened or run),
+/// what open takes, routines saved when the Mac had modes (kept as written, never run), and routines written by hand
+/// with a folder outside the home folder (never run). With --ai, sorting asks Claude Haiku (the person's own `claude`, a few quick calls); without,
 /// it sorts by kind.
 @MainActor
 enum RoutinesCheck {
@@ -229,6 +231,62 @@ enum RoutinesCheck {
         check(fm.fileExists(atPath: elsewhere.appending(path: "f.pdf").path) && shelved["moved"] as? Int == 1,
               "a named folder that is a link to a folder routines may use still works: \(shelved)")
         _ = tool("petal_routine_delete", ["id": hid], routines)
+        // A routine that opens something or runs a Shortcut asks the person first, when Petal AI saves or changes it
+        // and when it's run by hand (the card is answered here in the person's place; nothing is opened or run in
+        // this check).
+        var asked: [(kind: String, title: String, detail: String)] = []
+        var answer = false
+        routines.answering = { kind, title, detail in
+            asked.append((kind, title, detail))
+            return answer
+        }
+        let before = routines.list.count
+        let morning: [String: Any] = ["words": "Send my report and open the plan every morning", "name": "Morning", "trigger": ["on": "time", "at": "09:00"],
+                                      "actions": [["do": "shortcut", "name": "Send Weekly Report"], ["do": "open", "apps": ["https://example.com/plan"]]]]
+        let declined = tool("petal_routine_save", morning, routines)
+        check(asked.count == 1 && asked.first?.kind == "routine" && asked.first?.title.contains("Morning") == true
+              && asked.first?.detail.contains("Send Weekly Report") == true && asked.first?.detail.contains("example.com") == true,
+              "saving a routine that runs a Shortcut and opens something asks first, saying what it does: \(asked.first.map { "\($0.title) \($0.detail)" } ?? "not asked")")
+        check(declined["declined"] != nil && declined["saved"] == nil && routines.list.count == before, "Don't: nothing is saved")
+        answer = true
+        let allowed = tool("petal_routine_save", morning, routines)
+        let oid = (allowed["saved"] as? [String: Any])?["id"] as? String ?? ""
+        check(asked.count == 2 && !oid.isEmpty && routines.list.count == before + 1, "Allow: it's saved")
+        _ = tool("petal_routine_save", ["id": oid, "name": "Mornings"], routines)
+        _ = tool("petal_routine_save", ["id": oid, "on": false], routines)
+        check(asked.count == 2 && routines.list.first { $0.id == oid }?.name == "Mornings" && routines.list.first { $0.id == oid }?.on == false,
+              "a new name, or turning it off, isn't asked again")
+        _ = tool("petal_routine_save", ["id": oid, "on": true], routines)
+        check(asked.count == 3 && asked.last?.title.contains("Change") == true, "turning it back on asks")
+        answer = false
+        let unchanged = tool("petal_routine_save", ["id": oid, "actions": [["do": "open", "apps": ["https://example.org/other"]]]], routines)
+        check(asked.count == 4 && unchanged["declined"] != nil && routines.list.first { $0.id == oid }?.actions.count == 2, "changing what it opens asks again; Don't keeps it as it was")
+        let notRun = tool("petal_routine_run", ["id": oid], routines)
+        check(asked.count == 5 && asked.last?.title.contains("Run") == true && notRun["declined"] != nil && notRun["ran"] == nil, "running it by hand asks; Don't: it doesn't run")
+        answer = true
+        let didRun = tool("petal_routine_run", ["id": oid], routines)
+        check(asked.count == 6 && didRun["ran"] != nil, "Allow: it runs")
+        let wouldDo = tool("petal_routine_run", ["id": oid, "dryRun": true], routines)
+        check(asked.count == 6 && wouldDo["wouldDo"] != nil, "a dry run does nothing, so it isn't asked")
+        let hides = tool("petal_routine_save", ["words": "Hide Mail at ten", "trigger": ["on": "time", "at": "10:00"], "actions": [["do": "hide", "apps": ["Mail"]]]], routines)
+        let hideID = (hides["saved"] as? [String: Any])?["id"] as? String ?? ""
+        _ = tool("petal_routine_run", ["id": hideID], routines)
+        check(asked.count == 6 && !hideID.isEmpty, "a routine that opens nothing and runs no Shortcut is never asked about")
+        // What open takes: apps, web addresses and documents. A script, a program or another kind of address is
+        // refused when the routine is saved.
+        let starter = root.appending(path: "Start.command"), plan = root.appending(path: "Plan.pdf")
+        fm.createFile(atPath: starter.path, contents: Data("#!/bin/sh\necho hi\n".utf8))
+        fm.createFile(atPath: plan.path, contents: Data("%PDF-1.4\n%%EOF\n".utf8))
+        let opening = { (item: String) -> [String: Any] in
+            tool("petal_routine_save", ["words": "Open it at eleven", "trigger": ["on": "time", "at": "11:00"], "actions": [["do": "open", "apps": [item]]]], routines)
+        }
+        let script = opening(starter.path), link = opening("shortcuts://run-shortcut?name=Send%20Weekly%20Report"), mail = opening("mailto:someone@example.com")
+        check(script["error"] != nil && link["error"] != nil && mail["error"] != nil && asked.count == 6,
+              "open refuses a script and addresses that aren't web addresses, before anything is asked: \(script["error"] ?? script)")
+        let document = opening(plan.path)
+        check(document["saved"] != nil && asked.count == 7, "open takes a document by its path")
+        for made in [oid, hideID, (document["saved"] as? [String: Any])?["id"] as? String ?? ""] { _ = tool("petal_routine_delete", ["id": made], routines) }
+        routines.answering = nil
         Routines.flush()
         check(fm.fileExists(atPath: Routines.file.path) && Routines.file.path.hasPrefix(state.path), "kept in the test's own folder")
         routines.stop()

@@ -728,6 +728,7 @@ enum AllowedKinds {
         case "close": "Closing windows"
         case "trash": "Moving files to the Trash"
         case "tidy": "Tidying many files at once"
+        case Routines.card: "Routines that open things or run Shortcuts"
         case RunBrowsers.kind: "Using a browser of its own"
         default: kind.hasPrefix("computer:") ? "Using \(Apps.cachedName(String(kind.dropFirst(9))) ?? String(kind.dropFirst(9)))" : kind
         }

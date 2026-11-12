@@ -29,7 +29,9 @@ Use, in this order:
    itself from the user's own words ("keep my Downloads tidy", "when I open Xcode, hide Messages"):
    `petal_routine_save` (their words, plus the trigger and actions you fill in), `petal_routines`,
    `petal_routine_run` (`dryRun: true` shows what it would do with the files there now), `petal_routine_undo` (puts
-   moved files back), `petal_routine_delete`. Routines only move files, never delete them.
+   moved files back), `petal_routine_delete`. Routines only move files, never delete them. One that opens
+   something or runs a Shortcut asks the user on a card before it's saved, changed or run by hand; its `open` takes
+   apps, https:// addresses and documents by full path, never a script, a program or another kind of address.
    Using the user's apps (`computerUse`): `petal_ui` lists the front window's controls with ids (e12), and
    `petal_act` presses, types, focuses or scrolls one by id, chooses a menu item by path ("File > Export…") or
    presses a key (cmd-s), through Accessibility with Petal's own pink pointer; the user's pointer never moves. In a

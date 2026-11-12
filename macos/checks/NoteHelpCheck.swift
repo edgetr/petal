@@ -1243,6 +1243,19 @@ struct NoteHelpCheck {
                "\(NoteTasks.decide(linkToScript))")
         expect(fileAction(aliasToScript) == .reveal, "a Finder alias to a script: resolved first, revealed", "\(NoteTasks.decide(aliasToScript))")
         expect(fileAction(aliasToPDF) == .open && NoteTasks.decide(aliasToPDF).0.path == real(pdf).path, "an alias to a PDF: the PDF is opened", "\(NoteTasks.decide(aliasToPDF))")
+        // A routine's open action goes by the same rule (NoteTasks.routine): a document is opened, an app is
+        // started, and nothing else is: never a script, a program, an installer or something that points elsewhere.
+        let routineFile = { (url: URL) -> NoteTasks.RoutineFile in NoteTasks.routine(url).1 }
+        expect(routineFile(pdf) == .open && routineFile(png) == .open && routineFile(plainText) == .open, "a routine opens a PDF, a picture, text")
+        for blocked in [script, command, workflow, webloc, fileloc, dmg, pkg, folder] {
+            expect(routineFile(blocked) == .never, "a routine never opens: \(blocked.lastPathComponent)", "\(routineFile(blocked))")
+        }
+        expect(routineFile(app) == .launch, "a routine starts an app named by its path", "\(routineFile(app))")
+        expect(routineFile(linkToScript) == .never && routineFile(aliasToScript) == .never, "a link or an alias to a script is never opened by a routine")
+        expect(routineFile(aliasToPDF) == .open && NoteTasks.routine(aliasToPDF).0.path == real(pdf).path, "an alias to a PDF: the PDF is what a routine opens")
+        expect(routineFile(scratch.appending(path: "gone.pdf")) == .never, "a file that isn't there is nothing to open")
+        let notAnApp = write("Fake2.app", "#!/bin/sh\necho hi\n")
+        expect(routineFile(notAnApp) == .never, "a file only named like an app is never started", "\(routineFile(notAnApp))")
         let part = { (kind: String, target: String) in NoteContract.TaskItem(kind: kind, title: "", target: target) }
         expect(fileAction(scratch.appending(path: "gone.pdf")) == .reveal && NoteTasks.url(part("file", "relative/path.pdf")) == nil
                && NoteTasks.located(part("file", scratch.appending(path: "gone.pdf").path), mac: "m", follow: { _ in nil }) == nil,

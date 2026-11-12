@@ -84,4 +84,42 @@ enum RoutineRules {
         guard let into = real(folder), reaches(into, home: home, testing: testing) else { return .into }
         return nil
     }
+
+    // MARK: What a routine opens, and when it asks first
+
+    /// One thing a routine's open action names: an app by its bundle id, a web address (http or https, with a
+    /// host), a file by its full path, or nothing a routine opens. A file is opened only once it's found to be a
+    /// document, or started when it's an app (NoteTasks.routine: Open all's own rule), never a script or a program;
+    /// any other kind of address (another app's own links, mail, a Shortcut's) is nothing.
+    enum Opens: Equatable {
+        case app(String)
+        case web(URL)
+        case file(String)
+        case nothing
+    }
+
+    static func opens(_ item: String) -> Opens {
+        let item = item.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !item.isEmpty, !item.contains("\0") else { return .nothing }
+        if item.hasPrefix("/") || item.hasPrefix("~") { return .file((item as NSString).expandingTildeInPath) }
+        guard item.contains(":") else { return .app(item) }
+        guard let url = URL(string: item), let scheme = url.scheme?.lowercased() else { return .nothing }
+        if scheme == "file" { return url.path.hasPrefix("/") ? .file(url.path) : .nothing }
+        guard scheme == "http" || scheme == "https", let host = url.host, !host.isEmpty else { return .nothing }
+        return .web(url)
+    }
+
+    /// A routine with one of these actions goes on opening things or running a Shortcut by itself, so the person is
+    /// asked before Petal AI saves it, changes it or runs it (Petal AI's card, kind `routine`).
+    static func asksFirst(actions kinds: [String]) -> Bool {
+        kinds.contains { $0 == "open" || $0 == "shortcut" }
+    }
+
+    /// Whether saving a routine asks: it would open something or run a Shortcut, and this isn't only a new name or
+    /// new words for one that does the same already, or turning it off. `same`: its trigger and actions are the ones
+    /// it has now.
+    static func savingAsks(actions kinds: [String], same: Bool, wasOn: Bool, on: Bool) -> Bool {
+        guard asksFirst(actions: kinds) else { return false }
+        return !same || (on && !wasOn)
+    }
 }

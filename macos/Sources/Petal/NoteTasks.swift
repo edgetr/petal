@@ -90,6 +90,27 @@ enum NoteTasks {
         return .open
     }
 
+    /// What a routine's open action may do with a file it names (Routines.perform), by Open all's own rule: a
+    /// document is opened, an app is started, and anything else is left: never a script, a program, an installer
+    /// or something that points elsewhere.
+    enum RoutineFile: Equatable { case open, launch, never }
+
+    static func routineFile(type: UTType?, ext: String, isDirectory: Bool) -> RoutineFile {
+        if fileAction(type: type, ext: ext, isDirectory: isDirectory) == .open { return .open }
+        if isDirectory, ext.lowercased() == "app", let type, type.conforms(to: .applicationBundle) { return .launch }
+        return .never
+    }
+
+    /// A routine's file as it really is (its alias or symbolic links resolved, as `decide` does), and what a routine
+    /// may do with it. Off the main thread.
+    nonisolated static func routine(_ url: URL) -> (URL, RoutineFile) {
+        let resolved = (try? URL(resolvingAliasFileAt: url, options: [.withoutUI, .withoutMounting])) ?? url
+        let real = resolved.resolvingSymlinksInPath()
+        let values = try? real.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey, .isSymbolicLinkKey, .isAliasFileKey])
+        guard FileManager.default.fileExists(atPath: real.path), values?.isSymbolicLink != true, values?.isAliasFile != true else { return (real, .never) }
+        return (real, routineFile(type: values?.contentType, ext: real.pathExtension, isDirectory: values?.isDirectory == true))
+    }
+
     /// A task's file as it is now, found by the one file resolver (ViewerFiles: the very file it was put away as, by
     /// its `fileID`, wherever it went; that gone, the one its bookmark finds; with no bookmark, the one at its path:
     /// never another file that took its path while its own still exists). A task that kept no identity (an older one,

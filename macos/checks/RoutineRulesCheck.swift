@@ -1,8 +1,9 @@
 import Foundation
 
 // Checks RoutineRules.swift: where routines may take files from and file them into, by a folder's path and by where
-// it really is once every link is followed. On throwaway folders it makes in the temporary folder; nothing is ever
-// moved (the rule only answers). Run with macos/checks/run.sh.
+// it really is once every link is followed; what a routine's open action may name; and which routines ask the
+// person first. On throwaway folders it makes in the temporary folder; nothing is ever moved or opened (the rules
+// only answer). Run with macos/checks/run.sh.
 @main
 struct RoutineRulesCheck {
     nonisolated(unsafe) static var failures = 0
@@ -119,6 +120,33 @@ struct RoutineRulesCheck {
         let cloudFile = file("Users/me/Library/CloudStorage/Dropbox/scan.pdf")
         expect(refusal(dropbox + "/scan.pdf", into: dropbox + "/Receipts", under: dropbox) == nil && FileManager.default.fileExists(atPath: cloudFile),
                "a file in the person's cloud folder is tidied there")
+
+        // What a routine's open action names: apps, web addresses and files by their path; nothing else.
+        typealias Opens = RoutineRules.Opens
+        expect(RoutineRules.opens("com.apple.mail") == .app("com.apple.mail") && RoutineRules.opens(" Xcode ") == .app("Xcode"), "an app by its id or its name")
+        expect(RoutineRules.opens("https://example.com/a?b=1") == .web(URL(string: "https://example.com/a?b=1")!)
+               && RoutineRules.opens("HTTP://example.com") == .web(URL(string: "HTTP://example.com")!), "a web address")
+        expect(RoutineRules.opens("/Users/someone/Documents/Plan.pdf") == .file("/Users/someone/Documents/Plan.pdf")
+               && RoutineRules.opens("~/Plan.pdf") == .file(NSHomeDirectory() + "/Plan.pdf")
+               && RoutineRules.opens("file:///Users/someone/Plan.pdf") == .file("/Users/someone/Plan.pdf"), "a file by its full path")
+        expect(RoutineRules.opens("/Users/someone/shortcuts:run.txt") == .file("/Users/someone/shortcuts:run.txt"), "a path stays a path whatever is in it")
+        let never = ["shortcuts://run-shortcut?name=Send%20Report", "x-apple.systempreferences:com.apple.preference.security", "mailto:someone@example.com",
+                     "tel:5550100", "javascript:alert(1)", "ssh://example.com", "vnc://example.com", "smb://example.com/share", "applescript://com.apple.scripteditor",
+                     "message://%3Cid@example.com%3E", "https://", "http:///nohost", "file:relative", "data:text/html,hello", "", "   ", "obsidian://open?vault=x"]
+        for item in never { expect(RoutineRules.opens(item) == Opens.nothing, "nothing a routine opens: \(item.debugDescription)", "\(RoutineRules.opens(item))") }
+
+        // Which routines ask first: the ones that open something or run a Shortcut.
+        expect(RoutineRules.asksFirst(actions: ["open"]) && RoutineRules.asksFirst(actions: ["shortcut"]) && RoutineRules.asksFirst(actions: ["sort", "hide", "open"]),
+               "a routine that opens something or runs a Shortcut asks first")
+        expect(!RoutineRules.asksFirst(actions: ["sort", "move", "hide"]) && !RoutineRules.asksFirst(actions: []), "one that only moves files or hides apps doesn't")
+        expect(RoutineRules.savingAsks(actions: ["open"], same: false, wasOn: false, on: true), "a new one asks")
+        expect(RoutineRules.savingAsks(actions: ["shortcut"], same: false, wasOn: true, on: true), "one whose trigger or actions change asks")
+        expect(RoutineRules.savingAsks(actions: ["open"], same: true, wasOn: false, on: true), "one turned back on asks")
+        expect(!RoutineRules.savingAsks(actions: ["open"], same: true, wasOn: true, on: true), "a new name or new words for the same routine doesn't")
+        expect(!RoutineRules.savingAsks(actions: ["open"], same: true, wasOn: true, on: false) && !RoutineRules.savingAsks(actions: ["open"], same: true, wasOn: false, on: false),
+               "nor does turning it off")
+        expect(RoutineRules.savingAsks(actions: ["open"], same: false, wasOn: true, on: false), "changed and turned off at once still asks")
+        expect(!RoutineRules.savingAsks(actions: ["sort"], same: false, wasOn: false, on: true), "one that opens nothing never asks")
 
         print("routine rules: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }

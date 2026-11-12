@@ -757,6 +757,22 @@ swiftc -parse-as-library -O -o "$out/routinestop" Sources/Petal/RoutineStop.swif
 # Library, a link among the files), on throwaway folders in the temporary folder; the rule only answers, nothing moves.
 swiftc -parse-as-library -O -o "$out/routinerules" Sources/Petal/RoutineRules.swift checks/RoutineRulesCheck.swift
 "$out/routinerules"
+# A routine that opens something or runs a Shortcut is the person's to allow: Petal AI's tools reach Petal AI's card
+# (kind `routine`) before one is saved, changed or run by hand (`Petal --routines-check` drives it, answering the
+# card itself), and a routine's open action goes through RoutineRules.opens and NoteTasks.routine, never straight
+# to whatever its text names.
+perl -0777 -ne '
+    my ($save) = /(    private func saveTool\(.*?\n    \}\n)/s;
+    my ($run) = /(    private func runTool\(.*?\n    \}\n)/s;
+    my ($allow) = /(    private func allow\(.*?\n    \}\n)/s;
+    my ($open) = /(        case "open":\n            \/\/ Apps, web addresses and documents only.*?\n        case "hide":)/s;
+    $bad .= "saving a routine never reaches the card\n" unless defined $save && $save =~ /guard RoutineRules\.savingAsks\(.*?else \{ return keep\(\) \}.*?self\.allow\(/s;
+    $bad .= "running a routine never reaches the card\n" unless defined $run && $run =~ /guard !dry, Self\.asksFirst\(routine\) else \{.*?\n        allow\(/s;
+    $bad .= "the card isn\x27t Petal AI\x27s\n" unless defined $allow && $allow =~ /assist\.ask\("routine", title, detail: detail, owner: owner, done: done\)/;
+    $bad .= "open takes more than RoutineRules.opens gives\n"
+        unless defined $open && $open =~ /switch RoutineRules\.opens\(item\)/ && $open =~ /NoteTasks\.routine\(file\)/ && $open !~ /URL\(string: item\)|expandingTildeInPath/;
+    END { if ($bad) { print "routines: $bad"; exit 1 } print "routines: opening and Shortcuts ask on a card, and open takes only what its rule gives\n" }
+' Sources/Petal/Routines.swift
 # Which Petal processes are a dock: a benchmark, snapshot, the AI's tools or a command never count as a second one
 # (PetalProcess; the Dock guard's shell test with pgrep and ps stood in for, never a real Petal).
 swiftc -parse-as-library -O -o "$out/petalprocess" Sources/Petal/PetalProcess.swift checks/PetalProcessCheck.swift

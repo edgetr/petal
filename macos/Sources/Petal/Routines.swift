@@ -611,35 +611,63 @@ final class Routines {
         let app = PetalApp.shared
         switch action.kind {
         case "open":
+            // Apps, web addresses and documents only (RoutineRules.opens): never a script, a program or another
+            // kind of address, whatever the routine names.
             var opened: [String] = []
             var urls: [URL] = []
+            var files: [URL] = []
             var launched: [String] = []
+            let outcome = Opened()
             for item in action.apps {
-                if item.contains("://"), let url = URL(string: item) {
+                switch RoutineRules.opens(item) {
+                case .web(let url):
                     urls.append(url)
                     opened.append(url.host ?? item)
-                } else if item.hasPrefix("/") || item.hasPrefix("~") {
-                    urls.append(URL(fileURLWithPath: (item as NSString).expandingTildeInPath))
-                    opened.append((item as NSString).lastPathComponent)
-                } else if !NSWorkspace.shared.personsApplications.contains(where: { $0.bundleIdentifier == item }) {
-                    app.docks.launch(item)   // Launch Services' own asynchronous open (and the dock's launch pulse)
-                    launched.append(item)
-                    opened.append(Apps.name(item))
+                case .file(let path):
+                    files.append(URL(fileURLWithPath: path))
+                case .app(let id):
+                    if !NSWorkspace.shared.personsApplications.contains(where: { $0.bundleIdentifier == id }) {
+                        app.docks.launch(id)   // Launch Services' own asynchronous open (and the dock's launch pulse)
+                        launched.append(id)
+                        opened.append(Apps.name(id))
+                    }
+                case .nothing:
+                    outcome.left.append(String(item.prefix(60)))
                 }
             }
-            let said = opened.isEmpty ? nil : "opened " + Apps.listed(opened)
-            guard !urls.isEmpty || !launched.isEmpty else { return done(said) }
+            let say = { () -> String? in
+                let names = opened + outcome.opened
+                var parts: [String] = names.isEmpty ? [] : ["opened " + Apps.listed(names)]
+                if !outcome.left.isEmpty { parts.append("left " + Apps.listed(outcome.left) + " unopened (routines open apps, sites and documents)") }
+                return parts.isEmpty ? nil : parts.joined(separator: ", ")
+            }
+            guard !urls.isEmpty || !files.isEmpty || !launched.isEmpty else { return done(say()) }
             // The next step waits until the apps are running (30 s at most) and the addresses and files are opened.
+            // A file is looked at as it really is first (its links followed), off the main thread.
             Assist.off({ !stop.isStopped }, {
                 for url in urls {
                     guard !stop.isStopped else { return }
                     NSWorkspace.shared.open(url)
                 }
+                for file in files {
+                    guard !stop.isStopped else { return }
+                    let (real, what) = NoteTasks.routine(file)
+                    switch what {
+                    case .open:
+                        NSWorkspace.shared.open(real)
+                        outcome.opened.append(real.lastPathComponent)
+                    case .launch:
+                        NSWorkspace.shared.openApplication(at: real, configuration: NSWorkspace.OpenConfiguration())
+                        outcome.opened.append(real.deletingPathExtension().lastPathComponent)
+                    case .never:
+                        outcome.left.append(file.lastPathComponent)
+                    }
+                }
                 let end = Date().addingTimeInterval(30)
                 while Date() < end, !stop.isStopped, !launched.allSatisfy({ !NSRunningApplication.persons(withBundleIdentifier: $0).isEmpty }) {
                     Thread.sleep(forTimeInterval: 0.25)
                 }
-            }) { ran in done(ran || !launched.isEmpty ? said : nil) }
+            }) { ran in done(ran || !launched.isEmpty || !outcome.left.isEmpty ? say() : nil) }
         case "hide":
             let running = NSWorkspace.shared.personsApplications.filter { r in action.apps.contains { $0 == r.bundleIdentifier } && !r.isHidden }
             guard !running.isEmpty else { return done(nil) }
@@ -659,6 +687,12 @@ final class Routines {
         default:
             done(nil)
         }
+    }
+
+    /// What an open action's files came to, filled off the main thread and read back on it once that's done.
+    private final class Opened: @unchecked Sendable {
+        var opened: [String] = []
+        var left: [String] = []
     }
 
     // MARK: Sorting files
@@ -967,7 +1001,7 @@ final class Routines {
             }, "history": log.prefix(15).map { e -> [String: Any] in
                 ["id": e.id, "routine": e.name, "text": e.text, "at": e.at.timeIntervalSince1970, "canPutBack": e.canUndo]
             }])
-        case "petal_routine_save": saveTool(args, live: live, send, fail)
+        case "petal_routine_save": saveTool(args, caller: caller, live: live, send, fail)
         case "petal_routine_delete":
             let id = args["id"] as? String ?? ""
             guard list.contains(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
@@ -983,7 +1017,7 @@ final class Routines {
         }
     }
 
-    private func saveTool(_ args: [String: Any], live: @escaping () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func saveTool(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let old = list.first { $0.id == (args["id"] as? String ?? "") }
         var trigger = (args["trigger"] as? [String: Any]).map(Trigger.init) ?? old?.trigger ?? Trigger()
         var actions = (args["actions"] as? [[String: Any]])?.map(Action.init) ?? old?.actions ?? []
@@ -1034,7 +1068,23 @@ final class Routines {
                     if actions[index].kind == "move" {
                         if let to = check(actions[index].to, base: base, mustExist: false) { actions[index].to = to } else { problem = "to must be in the home folder" }
                     }
-                case "open", "hide":
+                case "open":
+                    // Apps, web addresses and documents; a script, a program or another kind of address is said now.
+                    actions[index].apps = actions[index].apps.map { item in
+                        switch RoutineRules.opens(item) {
+                        case .app(let name): return Self.bundleID(name)
+                        case .web: return item
+                        case .file(let path):
+                            if FileManager.default.fileExists(atPath: path), NoteTasks.routine(URL(fileURLWithPath: path)).1 == .never {
+                                problem = "open doesn't take \((path as NSString).lastPathComponent): a routine opens apps, web addresses and documents, never a script or a program"
+                            }
+                            return item
+                        case .nothing:
+                            problem = "open takes apps, https:// addresses and documents by path; \(item.prefix(60)) is none of them"
+                            return item
+                        }
+                    }
+                case "hide":
                     actions[index].apps = actions[index].apps.map { $0.contains("://") || $0.hasPrefix("/") || $0.hasPrefix("~") ? $0 : Self.bundleID($0) }
                 default: break
                 }
@@ -1046,14 +1096,30 @@ final class Routines {
                     // Its asker gone while the folders were checked: nothing is saved for it.
                     guard live() else { return }
                     let routine = Routine(id: id, name: name, words: words, on: on, trigger: trigger, actions: actions)
-                    self.save(routine)
-                    var reply: [String: Any] = ["saved": routine.json, "does": self.summary(routine)]
-                    if !self.isOn { reply["note"] = "Routines are off in Petal's settings (routines); it runs once they're on." }
-                    if existing > 0, routine.actions.contains(where: \.movesFiles) {
-                        reply["filesThereNow"] = existing
-                        reply["next"] = "It only acts on new files. petal_routine_run with dryRun: true shows what it would do with the \(existing) there now; without dryRun it does it (Petal asks the person first when it's many)."
+                    let keep = {
+                        self.save(routine)
+                        var reply: [String: Any] = ["saved": routine.json, "does": self.summary(routine)]
+                        if !self.isOn { reply["note"] = "Routines are off in Petal's settings (routines); it runs once they're on." }
+                        if existing > 0, routine.actions.contains(where: \.movesFiles) {
+                            reply["filesThereNow"] = existing
+                            reply["next"] = "It only acts on new files. petal_routine_run with dryRun: true shows what it would do with the \(existing) there now; without dryRun it does it (Petal asks the person first when it's many)."
+                        }
+                        send(reply)
                     }
-                    send(reply)
+                    // One that opens something or runs a Shortcut is the person's to say yes to first; a new name
+                    // or new words for one that does the same already, or turning it off, isn't asked again.
+                    let now = self.list.first { $0.id == id }
+                    let same = now.map { $0.trigger == trigger && $0.actions == actions } ?? false
+                    guard RoutineRules.savingAsks(actions: actions.map(\.kind), same: same, wasOn: now?.on ?? false, on: on) else { return keep() }
+                    let rule = self.ruleVersion[id, default: 0]
+                    self.allow(now == nil ? "Add the routine “\(name)”?" : "Change the routine “\(name)”?", self.summary(routine), owner: caller) { yes in
+                        guard yes, live() else { return send(["declined": "The person didn't allow it; nothing was saved."]) }
+                        // Changed or deleted while its card waited: what was asked isn't what would be saved over.
+                        guard rule == self.ruleVersion[id, default: 0], (now == nil) == !self.list.contains(where: { $0.id == id }) else {
+                            return send(["note": "The routine changed while it waited; nothing was saved. Save it again."])
+                        }
+                        keep()
+                    }
                 }
             }
         }
@@ -1066,6 +1132,23 @@ final class Routines {
         if let why = Self.skipped(routine) { return fail(why) }
         let dry = args["dryRun"] as? Bool ?? false
         let rule = ruleVersion[id, default: 0]   // the routine as it is now; a change while its card waits stops it
+        let changed = { send(["note": "The routine changed while it waited; nothing moved. Run it again."]) }
+        // One that opens something or runs a Shortcut asks before it's run by hand (a dry run does nothing, so it
+        // doesn't); then it runs as any other does.
+        guard !dry, Self.asksFirst(routine) else {
+            return runNow(routine, dry: dry, rule: rule, caller: caller, live: live, stop: stop, send, fail)
+        }
+        allow("Run the routine “\(routine.name)”?", summary(routine), owner: caller) { yes in
+            guard yes, live() else { return send(["declined": "The person didn't allow it."]) }
+            guard rule == self.ruleVersion[id, default: 0], self.list.contains(where: { $0.id == id }) else { return changed() }
+            self.runNow(routine, dry: dry, rule: rule, caller: caller, live: live, stop: stop, send, fail)
+        }
+    }
+
+    /// `runTool`, once whatever it asks first is answered. `rule`: the routine's rule when it was asked for.
+    private func runNow(_ routine: Routine, dry: Bool, rule: Int, caller: String?, live: @escaping () -> Bool, stop: RoutineStop,
+                        _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+        let id = routine.id
         let changed = { send(["note": "The routine changed while it waited; nothing moved. Run it again."]) }
         guard let action = routine.actions.first(where: \.movesFiles) else {
             if dry { return send(["wouldDo": summary(routine)]) }
@@ -1113,6 +1196,22 @@ final class Routines {
                   "note": "Nothing moved yet. petal_routine_run without dryRun does it."])
         }
     }
+
+    /// The check's own answer to Petal AI's card for a routine (kind, title, detail), in place of the person's.
+    @ObservationIgnored var answering: ((String, String, String) -> Bool)?
+
+    /// A routine that opens something or runs a Shortcut goes on doing it by itself, so the person is asked before
+    /// Petal AI saves, changes or runs one: Petal AI's card (kind `routine`, which Always covers), showing what the
+    /// routine does. `owner`: the chat or AI session asking. The check answers through `answering`, else never asks.
+    private func allow(_ title: String, _ detail: String, owner: String?, done: @escaping (Bool) -> Void) {
+        if let answering { return done(answering(Self.card, title, detail)) }
+        guard !standalone else { return done(true) }
+        PetalApp.shared.assist.ask("routine", title, detail: detail, owner: owner, done: done)
+    }
+    /// The card's kind, as Always keeps it in `aiAllowed`.
+    nonisolated static let card = "routine"
+
+    nonisolated static func asksFirst(_ routine: Routine) -> Bool { RoutineRules.asksFirst(actions: routine.actions.map(\.kind)) }
 
     /// Asked first with Petal AI's card when it's many files; the check never asks. `owner`: the chat or AI session
     /// that ran it (nil for a routine's own trigger).
