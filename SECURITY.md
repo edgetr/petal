@@ -61,3 +61,4 @@ These are how Petal works today, not holes:
 - `petal run` takes a key out of what a command prints. A command written to leak a key in another form still can.
 - An agent's Always for a project covers anything that can start or set up that agent in that project.
 - Full access and an earlier Always for Petal AI also cover the person's own Claude Code and Codex outside Petal, and so whatever those run.
+- A picture Petal AI is given hides the secrets an app shows to Accessibility. Text an app draws itself, or a photo of a card, isn't hidden.
