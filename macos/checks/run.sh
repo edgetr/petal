@@ -29,6 +29,10 @@ swiftc -parse-as-library -O -o "$out/settings" Sources/Petal/Settings.swift chec
 "$out/settings" Resources/mcp/tools.json Sources/Petal
 swiftc -parse-as-library -O -o "$out/look" Sources/Petal/LookSchedule.swift checks/LookScheduleCheck.swift
 "$out/look"
+# What apps signal to the dock: a badge going up bounces its app once (never every badge when Petal or macOS's Dock
+# starts, and a dot becoming a count is going up), and a player playing shows before one paused (SignalRules).
+swiftc -parse-as-library -O -o "$out/signals" Sources/Petal/SignalRules.swift checks/SignalRulesCheck.swift
+"$out/signals"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
