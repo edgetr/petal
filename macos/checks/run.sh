@@ -41,6 +41,10 @@ swiftc -parse-as-library -O -o "$out/dockrules" Sources/Petal/DockRules.swift ch
 # editing that doesn't read as JSON yet keeps what was read before (ConfigRules).
 swiftc -parse-as-library -O -o "$out/configrules" Sources/Petal/ConfigRules.swift checks/ConfigRulesCheck.swift
 "$out/configrules"
+# A website shortcut's cached icon: an ask while it's being read waits for that read, so a cached icon is never
+# fetched from the site again (SiteLoads).
+swiftc -parse-as-library -O -o "$out/siteloads" Sources/Petal/SiteLoads.swift checks/SiteLoadsCheck.swift
+"$out/siteloads"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
