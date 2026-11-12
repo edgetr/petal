@@ -14,6 +14,44 @@ enum UpdateTrust {
     /// every Petal already installed.
     static let maker = #"identifier "tech.edgetr.petal" and certificate root = H"29feb33bdddb5686cbc597ca9706b0b8a6f3b36d""#
 
+    /// A version as a release's manifest says it: numbers with dots between them ("2.1.4"), nothing else. Anything
+    /// else is refused before it's used, so a manifest can't name a folder on the disk or another download with it.
+    static func plainVersion(_ version: String) -> Bool {
+        let parts = version.split(separator: ".", omittingEmptySubsequences: false)
+        return (1...4).contains(parts.count) && parts.allSatisfy { part in
+            (1...6).contains(part.count) && part.allSatisfy { ("0"..."9").contains($0) }
+        }
+    }
+
+    /// Whether version `a` comes after `b` ("2.1.10" after "2.1.9"; a missing part counts as 0).
+    static func newer(_ a: String, than b: String) -> Bool {
+        let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
+        for i in 0..<max(x.count, y.count) {
+            let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0
+            if p != q { return p > q }
+        }
+        return false
+    }
+
+    /// The version a bundle says it is (its CFBundleShortVersionString), read from its own Info.plist.
+    static func version(of app: URL) -> String? {
+        guard let data = try? Data(contentsOf: app.appending(path: "Contents/Info.plist")),
+              let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else { return nil }
+        return plist["CFBundleShortVersionString"] as? String
+    }
+
+    /// The app at `app` is Petal's maker's, whole, and is the very version its release said (`version`): a release
+    /// can't hand over another of the maker's builds, an older one, under a newer number.
+    static func release(_ app: URL, is version: String, as requirement: String = maker) -> Bool {
+        plainVersion(version) && signed(app, as: requirement) && self.version(of: app) == version
+    }
+
+    /// What an update may install over the Petal running now (`running`): the maker's build of the version its release
+    /// said, and newer than the one running, so an update never takes Petal back to an older version.
+    static func update(_ app: URL, is version: String, over running: String, as requirement: String = maker) -> Bool {
+        newer(version, than: running) && release(app, is: version, as: requirement)
+    }
+
     /// The app at `app` is validly signed, nothing in it changed since, and its signature meets `requirement`.
     static func signed(_ app: URL, as requirement: String = maker) -> Bool {
         var wanted: SecRequirement?

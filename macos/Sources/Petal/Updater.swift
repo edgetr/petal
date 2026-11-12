@@ -69,32 +69,29 @@ final class Updater {
         let (body, _) = try await URLSession.shared.data(from: manifestURL)
         guard let info = try JSONSerialization.jsonObject(with: body) as? [String: Any], let version = info["version"] as? String,
               let link = info["url"] as? String, let url = URL(string: link), let sha = info["sha256"] as? String else { return nil }
+        // Its version is used in what's downloaded and where it's unpacked: plain numbers only, or nothing is.
+        guard UpdateTrust.plainVersion(version) else { throw UpdateError("the newest release's version isn't one Petal can read") }
         return Release(version: version, url: url, sha256: sha.lowercased())
     }
 
-    static func newer(_ a: String, than b: String) -> Bool {
-        let x = a.split(separator: ".").map { Int($0) ?? 0 }, y = b.split(separator: ".").map { Int($0) ?? 0 }
-        for i in 0..<max(x.count, y.count) {
-            let p = i < x.count ? x[i] : 0, q = i < y.count ? y[i] : 0
-            if p != q { return p > q }
-        }
-        return false
-    }
+    static func newer(_ a: String, than b: String) -> Bool { UpdateTrust.newer(a, than: b) }
 
     private func install(_ release: Release) async throws {
         let (file, _) = try await URLSession.shared.download(from: release.url)
         let bundle = Bundle.main.bundleURL
+        let running = PetalApp.shared.version
         // Checking, unpacking and swapping take a moment; none of it on the dock's thread.
-        try await Task.detached { try Self.swap(in: file, release: release, over: bundle) }.value
+        try await Task.detached { try Self.swap(in: file, release: release, over: bundle, running: running) }.value
     }
 
-    nonisolated private static func swap(in file: URL, release: Release, over bundle: URL) throws {
+    nonisolated private static func swap(in file: URL, release: Release, over bundle: URL, running: String) throws {
         let data = try Data(contentsOf: file)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         guard digest == release.sha256 else { throw UpdateError("the download didn't match its checksum") }
-        let folder = FileManager.default.temporaryDirectory.appending(path: "petal-update-\(release.version)")
-        try? FileManager.default.removeItem(at: folder)
+        // A folder of its own, named by nothing the release says.
+        let folder = FileManager.default.temporaryDirectory.appending(path: "petal-update-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
         let unzip = Process()
         unzip.executableURL = URL(fileURLWithPath: "/usr/bin/ditto")
         unzip.arguments = ["-x", "-k", file.path, folder.path]
@@ -104,8 +101,12 @@ final class Updater {
         guard unzip.terminationStatus == 0, FileManager.default.fileExists(atPath: app.path) else {
             throw UpdateError("the download had no Petal.app")
         }
-        // The checksum came with the download; the signature can't be made by whoever made the download.
+        // The checksum came with the download; the signature can't be made by whoever made the download. And it must
+        // be the very version its release said, newer than this one: never an older build of the maker's.
         guard UpdateTrust.signed(app) else { throw UpdateError("the download isn't signed by Petal's maker, so it wasn't installed") }
+        guard UpdateTrust.update(app, is: release.version, over: running) else {
+            throw UpdateError("the download isn't the Petal \(release.version) its release said, so it wasn't installed")
+        }
         _ = try FileManager.default.replaceItemAt(bundle, withItemAt: app)
     }
 

@@ -25,8 +25,9 @@ struct UpdateTrustCheck {
         return process.terminationStatus
     }
 
-    /// A bundle with a program and one resource, signed ad hoc under `identifier` (nil: left unsigned).
-    static func bundle(_ name: String, in folder: URL, identifier: String?) -> URL {
+    /// A bundle with a program and one resource, signed ad hoc under `identifier` (nil: left unsigned), saying it's
+    /// `version` when given.
+    static func bundle(_ name: String, in folder: URL, identifier: String?, version: String? = nil) -> URL {
         let app = folder.appending(path: "\(name).app")
         let contents = app.appending(path: "Contents")
         try? FileManager.default.createDirectory(at: contents.appending(path: "MacOS"), withIntermediateDirectories: true)
@@ -37,6 +38,7 @@ struct UpdateTrustCheck {
         <key>CFBundleIdentifier</key><string>\(identifier ?? "check.unsigned")</string>
         <key>CFBundleExecutable</key><string>\(name)</string>
         <key>CFBundlePackageType</key><string>APPL</string>
+        \(version.map { "<key>CFBundleShortVersionString</key><string>\($0)</string>" } ?? "")
         </dict></plist>
         """
         try? Data(plist.utf8).write(to: contents.appending(path: "Info.plist"))
@@ -83,6 +85,40 @@ struct UpdateTrustCheck {
         expect(!UpdateTrust.signed(pretender), "a bundle with Petal's identifier but not its certificate is refused")
         expect(UpdateTrust.maker.contains(#"identifier "tech.edgetr.petal""#) && UpdateTrust.maker.contains("certificate root = H\""),
                "the maker's requirement names Petal's identifier and a certificate")
+
+        // A release's version: plain numbers only, before it's used for anything.
+        for good in ["2.1.4", "2", "10.0", "2.1.4.1", "999999.0.1"] { expect(UpdateTrust.plainVersion(good), "\(good) is a plain version") }
+        for bad in ["", "2.1.4\n", " 2.1.4", "9.0/../../../Applications/Petal.app", "2..1", ".2.1", "2.1.", "v2.1.4", "2.1.4-beta",
+                    "１.２.３", "٢.١", "1234567.0", "1.2.3.4.5", "2.1.4/", "2.1.4%2F..", "~"] {
+            expect(!UpdateTrust.plainVersion(bad), "\(bad.debugDescription) is refused as a version")
+        }
+        expect(UpdateTrust.newer("2.1.10", than: "2.1.9") && UpdateTrust.newer("2.2", than: "2.1.9") && UpdateTrust.newer("3", than: "2.9.9"),
+               "newer reads versions as numbers")
+        expect(!UpdateTrust.newer("2.1.3", than: "2.1.3") && !UpdateTrust.newer("2.1.2", than: "2.1.3") && !UpdateTrust.newer("2.1", than: "2.1.0"),
+               "the same or an older version isn't newer")
+
+        // The very version its release said, and for an update, newer than the one running: never an older build of the
+        // maker's handed over under a newer number.
+        let release = bundle("Release", in: folder, identifier: "check.petal.ours", version: "2.1.4")
+        expect(UpdateTrust.version(of: release) == "2.1.4", "a bundle's version is read from its Info.plist")
+        expect(UpdateTrust.release(release, is: "2.1.4", as: asked), "the release its manifest said is accepted")
+        expect(!UpdateTrust.release(release, is: "2.1.5", as: asked), "a bundle that isn't the version its manifest said is refused")
+        expect(!UpdateTrust.release(release, is: "2.1.4/../2.1.4", as: asked), "a version that isn't plain is refused, whatever the bundle says")
+        expect(!UpdateTrust.release(theirs, is: "2.1.4", as: asked), "the right version signed as something else is refused")
+        expect(UpdateTrust.update(release, is: "2.1.4", over: "2.1.3", as: asked), "a newer release is an update")
+        expect(!UpdateTrust.update(release, is: "2.1.4", over: "2.1.4", as: asked), "the version running isn't an update")
+        expect(!UpdateTrust.update(release, is: "2.1.4", over: "2.2.0", as: asked), "an older release is never installed as an update")
+        let old = bundle("Old", in: folder, identifier: "check.petal.ours", version: "2.1.2")
+        expect(!UpdateTrust.update(old, is: "9.9.9", over: "2.1.3", as: asked), "an older build under a newer number is refused")
+        let relabelled = bundle("Relabelled", in: folder, identifier: "check.petal.ours", version: "2.1.2")
+        let info = relabelled.appending(path: "Contents/Info.plist")
+        if let text = try? String(contentsOf: info, encoding: .utf8) {
+            try? Data(text.replacingOccurrences(of: "2.1.2", with: "9.9.9").utf8).write(to: info)
+        }
+        expect(UpdateTrust.version(of: relabelled) == "9.9.9" && !UpdateTrust.update(relabelled, is: "9.9.9", over: "2.1.3", as: asked),
+               "a version changed in a bundle after it was signed is refused")
+        let unversioned = bundle("Unversioned", in: folder, identifier: "check.petal.ours")
+        expect(!UpdateTrust.release(unversioned, is: "2.1.4", as: asked), "a bundle that says no version is refused")
 
         if failures > 0 { print("\(failures) update trust check(s) failed"); exit(1) }
         print("update trust: all checks passed")

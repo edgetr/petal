@@ -203,6 +203,7 @@ enum Personal {
         }
         let app = work.appending(path: "unpacked/Petal.app")
         guard UpdateTrust.signed(app) else { throw Failure("Petal \(version)'s download isn't signed by Petal's maker, so it wasn't installed.") }
+        guard UpdateTrust.release(app, is: version) else { throw Failure("The download isn't Petal \(version), so it wasn't installed.") }
         _ = try FileManager.default.replaceItemAt(Bundle.main.bundleURL, withItemAt: app)
     }
 
