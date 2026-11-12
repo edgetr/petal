@@ -694,7 +694,9 @@ enum UIMap {
     // MARK: The clipboard
 
     /// What a menu item, key or button does with the clipboard: copy (or cut) puts something on it, paste takes it off.
-    enum Clip { case copy, paste }
+    /// `send` hands what's selected to another app without the clipboard (a Service, Share, Look Up): checked as a
+    /// copy is.
+    enum Clip { case copy, paste, send }
 
     /// ⌘V with any other modifiers (⌥⇧⌘V pastes and matches style) pastes; ⌘C and ⌘X copy.
     static func clip(key: Key) -> Clip? {
@@ -775,6 +777,40 @@ enum UIMap {
     /// A menu item: its shortcut first, then the app's own name for it, then its words.
     static func clip(menuItem title: String?, identifier: String = "", character: String? = nil, modifiers: Int = 0) -> Clip? {
         clip(shortcut: character, modifiers: modifiers) ?? clip(identifier: identifier) ?? clip(title: title)
+    }
+
+    // MARK: Handing the selection on
+
+    /// Menus whose items hand what's selected to another app, or say it out loud: Services, Share and Speech (folded;
+    /// Turkish's Servisler, Paylaş and Konuşma too).
+    static let sendMenus: Set<String> = ["services", "share", "speech", "servisler", "paylas", "konusma"]
+    /// Items that do, by the words they start with or hold: Look Up “…”, Search With Google, Translate “…”, Use
+    /// Selection for Find (it goes on the find clipboard, which every app reads), Start Speaking, Share…, and
+    /// Turkish's "…" Sözcüğünü Ara, Google ile Ara, Çevir, Seçimi Bulmak için Kullan, Konuşmaya Başla, Paylaş.
+    static let sendPhrases = ["look up", "search with", "search in", "search the web", "translate", "use selection for find",
+                              "start speaking", "share", "sozcugunu ara", "ile ara", "cevir", "secimi bulmak icin kullan",
+                              "konusmaya basla", "paylas"]
+
+    /// A menu item that hands what's selected to another app: anything under Services, Share or Speech, anything in
+    /// a submenu of the app's own menu (`appMenu`: where Services is, in every language), an item whose words say so,
+    /// and ⌘E (Use Selection for Find, in every language).
+    static func sends(menu title: String?, appMenu: Bool = false, character: String? = nil, modifiers: Int = 0) -> Bool {
+        if modifiers == 0, character?.lowercased() == "e" { return true }
+        let path = title.map(menuPath) ?? []
+        if appMenu, path.count > 2 { return true }
+        let folded = path.map { words(fold($0)).joined(separator: " ") }
+        if folded.dropLast().contains(where: sendMenus.contains) { return true }
+        guard let last = folded.last else { return false }
+        let padded = " " + last + " "
+        return sendPhrases.contains { padded.contains(" " + $0 + " ") }
+    }
+
+    /// A key that may hand what's selected to another app: ⌘ with a character that none of the app's own menus has
+    /// (`claimed`) is one macOS offers to Services (⇧⌘L searches the web with the selection, ⇧⌘Y makes a sticky
+    /// note of it, ⌃⌘D looks it up), whatever keys the person gave theirs. A key the menus have is judged as that
+    /// item (`sends(menu:)`); one that types nothing (an arrow, Delete, Return) is no Service's.
+    static func sends(key: Key, claimed: Bool) -> Bool {
+        key.command && key.character != nil && !claimed
     }
 
     /// A button or other control: the app's own name for it, then its title, description and help.
@@ -1141,6 +1177,23 @@ enum UIMap {
         var parts = [text]
         for separator in [">", "›", "→"] { parts = parts.flatMap { $0.components(separatedBy: separator) } }
         return parts.map(tidy).filter { !$0.isEmpty }
+    }
+
+    /// A menu path as petal_act tells it ("File › Export…"). A menu's titles are its app's own text (the Window menu
+    /// lists every window by its title), so each goes through `shown`, the vault's redaction, before it's told.
+    static func menuShown(_ walked: [String], shown: (String) -> String) -> String {
+        walked.filter { !$0.isEmpty }.map(shown).joined(separator: " › ")
+    }
+
+    /// Why there's no menu called `asked` (the AI's own word for it), with the menus there are, each through `shown`.
+    static func noMenu(_ asked: String, menus: [String], shown: (String) -> String) -> String {
+        "There's no “\(asked)” menu. The menus are: \(menus.filter { !$0.isEmpty }.map(shown).joined(separator: ", "))."
+    }
+
+    /// Why the menu at `walked` has no item called `asked`, with up to 30 of the items it has, each through `shown`.
+    static func noMenuItem(_ asked: String, in walked: [String], items: [String], shown: (String) -> String) -> String {
+        let names = items.filter { !$0.isEmpty }.prefix(30).map(shown)
+        return "There's no “\(asked)” in \(menuShown(walked, shown: shown)). It has: \(names.joined(separator: ", "))."
     }
 
     /// A menu item's title matches what was asked: case aside, "..." the same as "…", and a trailing "…" optional.

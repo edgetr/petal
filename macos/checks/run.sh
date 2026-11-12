@@ -52,6 +52,27 @@ swiftc -parse-as-library -O -o "$out/thumbnails" Sources/Petal/ThumbnailCache.sw
 "$out/thumbnails"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
+# What petal_act says of a menu is its app's own text (a Window menu lists every window by its title): the items a
+# menu has, the path walked and the item chosen are told only in UIMap's words, every title through the vault's
+# redaction (Acting.menuWords); the title Petal goes by (menuTitle) is never told.
+if grep -nE 'chose = prepared\.menuTitle|\\\((prepared|known)\.menuTitle|It has: |The menus are: ' Sources/Petal/ComputerUse.swift Sources/Petal/BackgroundActing.swift; then
+    echo "petal_act: a menu's titles are told only through Acting.menuWords"; exit 1
+fi
+grep -q 'menuWords { UIMap.noMenu(path\[0\], menus: names, shown: \$0) }' Sources/Petal/ComputerUse.swift \
+    && grep -q 'menuWords { UIMap.noMenuItem(name, in: walked, items: names, shown: \$0) }' Sources/Petal/ComputerUse.swift \
+    && [ "$(grep -c 'menuWords { UIMap.menuShown(' Sources/Petal/ComputerUse.swift)" = 2 ] \
+    && grep -q 'VaultIndex.settled { index in words { index.redacted(\$0) } } ?? words { _ in UIMap.hidden }' Sources/Petal/ComputerUse.swift \
+    || { echo "petal_act: a menu's titles go through the vault's redaction before they're told"; exit 1; }
+# A menu item or key that hands what's selected to another app without the clipboard (UIMap.sends: a Service, Share,
+# Look Up) gets a copy's check right before it, in front; in the background it counts as opening something. And the
+# text Services (Ask Petal AI, Add to Petal AI) take no text holding a vault secret, as a paste doesn't.
+grep -q 'case .send?: return copyRefusal(map, element, sending: true)' Sources/Petal/ComputerUse.swift \
+    && grep -q 'return UIMap.sends(menu: title ?? own, appMenu: appMenu, character: character, modifiers: modifiers) ? .send : nil' Sources/Petal/ComputerUse.swift \
+    && grep -q 'key.map { UIMap.sends(key: \$0, claimed: false) } ?? UIMap.sends(menu: title, appMenu: appMenu)' Sources/Petal/ComputerUse.swift \
+    && grep -q '&& (sends || options.key.map' Sources/Petal/BackgroundActing.swift \
+    && grep -q 'guard Assist.vaultCheck(text) == .clean else { return }' Sources/Petal/TextServices.swift \
+    || { echo "petal_act: what hands the selection to another app is checked as a copy; the text Services refuse a vault secret"; exit 1; }
+echo "menus: titles told redacted; handing the selection on checked as a copy"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
 "$out/notes"
 # Petal Notes: the note file's round trip, iCloud's conflict copies, the ranked fallback of a note's places, the tabs

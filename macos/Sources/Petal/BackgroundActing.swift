@@ -67,10 +67,15 @@ extension Acting {
         let windowMain = windowSeen == .yes
         let nodes = [fresh, entry?.node].compactMap { $0 }
         let clipboard: Bool
+        // A menu item or key that hands what's selected to another app (a Service, Share, Look Up) opens something there.
+        var sends = false
         switch action {
         // A Copy or Cut button (or one whose words say it copies) changes the person's clipboard.
         case "press": clipboard = Background.pressUsesClipboard(nodes)
-        case "menu", "key": clipboard = clip(key: options.key, item: prepared.menuItem, title: prepared.menuTitle) != nil
+        case "menu", "key":
+            let clipping = clip(key: options.key, item: prepared.menuItem, title: prepared.menuTitle, appMenu: prepared.menuApp)
+            clipboard = clipping == .copy || clipping == .paste
+            sends = clipping == .send
         default: clipboard = false
         }
         let text = nodes.contains(where: UIMap.isText)
@@ -78,7 +83,7 @@ extension Acting {
         // A menu item or key that opens something (File › Open, Open With, Show in Finder, ⌘O, ⌘↓ in Finder) could
         // bring another app or window forward: it needs the window in front.
         let opens = ["menu", "key"].contains(action)
-            && (options.key.map { Background.keyOpens($0, finder: map.bundle == "com.apple.finder") } == true
+            && (sends || options.key.map { Background.keyOpens($0, finder: map.bundle == "com.apple.finder") } == true
                 || menuOpens(prepared.menuItem, title: prepared.menuTitle))
         let step = Background.plan(Background.Target(action: action, text: text, web: web, clipboard: clipboard,
                                                       menuItem: prepared.menuItem != nil, opens: opens, element: element != nil,
@@ -287,9 +292,9 @@ extension Acting {
                 guard windowOurs(.menu), stillBehind(.menu) else { return }
                 guard let chosen = gate.mutate({ AXUIElementPerformAction(item, kAXPressAction as CFString) }) else { return }
                 if chosen != .success {
-                    outcome.error = "Couldn't choose \(prepared.menuTitle ?? "that item"); its app didn't answer."
+                    outcome.error = "Couldn't choose \(prepared.menuShown ?? "that item"); its app didn't answer."
                 }
-                outcome.chose = prepared.menuTitle
+                outcome.chose = prepared.menuShown
             case .key:
                 guard let key = options.key else { break }
                 if let element {

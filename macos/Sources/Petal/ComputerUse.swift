@@ -1624,7 +1624,12 @@ enum Acting {
         var error: String?
         var spot = CGPoint.zero          // where the cursor goes (Accessibility's top-left coordinates)
         var menuItem: AXUIElement?       // a menu's item, or a key's menu equivalent
+        /// The item's path as its app's menus have it: what Petal goes by (what it copies, opens or deletes), never told.
         var menuTitle: String?
+        /// The same with the vault's secrets taken out: what the AI is told (a Window menu's items are window titles).
+        var menuShown: String?
+        /// The item is in the app's own menu (the first one), where Services is.
+        var menuApp = false
     }
 
     struct Outcome {
@@ -1701,8 +1706,10 @@ enum Acting {
                 if there && enabled {
                     prepared.menuItem = item
                     prepared.menuTitle = known.menuTitle
+                    prepared.menuShown = known.menuShown
+                    prepared.menuApp = known.menuApp
                 } else if action == "menu" {
-                    prepared.error = "\(known.menuTitle ?? "That menu item") isn't there or is greyed out now. " + changed
+                    prepared.error = "\(known.menuShown ?? "That menu item") isn't there or is greyed out now. " + changed
                     return prepared
                 }
             }
@@ -1714,6 +1721,8 @@ enum Acting {
             if let error = found.error { prepared.error = error; return prepared }
             prepared.menuItem = found.item
             prepared.menuTitle = found.title
+            prepared.menuShown = found.shown
+            prepared.menuApp = found.appMenu
             if let bar = found.bar, bar.width > 0 { prepared.spot = CGPoint(x: bar.midX, y: bar.midY) }
         case "key", "type":
             // Never into a password field: the one asked for, or (with none asked for) what has the cursor now.
@@ -1728,6 +1737,7 @@ enum Acting {
             if known == nil, action == "key", let key = options.key, key.command, let found = menuEquivalent(app, key) {
                 prepared.menuItem = found.item
                 prepared.menuTitle = found.title
+                prepared.menuShown = found.shown
             }
         case "press":
             // A Paste button: never a secret off the clipboard, nor into a password field (early here; again right
@@ -1752,7 +1762,7 @@ enum Acting {
         // A secret on the clipboard is never pasted, nor anything into a password field (early here; again right
         // before the paste). What a copy takes is checked only in perform, once the window is in front: the keyboard
         // may be in another window until then.
-        if clip(key: key, item: prepared.menuItem, title: prepared.menuTitle) == .paste,
+        if clip(key: key, item: prepared.menuItem, title: prepared.menuTitle, appMenu: prepared.menuApp) == .paste,
            let why = pasteRefusal() ?? secretFieldRefusal(map, nil, pasting: true) {
             prepared.error = why
         }
@@ -1762,27 +1772,39 @@ enum Acting {
     // MARK: The clipboard and the vault
 
     /// Never a vault secret onto the clipboard, where petal_look could read it, nor off it into a window, nor anything
-    /// pasted into a password field: the vault fills its own (VaultFill.swift). The one check for every
+    /// pasted into a password field: the vault fills its own (VaultFill.swift). Nor handed to another app without the
+    /// clipboard (a Service, Share, Look Up: `send`), which gets a copy's check. The one check for every
     /// way Petal copies or pastes (a key, a menu item, a button), right before it, in the window it acts on (`perform`).
     static func clipboardRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?, clip: UIMap.Clip?) -> String? {
         switch clip {
         case .copy?: return copyRefusal(map, element)
+        case .send?: return copyRefusal(map, element, sending: true)
         case .paste?: return pasteRefusal() ?? secretFieldRefusal(map, element, pasting: true)
         case nil: return nil
         }
     }
 
     /// What a key, or the menu item it or a menu path chose, does with the clipboard: the key itself first, then the
-    /// item's shortcut (the same in every language), its selector, and last its words.
-    static func clip(key: UIMap.Key?, item: AXUIElement?, title: String?) -> UIMap.Clip? {
+    /// item's shortcut (the same in every language), its selector, and last its words. Then whether it hands what's
+    /// selected to another app instead (`send`): a Services, Share or Speech item (`appMenu`: the item is in the
+    /// app's own menu), Look Up, Use Selection for Find, or a ⌘ key none of the app's menus has, which macOS offers
+    /// to Services.
+    static func clip(key: UIMap.Key?, item: AXUIElement?, title: String?, appMenu: Bool = false) -> UIMap.Clip? {
         if let key, let clip = UIMap.clip(key: key) { return clip }
-        guard let item else { return title.flatMap { UIMap.clip(title: $0) } }
+        guard let item else {
+            if let clip = title.flatMap({ UIMap.clip(title: $0) }) { return clip }
+            let sends = key.map { UIMap.sends(key: $0, claimed: false) } ?? UIMap.sends(menu: title, appMenu: appMenu)
+            return sends ? .send : nil
+        }
         let found = Reader.values(item, [kAXMenuItemCmdCharAttribute, kAXMenuItemCmdModifiersAttribute, kAXIdentifierAttribute, kAXTitleAttribute])
         let own = found[kAXTitleAttribute] as? String ?? ""
-        return UIMap.clip(menuItem: own.isEmpty ? title : own, identifier: found[kAXIdentifierAttribute] as? String ?? "",
-                          character: found[kAXMenuItemCmdCharAttribute] as? String,
-                          modifiers: (found[kAXMenuItemCmdModifiersAttribute] as? NSNumber)?.intValue ?? 0)
-            ?? title.flatMap { UIMap.clip(title: $0) }
+        let character = found[kAXMenuItemCmdCharAttribute] as? String
+        let modifiers = (found[kAXMenuItemCmdModifiersAttribute] as? NSNumber)?.intValue ?? 0
+        if let clip = UIMap.clip(menuItem: own.isEmpty ? title : own, identifier: found[kAXIdentifierAttribute] as? String ?? "",
+                                 character: character, modifiers: modifiers) ?? title.flatMap({ UIMap.clip(title: $0) }) {
+            return clip
+        }
+        return UIMap.sends(menu: title ?? own, appMenu: appMenu, character: character, modifiers: modifiers) ? .send : nil
     }
 
     /// What has the app's keyboard now (and `element`, which a key focuses first) is a password field, or, for a
@@ -1806,28 +1828,33 @@ enum Acting {
     }
 
     /// The window petal_ui looked at is in front, and what has its keyboard (and `element`, which a key focuses
-    /// first) holds no vault secret in what's selected or in its value; else why nothing is copied.
-    static func copyRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?) -> String? {
-        guard windowInFront(map) else { return "That window isn't in front anymore; nothing was copied." }
+    /// first) holds no vault secret in what's selected or in its value; else why nothing is copied. `sending`: the
+    /// same for what would hand the selection to another app without the clipboard (a Service, Share, Look Up, a ⌘
+    /// key none of the app's menus has), in those words.
+    static func copyRefusal(_ map: ComputerUse.Map, _ element: AXUIElement?, sending: Bool = false) -> String? {
+        let done = sending ? "nothing was done" : "nothing was copied"
+        let wont = sending ? "Petal doesn't hand it to another app (a Service, Share, Look Up, or a key none of this app's menus has)"
+            : "Petal doesn't copy it"
+        guard windowInFront(map) else { return "That window isn't in front anymore; \(done)." }
         let app = AXUIElementCreateApplication(map.pid)
         AXUIElementSetMessagingTimeout(app, 0.5)
         let focused: AXUIElement? = Windows.value(app, kAXFocusedUIElementAttribute)
         if let focused, let home: AXUIElement = Windows.value(focused, kAXWindowAttribute), !isWindow(home, of: map) {
-            return "The keyboard is in another window of \(map.appName); nothing was copied."
+            return "The keyboard is in another window of \(map.appName); \(done)."
         }
         for control in [element, focused].compactMap({ $0 }) {
             // A field Petal filled with a secret, whatever it shows now (part of a card number left after an edit).
             if Sensitive.isFilled(control, pid: map.pid) {
-                return "That field holds a secret Petal filled in: Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
+                return "That field holds a secret Petal filled in: \(wont). petal_vault fills a saved one where it's needed (action: fill)."
             }
             let found = Reader.values(control, [kAXSelectedTextAttribute, kAXValueAttribute])
             for name in [kAXSelectedTextAttribute, kAXValueAttribute] {
                 guard let text = found[name] as? String else { continue }
                 switch Assist.vaultCheck(text) {
                 case .secret:
-                    return "What's selected holds one of the vault's secrets: Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
-                case .tooLong: return tooMuch("copy")
-                case .unreadable: return vaultUnreadable("copy")
+                    return "What's selected holds one of the vault's secrets: \(wont). petal_vault fills a saved one where it's needed (action: fill)."
+                case .tooLong: return tooMuch(sending ? "do" : "copy")
+                case .unreadable: return vaultUnreadable(sending ? "send" : "copy")
                 case .clean: break
                 }
             }
@@ -1835,7 +1862,7 @@ enum Acting {
         // Nor one piece of a secret the window shows in pieces (a card number as four fields of four digits): copied
         // a field at a time, it would be whole again.
         if Reader.inJoinedSecret(pid: map.pid, window: map.windowID, controls: [element, focused].compactMap { $0 }) {
-            return "What has the keyboard is part of a secret this window shows in pieces (a card number, a key): Petal doesn't copy it. petal_vault fills a saved one where it's needed (action: fill)."
+            return "What has the keyboard is part of a secret this window shows in pieces (a card number, a key): \(wont). petal_vault fills a saved one where it's needed (action: fill)."
         }
         return nil
     }
@@ -2171,15 +2198,15 @@ enum Acting {
                 }
                 // Right before it: what a copy takes, in this window now, what a paste puts in, and where. The item is known
                 // by its shortcut first, so a menu in any language counts.
-                if let why = clipboardRefusal(map, nil, clip: clip(key: nil, item: item, title: prepared.menuTitle)) {
+                if let why = clipboardRefusal(map, nil, clip: clip(key: nil, item: item, title: prepared.menuTitle, appMenu: prepared.menuApp)) {
                     outcome.error = why
                     break
                 }
                 guard let chosen = gate.mutate({ AXUIElementPerformAction(item, kAXPressAction as CFString) }) else { return }
                 if chosen != .success {
-                    outcome.error = "Couldn't choose \(prepared.menuTitle ?? "that item"); its app didn't answer."
+                    outcome.error = "Couldn't choose \(prepared.menuShown ?? "that item"); its app didn't answer."
                 }
-                outcome.chose = prepared.menuTitle
+                outcome.chose = prepared.menuShown
             case "key":
                 guard let key = options.key else { break }
                 if behind() { outcome.needs = .keys; return }
@@ -2198,7 +2225,7 @@ enum Acting {
                 }
                 // A shortcut its menus have is chosen there (any app, in front or not); otherwise the key itself. Either
                 // way, right before it: what a copy takes, in this window now, what a paste puts in, and where.
-                let clipping = clip(key: key, item: prepared.menuItem, title: prepared.menuTitle)
+                let clipping = clip(key: key, item: prepared.menuItem, title: prepared.menuTitle, appMenu: prepared.menuApp)
                 if let item = prepared.menuItem {
                     if let why = clipboardRefusal(map, element, clip: clipping) {
                         outcome.error = why
@@ -2206,7 +2233,7 @@ enum Acting {
                     }
                     guard let chosen = gate.mutate({ AXUIElementPerformAction(item, kAXPressAction as CFString) }) else { return }
                     if chosen == .success {
-                        outcome.chose = prepared.menuTitle
+                        outcome.chose = prepared.menuShown
                         break
                     }
                 }
@@ -2460,49 +2487,65 @@ enum Acting {
     static func children(_ element: AXUIElement) -> [AXUIElement] { Windows.value(element, kAXChildrenAttribute) ?? [] }
     static func title(_ element: AXUIElement) -> String { Windows.value(element, kAXTitleAttribute) ?? "" }
 
-    /// The item at `path` in the app's menu bar, the frame of its menu's title, and its whole title.
-    static func menuItem(_ app: AXUIElement, path: [String]) -> (item: AXUIElement?, bar: CGRect?, title: String?, error: String?) {
-        guard let bar: AXUIElement = Windows.value(app, kAXMenuBarAttribute) else { return (nil, nil, nil, "This app has no menus Petal can reach.") }
+    /// What petal_act says of a menu, made by `words` with the vault's redaction for every title in it: a menu's
+    /// titles are its app's own text (the Window menu lists every window by its title), so none is told as it is,
+    /// and while the vault can't be read each is "(hidden)". Off the main thread (the Keychain may take a while).
+    static func menuWords(_ words: ((String) -> String) -> String) -> String {
+        VaultIndex.settled { index in words { index.redacted($0) } } ?? words { _ in UIMap.hidden }
+    }
+
+    /// The item at `path` in the app's menu bar, the frame of its menu's title, its whole title as the menus have
+    /// it (`title`, never told) and as the AI is told it (`shown`), and whether it's in the app's own menu.
+    static func menuItem(_ app: AXUIElement, path: [String])
+        -> (item: AXUIElement?, bar: CGRect?, title: String?, shown: String?, appMenu: Bool, error: String?) {
+        guard let bar: AXUIElement = Windows.value(app, kAXMenuBarAttribute) else {
+            return (nil, nil, nil, nil, false, "This app has no menus Petal can reach.")
+        }
         let tops = children(bar)
         guard let top = tops.first(where: { UIMap.sameTitle(title($0), path[0]) }) else {
-            let names = tops.dropFirst().map(title).filter { !$0.isEmpty }
-            return (nil, nil, nil, "There's no “\(path[0])” menu. The menus are: \(names.joined(separator: ", ")).")
+            let names = tops.dropFirst().map(title)
+            return (nil, nil, nil, nil, false, menuWords { UIMap.noMenu(path[0], menus: names, shown: $0) })
         }
         var current = top
         var walked = [title(top)]
         for name in path.dropFirst() {
             let items = children(current).first { (Windows.value($0, kAXRoleAttribute) as String?) == "AXMenu" }.map(children) ?? []
             guard let match = items.first(where: { UIMap.sameTitle(title($0), name) }) else {
-                let names = items.map(title).filter { !$0.isEmpty }.prefix(30)
-                return (nil, nil, nil, "There's no “\(name)” in \(walked.joined(separator: " › ")). It has: \(names.joined(separator: ", ")).")
+                let names = items.map(title)
+                return (nil, nil, nil, nil, false, menuWords { UIMap.noMenuItem(name, in: walked, items: names, shown: $0) })
             }
             current = match
             walked.append(title(match))
         }
+        let shown = menuWords { UIMap.menuShown(walked, shown: $0) }
         if (Windows.value(current, kAXEnabledAttribute) as Bool?) == false {
-            return (nil, nil, nil, "\(walked.joined(separator: " › ")) is greyed out right now.")
+            return (nil, nil, nil, nil, false, "\(shown) is greyed out right now.")
         }
-        return (current, Windows.frame(of: top), walked.joined(separator: " › "), nil)
+        let appMenu = tops.first.map { CFEqual($0, top) } ?? false
+        return (current, Windows.frame(of: top), walked.joined(separator: " › "), shown, appMenu, nil)
     }
 
-    /// The enabled menu item whose shortcut is this key, if the app's menus have one.
-    static func menuEquivalent(_ app: AXUIElement, _ key: UIMap.Key) -> (item: AXUIElement, title: String)? {
+    /// The enabled menu item whose shortcut is this key, if the app's menus have one: its title as the menus have it
+    /// (never told) and as the AI is told it (`shown`).
+    static func menuEquivalent(_ app: AXUIElement, _ key: UIMap.Key) -> (item: AXUIElement, title: String, shown: String)? {
         guard let character = key.character, let bar: AXUIElement = Windows.value(app, kAXMenuBarAttribute) else { return nil }
-        func find(_ element: AXUIElement, depth: Int, path: [String]) -> (AXUIElement, String)? {
+        func find(_ element: AXUIElement, depth: Int, path: [String]) -> (AXUIElement, [String])? {
             guard depth < 4 else { return nil }
             for child in children(element) {
                 let name = title(child)
                 if let char: String = Windows.value(child, kAXMenuItemCmdCharAttribute), char.uppercased() == character.uppercased(),
                    let modifiers: Int = Windows.value(child, kAXMenuItemCmdModifiersAttribute), modifiers == key.menuModifiers,
                    (Windows.value(child, kAXEnabledAttribute) as Bool?) != false {
-                    return (child, (path + [name]).filter { !$0.isEmpty }.joined(separator: " › "))
+                    return (child, (path + [name]).filter { !$0.isEmpty })
                 }
                 if let found = find(child, depth: depth + 1, path: name.isEmpty ? path : path + [name]) { return found }
             }
             return nil
         }
         for menu in children(bar).dropFirst() {   // the first is the app's own menu (About, Quit)
-            if let found = find(menu, depth: 0, path: []) { return (found.0, found.1) }
+            if let found = find(menu, depth: 0, path: []) {
+                return (found.0, found.1.joined(separator: " › "), menuWords { UIMap.menuShown(found.1, shown: $0) })
+            }
         }
         return nil
     }
