@@ -925,6 +925,11 @@ n=$(grep -o 'ipc\.on\(From\)\{0,1\}("[A-Za-z]*")' Sources/Petal/App.swift | sed 
 want="agentKeys ask assist bench chat chats close desktop dock mcpCall newChat options restart reveal search settings stack testBounce update version "
 if [ "$n" != "$want" ]; then echo "socket: the running Petal's functions changed: $n"; echo "        expected: $want"; exit 1; fi
 echo "socket: only the functions weighed"
+# AGENTS.md and Petal's skill keep each list item and heading on a line of its own (a merge that loses a line break
+# runs them together, and agents read these files).
+n=$(grep -nE '[^ ]\.- [`*A-Za-z]|[^#]\.##+ ' ../AGENTS.md Resources/skill/SKILL.md || true)
+if [ -n "$n" ]; then echo "docs: a list item or heading ran onto the line before it:"; echo "$n"; exit 1; fi
+echo "docs: every list item and heading on its own line"
 # Quitting answers later (notes are saved first), and AppKit waits for the answer inside `terminate`. Called from a
 # block of the main dispatch queue (a signal's handler, an asyncAfter), that wait stops the queue, the answer never
 # arrives and Petal never quits. So the one call to terminate is PetalApp.quit's, from the run loop, and the answer
