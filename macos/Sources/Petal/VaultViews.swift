@@ -696,7 +696,7 @@ struct VaultEditor: View {
     private func save() {
         var item = item
         item.title = item.title.trimmingCharacters(in: .whitespaces)
-        let typed = sites.split(whereSeparator: { $0 == "," || $0 == " " }).compactMap { VaultSite.host(String($0)) }
+        let typed = sites.split(whereSeparator: { $0 == "," || $0 == " " }).compactMap { VaultSite.site(String($0)) }
         if !sites.trimmingCharacters(in: .whitespaces).isEmpty, typed.isEmpty { problem = "Those don't look like websites (like github.com)."; return }
         item.sites = typed
         if item.title.isEmpty {

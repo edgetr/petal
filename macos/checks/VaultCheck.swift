@@ -45,6 +45,7 @@ struct VaultCheck {
         joinedPieces()
         importConflicts()
         importPlaces()
+        localPorts()
         buyRevoked()
         buyTokens()
         joinedControls()
@@ -1131,6 +1132,74 @@ struct VaultCheck {
                && Vault.conflictName(saved, adds: nil) == "GitHub" && Vault.conflictName(saved, adds: []) == "GitHub"
                && Vault.conflictName(saved, adds: ["a.example", "b.example", "c.example", "d.example"]) == "GitHub (adds a.example, b.example, c.example, …)",
                "a conflict that only adds places is named with them")
+    }
+
+    /// On this Mac each port is another program's page: a login saved on one (through Petal's card, a new login, an
+    /// import) keeps its port and fills by itself on that port only; on another port of this Mac it asks. A site
+    /// the person wrote without a port ("localhost") is every port's, as before.
+    static func localPorts() {
+        let secure = Vault.Target(secure: true, text: true)
+        func web(_ frame: String, top: String? = nil) -> Vault.Place {
+            Vault.Place(web: true, frameURL: frame, topURL: top ?? frame, bundle: "com.apple.Safari", appName: "Safari", signed: true)
+        }
+        func isAsk(_ d: Vault.Decision) -> Bool { if case .ask = d { return true }; return false }
+        // What an address is saved as.
+        expect(VaultSite.site("http://localhost:3000/login") == "localhost:3000" && VaultSite.site("http://127.0.0.1:8080/") == "127.0.0.1:8080"
+               && VaultSite.site("http://[::1]:8080/x") == "[::1]:8080" && VaultSite.site("https://app.localhost:8443/") == "app.localhost:8443",
+               "a page of this Mac is saved with its port")
+        expect(VaultSite.site("http://localhost/") == "localhost:80" && VaultSite.site("https://localhost/") == "localhost:443", "the scheme's port when none is written")
+        expect(VaultSite.site("localhost") == "localhost" && VaultSite.site("localhost:3000") == "localhost:3000" && VaultSite.site("::1") == "::1"
+               && VaultSite.site("[::1]:3000") == "[::1]:3000", "a bare host stays as written")
+        expect(VaultSite.site("https://GitHub.com:8443/x") == "github.com" && VaultSite.site("github.com") == "github.com" && VaultSite.site("not a url") == nil,
+               "any other site is its host, as before")
+        expect(VaultSite.port("http://localhost:3000/") == 3000 && VaultSite.port("https://example.com/") == 443 && VaultSite.port("localhost") == nil
+               && VaultSite.port("localhost:5173") == 5173, "ports")
+        expect(VaultSite.host("localhost:3000") == "localhost" && VaultSite.host("[::1]:3000") == "::1", "what's saved still reads as its host")
+        // Matching: the saved port only; a page whose port isn't known is not it.
+        let m = VaultSite.matches
+        expect(m("http://localhost:3000/login", "localhost:3000") && m("localhost:3000", "localhost:3000") && m("http://[::1]:8080/", "[::1]:8080"),
+               "the same port of this Mac")
+        expect(!m("http://localhost:9999/login", "localhost:3000") && !m("https://localhost:8443/", "localhost:3000")
+               && !m("http://127.0.0.1:9999/", "127.0.0.1:8080") && !m("localhost", "localhost:3000") && !m("http://127.0.0.1:3000/", "localhost:3000"),
+               "another port, a page whose port isn't known, or another name for this Mac")
+        expect(m("http://localhost:9999/", "localhost") && m("localhost:9999", "localhost"), "saved without a port: every port, as before")
+        expect(m("https://accounts.github.com:8443/", "github.com"), "a port elsewhere changes nothing")
+        // A login made on a page of this Mac is that port's.
+        var made = VaultItem(kind: .login, title: "Dev")
+        made[.username] = "admin"; made[.password] = "dev-pass-1"
+        Vault.bind(&made, to: web("http://localhost:3000/login"))
+        expect(made.sites == ["localhost:3000"], "a login typed into Petal's card on localhost:3000 is saved for that port (\(made.sites))")
+        expect(Vault.decide(made, .password, target: secure, place: web("http://localhost:3000/admin")) == .fill, "it fills by itself on its own port")
+        let elsewhere = Vault.decide(made, .password, target: secure, place: web("http://localhost:9999/login"))
+        if case .ask(_, let detail) = elsewhere {
+            expect(detail.contains("localhost:3000") && detail.contains("localhost:9999") && detail.contains("another port of this Mac"), "the card says which port: \(detail)")
+        } else { expect(false, "on another port of this Mac it asks") }
+        expect(isAsk(Vault.decide(made, .password, target: secure, place: web("https://localhost:8443/login"))), "and on another port over https")
+        expect(isAsk(Vault.decide(made, .password, target: secure, place: web("http://127.0.0.1:3000/login"))), "and under another name for this Mac")
+        expect(Vault.logins([made], host: web("http://localhost:3000/").site, bundle: nil).count == 1
+               && Vault.logins([made], host: web("http://localhost:9999/").site, bundle: nil).isEmpty, "Petal picks it by itself only for its own port")
+        var loop = VaultItem(kind: .login, title: "Dev")
+        loop[.password] = "dev-pass-1"
+        Vault.bind(&loop, to: web("http://[::1]:8080/"))
+        expect(loop.sites == ["[::1]:8080"] && Vault.decide(loop, .password, target: secure, place: web("http://[::1]:8080/x")) == .fill
+               && isAsk(Vault.decide(loop, .password, target: secure, place: web("http://[::1]:8081/x"))), "the same for [::1]")
+        // What a request card would save is where it fills: no warning on its own page.
+        expect(Vault.request(.login, [.password], targets: [secure], places: [web("http://localhost:3000/login")], saved: 0).warning == nil,
+               "a login asked for on a local page fills there")
+        // Anywhere else nothing changes.
+        var site = VaultItem(kind: .login, title: "GitHub")
+        site[.password] = "pw-123456"
+        Vault.bind(&site, to: web("https://github.com:8443/login"))
+        expect(site.sites == ["github.com"] && Vault.decide(site, .password, target: secure, place: web("https://accounts.github.com/")) == .fill, "another site is saved by its host")
+        // Imports keep the port, and two ports are two logins.
+        let csv = "Title,URL,Username,Password\nDev,http://localhost:3000/login,admin,dev-pass-1\nDev,http://localhost:4000/,admin,dev-pass-2\n"
+        let rows = Vault.importCSV(csv)?.items ?? []
+        expect(rows.map(\.sites) == [["localhost:3000"], ["localhost:4000"]], "an import's local addresses keep their ports (\(rows.map(\.sites)))")
+        let both = Vault.merge(existing: [], incoming: rows)
+        expect(both.added == 2 && both.conflicts.isEmpty, "the same username on two ports is two logins")
+        expect(Vault.protonSites([["url": "http://localhost:5173/", "mode": "Exact"]] as [Any]).hosts == ["localhost:5173"], "Proton Pass's too")
+        let again = Vault.merge(existing: [made], incoming: [rows[0]])
+        expect(again.same == 1 && again.added == 0, "the same login on the same port is already here")
     }
 
     /// Buy on tab A, tab B seen in that window (a petal_ui read, an act, a title change), back on A: the Buy is over.

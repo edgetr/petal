@@ -453,7 +453,8 @@ extension Assist {
         VaultStore.load { read in
             guard case .success(let items) = read else { return send(["error": VaultStore.unreadableText + " Try again in a moment."]) }
             var list = items.filter { kind == nil || $0.kind == kind }
-            if let site { list = list.filter { $0.kind != .login || $0.sites.contains { VaultSite.matches(host: site, saved: $0) } } }
+            // A list by site is by its host: a login kept for one port of this Mac is listed for "localhost" too.
+            if let site { list = list.filter { $0.kind != .login || $0.sites.contains { VaultSite.matches(host: site, saved: VaultSite.host($0) ?? $0) } } }
             var note = Self.hidden + " Fill with action fill: the item's id and fields {field: id from petal_ui}."
             if list.contains(where: { $0.kind == .unsorted }) {
                 note += " An unsorted item was saved before the vault had kinds: Petal doesn't know what it is, so filling it (field value) asks the person every time."
@@ -625,7 +626,7 @@ extension Assist {
                 let place = places[wanted.firstIndex { Vault.field($0.word) == .password } ?? 0]
                 // A page Petal can't verify: the login for the address it gives, which then asks (never one saved
                 // for the browser as an app).
-                let host = place.web ? place.host : place.unverified ? place.claimedURL.flatMap(VaultSite.host) : nil
+                let host = place.web ? place.site : place.unverified ? place.claimedURL.flatMap(VaultSite.site) : nil
                 let logins = Vault.logins(items, host: host, bundle: place.web || place.unverified ? nil : place.bundle)
                 guard !logins.isEmpty else {
                     return fail("There's no login saved for \(place.where_). Ask the person with action request (kind login, fields {username: id, password: id}): they type it into Petal's card, and Petal fills it.")

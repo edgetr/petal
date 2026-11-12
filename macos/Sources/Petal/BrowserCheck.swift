@@ -776,14 +776,28 @@ private final class BrowserChecker {
             newPassword = current?.checkEvaluate("document.getElementById('np').value") ?? ""
             expect(newPassword.count >= 20 && current?.checkEvaluate("document.getElementById('nc').value") == newPassword, "both fields hold the same strong password")
             let saved = VaultStore.itemsForCheck().first { $0.title == "Check signup" }
-            expect(VaultStore.itemsForCheck().count == before + 1 && saved?[.password] == newPassword && saved?.sites == ["127.0.0.1"], "saved for the site the browser said the page is (\(saved?.sites ?? []))")
+            expect(VaultStore.itemsForCheck().count == before + 1 && saved?[.password] == newPassword && saved?.sites == ["127.0.0.1:\(server.port)"], "saved for the site the browser said the page is, with its port on this Mac (\(saved?.sites ?? []))")
             expect(!newPassword.isEmpty && !(answers.last ?? "").contains(newPassword), "and never told")
+            // Another port of this Mac is another program's page: the login made on this one asks there.
+            let elsewhere = CheckServer()
+            elsewhere.pages = server.pages
+            defer { elsewhere.stop() }
+            if elsewhere.start() {
+                _ = browser("open", ["address": "http://127.0.0.1:\(elsewhere.port)/login"])
+                read = page(browser("read"))
+                let asked = cards.count
+                let ported = call("petal_vault", ["action": "fill", "item": saved?.id ?? "", "fields": ["password": id("password field \"Password\"", in: read)]], answer: [.no])
+                expect(ported["declined"] != nil && cards.count == asked + 1 && cards.last?.warn == true, "on another port of this Mac the person is asked, and Don't fills nothing (\(ported))")
+                expect(current?.checkEvaluate("document.getElementById('pass').value") == "", "the field there stayed empty")
+            } else {
+                expect(false, "a second server on another port of this Mac")
+            }
             // On another site's page, where a login would only fill after asking: no password is made at all.
             _ = browser("open", ["address": base("localhost") + "/signup"])
             read = page(browser("read"))
             // (localhost is this Mac's own too, so a new login may be made there: saved for localhost, not 127.0.0.1.)
             let other = call("petal_vault", ["action": "new_login", "password_id": id("password field \"New password\"", in: read), "title": "Check other"])
-            expect(VaultStore.itemsForCheck().first { $0.title == "Check other" }?.sites == ["localhost"], "a login made on another site is that site's (\(other))")
+            expect(VaultStore.itemsForCheck().first { $0.title == "Check other" }?.sites == ["localhost:\(server.port)"], "a login made on another site is that site's (\(other))")
             // What the person types into Petal's card goes into the page, and is hidden from then on.
             _ = browser("open", ["address": base("localhost") + "/login"])
             read = page(browser("read"))

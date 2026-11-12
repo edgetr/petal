@@ -395,7 +395,7 @@ enum Vault {
         return titled.count == 1 ? titled[0] : nil
     }
 
-    /// The logins saved for a page's host, or for an app.
+    /// The logins saved for a page (its host; for a page of this Mac, its host and port: `Place.site`), or for an app.
     static func logins(_ items: [VaultItem], host: String?, bundle: String?) -> [VaultItem] {
         items.filter { item in
             guard item.kind == .login else { return false }
@@ -527,6 +527,9 @@ enum Vault {
         /// The host shown to the person: the page's (or frame's). Only a web address (http or https) names a site:
         /// an app's or browser's own page (t3code://, chrome://, about:, file:) never does.
         var host: String? { frameURL.flatMap(Vault.siteHost) }
+        /// What a login is saved for and matched by: the host, and for a page of this Mac its port too
+        /// ("localhost:3000"), since each port there is another program's page.
+        var site: String? { frameURL.flatMap { Vault.siteHost($0) == nil ? nil : VaultSite.site($0) } }
         /// Where a purchase is made: the tab's whole page (a card form often sits in a payment company's frame).
         var shop: String? { (topURL ?? frameURL).flatMap(Vault.siteHost) }
         var where_: String { web ? host ?? appName : appName }
@@ -687,10 +690,14 @@ enum Vault {
         if item.sites.isEmpty && item.apps.isEmpty { return "This login isn't saved for any site yet, so Petal can't tell it's the right place." }
         if place.web {
             if let problem = pageProblem(place) { return problem }
-            let host = place.host ?? ""
-            if item.sites.contains(where: { VaultSite.matches(host: host, saved: $0) }) { return nil }
+            let host = place.host ?? "", page = place.site ?? host
+            if item.sites.contains(where: { VaultSite.matches(host: page, saved: $0) }) { return nil }
             let saved = item.sites.isEmpty ? "an app" : item.sites.joined(separator: ", ")
-            return "This login is saved for \(saved). This page is \(host): if it only looks like \(item.sites.first.map(VaultSite.registrable) ?? item.title), it may be trying to take your password."
+            // The same host on another port of this Mac: another program may be serving it.
+            if page != host, item.sites.contains(where: { VaultSite.host($0) == host }) {
+                return "This login is saved for \(saved). This page is \(page): another port of this Mac, so it may be another program's page."
+            }
+            return "This login is saved for \(saved). This page is \(page): if it only looks like \(item.sites.first.map(VaultSite.registrable) ?? item.title), it may be trying to take your password."
         }
         guard item.apps.contains(place.bundle) else {
             return "This login is saved for \((item.sites + item.apps).joined(separator: ", ")), not \(place.appName)."
@@ -1027,7 +1034,8 @@ enum Vault {
     static func bind(_ item: inout VaultItem, to place: Place) {
         if place.web {
             // A page isolated from its site isn't the site's: nothing is saved for the site from it.
-            if !place.isolated, let host = place.host { item.sites = [host] }
+            // A page of this Mac with its port: the login is that program's, not every local page's.
+            if !place.isolated, let site = place.site { item.sites = [site] }
         } else if !place.unverified, place.signed, let team = place.team {
             item.apps = [place.bundle]
             item.appSigners = [place.bundle: team]
@@ -1392,7 +1400,7 @@ enum Vault {
         var hosts: [String] = []
         var unread = false
         func add(_ text: String) {
-            if let host = VaultSite.host(text) { if !hosts.contains(host) { hosts.append(host) } } else { unread = true }
+            if let host = VaultSite.site(text) { if !hosts.contains(host) { hosts.append(host) } } else { unread = true }
         }
         func read(_ value: Any?) {
             switch value {
@@ -1933,27 +1941,55 @@ enum VaultSite {
     /// Starts reading the list now, so it's there by the time a field is filled.
     static func preload() { _ = suffixes() }
 
-    /// The host of an address, or of a bare host ("github.com"), lower case, without a port, brackets or a trailing dot.
-    static func host(_ text: String) -> String? {
+    /// An address, or a bare host ("github.com", "localhost:3000", "::1"), in parts; `bare`: it had no scheme.
+    private static func parts(_ text: String) -> (parts: URLComponents, bare: Bool)? {
         var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.contains(" ") else { return nil }
-        if !trimmed.contains("://") {
+        let bare = !trimmed.contains("://")
+        if bare {
             // A bare IPv6 address ("::1") goes in brackets, as in an address.
             if trimmed.filter({ $0 == ":" }).count > 1, !trimmed.hasPrefix("[") { trimmed = "[" + trimmed + "]" }
             trimmed = "https://" + trimmed
         }
-        guard let parts = URLComponents(string: trimmed), var host = parts.host?.lowercased(), !host.isEmpty else { return nil }
+        return URLComponents(string: trimmed).map { ($0, bare) }
+    }
+
+    /// The host of an address, or of a bare host ("github.com"), lower case, without a port, brackets or a trailing dot.
+    static func host(_ text: String) -> String? {
+        guard let parts = parts(text)?.parts, var host = parts.host?.lowercased(), !host.isEmpty else { return nil }
         if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
         while host.hasSuffix(".") { host.removeLast() }
         guard host.contains(".") || host.contains(":") || host == "localhost" else { return nil }
         return host
     }
 
+    /// The port an address names: its own, else its scheme's (80 for http, 443 for https); for a bare host, the one
+    /// written after it ("localhost:3000"), or nil when there's none.
+    static func port(_ text: String) -> Int? {
+        guard let (parts, bare) = parts(text) else { return nil }
+        if let port = parts.port { return port }
+        if bare { return nil }
+        switch parts.scheme?.lowercased() {
+        case "http": return 80
+        case "https": return 443
+        default: return nil
+        }
+    }
+
+    /// What something is saved for: an address's host, and for a page of this Mac its port too ("localhost:3000",
+    /// "[::1]:8080"), since each port there is another program's. A bare host stays as it is ("localhost": the
+    /// person's own word for every port).
+    static func site(_ text: String) -> String? {
+        guard let host = host(text) else { return nil }
+        guard isLocal(host), let port = port(text) else { return host }
+        return (host.contains(":") ? "[\(host)]" : host) + ":\(port)"
+    }
+
     /// Every site in an export's URL column, which may list several ("https://a.example, https://b.example"):
-    /// their hosts, in order, each once.
+    /// their hosts (a page of this Mac with its port: `site`), in order, each once.
     static func hosts(_ list: String) -> [String] {
         var out: [String] = []
-        for host in list.split(separator: ",").compactMap({ host(String($0)) }) where !out.contains(host) { out.append(host) }
+        for host in list.split(separator: ",").compactMap({ site(String($0)) }) where !out.contains(host) { out.append(host) }
         return out
     }
 
@@ -1966,9 +2002,10 @@ enum VaultSite {
         ["localhost", "127.0.0.1", "::1"].contains(host) || host.hasSuffix(".localhost")
     }
 
-    /// A host without a leading "www.", for telling two logins apart.
+    /// A host without a leading "www.", for telling two logins apart (a page of this Mac with its port: two ports
+    /// are two programs' logins).
     static func plain(_ text: String) -> String {
-        let h = host(text) ?? text.lowercased()
+        let h = site(text) ?? text.lowercased()
         return h.hasPrefix("www.") ? String(h.dropFirst(4)) : h
     }
 
@@ -1985,13 +2022,18 @@ enum VaultSite {
         return suffixes()?.registrable(host) ?? host
     }
 
-    /// A page on `host` belongs to something saved for `saved`: the same host, or under the saved site's registrable
-    /// name ("accounts.github.com" for "github.com"). An IP address, this Mac, or a public suffix saved as a site
-    /// ("github.io") only matches itself. Until the list is read, or for a name it doesn't cover: the saved host and
-    /// what's under it only.
+    /// A page on `host` (a host, or the page's whole address) belongs to something saved for `saved`: the same host,
+    /// or under the saved site's registrable name ("accounts.github.com" for "github.com"). An IP address, this Mac,
+    /// or a public suffix saved as a site ("github.io") only matches itself. On this Mac each port is another
+    /// program's page: something saved with its port ("localhost:3000") matches that port only, so the page's
+    /// address must say which it is (a bare "localhost" isn't it); saved without one, any port. Until the list is
+    /// read, or for a name it doesn't cover: the saved host and what's under it only.
     static func matches(host: String, saved: String) -> Bool {
         guard let page = self.host(host), let site = self.host(saved) else { return false }
-        if page == site { return true }
+        if page == site {
+            if isLocal(site), let wanted = port(saved) { return port(host) == wanted }
+            return true
+        }
         if isAddress(page) || isAddress(site) || isLocal(site) || isLocal(page) { return false }
         guard let list = suffixes(), list.suffix(of: site) != nil, list.suffix(of: page) != nil else { return page.hasSuffix("." + site) }
         guard let root = list.registrable(site) else { return false }
