@@ -650,12 +650,15 @@ private final class HelpersChecker {
             let earlier = UUID().uuidString
             let old = "---\nid: \(earlier)\nwatch:\n  every: 1h\n  line: under $100\n  mac: \(mac)\n  paused: false\n  url: http://127.0.0.1:\(server.port)/item\n---\nFrom before\n"
             expect(written("From before.md", id: earlier, old), "the store read a watcher from before")
+            let servedBeforeFile = server.served
             helpers.clockTurn()
             wait(2)
             expect(disk(earlier)?.watch?.checked == nil, "with this Mac's own list kept, a file's watcher isn't looked for")
             app.paper.local.standing = nil
             helpers.clockTurn()
             expect(wait(20) { self.disk(earlier)?.watch?.amount == 250 }, "a Mac that kept none yet goes on with the watcher it had (\(String(describing: disk(earlier)?.watch)))")
+            // Exactly one fetch since the file's watcher was written: the adopted look, none before it.
+            expect(server.served == servedBeforeFile + 1, "the file's watcher fetched nothing before it was taken (\(server.served - servedBeforeFile) requests)")
             expect(app.paper.local.standing?.contains { $0.note == earlier } == true, "and keeps it from then on")
             return "a chain and a watcher written into a file started nothing and fetched nothing; the same asked by a typed line started once and looked; a Mac that kept none yet took the watcher it had"
         }

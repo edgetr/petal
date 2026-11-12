@@ -2149,15 +2149,21 @@ final class NoteHelpers {
 
     /// A Mac that kept none yet takes, once, the ones it already had going in the notes' folder (`NoteHelp.adopted`),
     /// as soon as the notes are read; before that nothing of the clock's is done for any.
-    private func adoptStanding() {
+    /// It waits for a read of the whole folder (a file iCloud hasn't downloaded yet is read later), for a while at
+    /// most; the person setting one up here (`now`) takes them at once.
+    private func adoptStanding(now: Bool = false) {
         guard let desk, desk.acceptsChanges, desk.local.standing == nil else { return }
+        if !now, !desk.store.readComplete, adoptWaits < 20 { adoptWaits += 1; return }
         desk.local.standing = NoteHelp.adopted(desk.store.notes.filter { $0.version == nil }.map { (note: $0.noteID, file: $0.file) }, mac: mac)
         desk.local.save(pending: desk.store.pendingIDs)
     }
 
+    /// Clock turns adoption has waited for the folder to be read whole (`adoptStanding`).
+    @ObservationIgnored private var adoptWaits = 0
+
     /// The person's own line set this up here: kept on this Mac, in its note's one place of that kind.
     private func keepGoing(_ entry: NoteHelp.Standing) {
-        adoptStanding()
+        adoptStanding(now: true)
         guard let desk, desk.local.standing != nil else { return }
         desk.local.standing = NoteHelp.standing(desk.local.standing, adding: entry)
         desk.local.save(pending: desk.store.pendingIDs)

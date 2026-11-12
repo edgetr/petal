@@ -1261,8 +1261,9 @@ struct NoteHelpCheck {
         let clicked = { (address: String) in NoteTasks.link(URL(string: address) as Any) }
         expect(clicked("https://example.com/a?b=c#d") == .open(URL(string: "https://example.com/a?b=c#d")!) && clicked("HTTP://example.com") == .open(URL(string: "HTTP://example.com")!)
                && clicked("mailto:someone@example.com") == .open(URL(string: "mailto:someone@example.com")!), "a link in a note: a web or mail address opens")
+        expect(clicked("message://%3Cabc%40example.com%3E") == .open(URL(string: "message://%3Cabc%40example.com%3E")!), "and a mail by its message address, as Open all opens it")
         for other in ["smb://server/share", "shortcuts://run-shortcut?name=x", "javascript:alert(1)", "x-apple.systempreferences:com.apple.preference", "vnc://host", "ssh://host",
-                      "tel:5550100", "message://%3Cabc%40example.com%3E", "x-man-page://ls", "data:text/html,hi", "ftp://example.com/x", "relative/path.md", "https:///no-host", ""] {
+                      "tel:5550100", "x-man-page://ls", "data:text/html,hi", "ftp://example.com/x", "relative/path.md", "https:///no-host", ""] {
             expect(clicked(other) == .nothing, "a link in a note: “\(other)” does nothing", "\(clicked(other))")
         }
         expect(NoteTasks.link("smb://server/share") == .nothing && NoteTasks.link(42) == .nothing && NoteTasks.link("https://example.com/x") == .open(URL(string: "https://example.com/x")!),
