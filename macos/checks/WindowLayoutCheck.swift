@@ -56,6 +56,7 @@ struct WindowLayoutCheck {
         expect(TileLayout.dragged(buttonDown: true, sinceMouseDown: 30), "the button down: a drag")
         expect(TileLayout.dragged(buttonDown: false, sinceMouseDown: 0.2), "let go a moment ago: a drag that just ended")
         expect(!TileLayout.dragged(buttonDown: false, sinceMouseDown: 40), "nobody pressed: its app moved it, nothing swaps")
+        expect(TileLayout.dragged(buttonDown: false, sinceMouseDown: 4, sinceMouseUp: 0.3), "a long drag let go a moment ago: still a drag")
 
         // Splitting a window that isn't there splits the newest.
         var other = TileTree()

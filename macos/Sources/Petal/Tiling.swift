@@ -48,6 +48,8 @@ enum Tiling {
     private static var timer: Timer?
     private static var work: DispatchWorkItem?
     private static var settling: DispatchWorkItem?
+    /// The window whose drag is being waited on (`settle`).
+    private static var draggedWindow: CGWindowID?
     private static var refs: [EventHotKeyRef] = []
 
     private static var config: Config { PetalApp.shared.config }
@@ -175,8 +177,13 @@ enum Tiling {
                   let now = Windows.frame(of: element), !now.equalTo(done.actual, within: 2), layout(of: id) != nil else { return }
             // Someone is dragging or resizing a tiled window: wait for the mouse to let go. A window its app moved
             // by itself (nobody pressed the mouse) only goes back to its place.
-            let since = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown)
-            settle(id, attempts: 0, dragged: TileLayout.dragged(buttonDown: NSEvent.pressedMouseButtons & 1 != 0, sinceMouseDown: since))
+            let down = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown)
+            let up = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
+            // A drag already being waited on for this window stays one (a late event never makes it the app's own).
+            let dragged = TileLayout.dragged(buttonDown: NSEvent.pressedMouseButtons & 1 != 0, sinceMouseDown: down, sinceMouseUp: up)
+                || draggedWindow == id
+            if dragged { draggedWindow = id }
+            settle(id, attempts: 0, dragged: dragged)
         case .missionControl, .missionControlEnded, .titleChanged, .tabSwitched:
             break
         }
@@ -196,6 +203,7 @@ enum Tiling {
         settling?.cancel()
         let item = DispatchWorkItem {
             if NSEvent.pressedMouseButtons & 1 != 0 && attempts < 300 { settle(id, attempts: attempts + 1, dragged: dragged); return }
+            if draggedWindow == id { draggedWindow = nil }
             guard active, let from = layout(of: id) else { return }
             guard dragged else { applied[id] = nil; return retile() }
             let top = Screens.all.first?.frame.maxY ?? 0
