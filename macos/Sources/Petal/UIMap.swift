@@ -799,6 +799,10 @@ enum UIMap {
                               "start speaking", "share", "sozcugunu ara", "ile ara", "cevir", "secimi bulmak icin kullan",
                               "konusmaya basla", "paylas"]
 
+    /// The menu at this place in an app's menu bar, as Accessibility lists it, is the app's own (About, Services,
+    /// Quit): the Apple menu comes first, then the app's.
+    static func ownMenu(at index: Int) -> Bool { index == 1 }
+
     /// A menu item that hands what's selected to another app: anything under Services, Share or Speech, anything in
     /// a submenu of the app's own menu (`appMenu`: where Services is, in every language), an item whose words say so,
     /// and ⌘E (Use Selection for Find, in every language).

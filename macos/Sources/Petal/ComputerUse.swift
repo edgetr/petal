@@ -1628,7 +1628,7 @@ enum Acting {
         var menuTitle: String?
         /// The same with the vault's secrets taken out: what the AI is told (a Window menu's items are window titles).
         var menuShown: String?
-        /// The item is in the app's own menu (the first one), where Services is.
+        /// The item is in the app's own menu, where Services is (UIMap.ownMenu: the second, after the Apple menu).
         var menuApp = false
     }
 
@@ -1738,6 +1738,7 @@ enum Acting {
                 prepared.menuItem = found.item
                 prepared.menuTitle = found.title
                 prepared.menuShown = found.shown
+                prepared.menuApp = found.appMenu
             }
         case "press":
             // A Paste button: never a secret off the clipboard, nor into a password field (early here; again right
@@ -2540,13 +2541,14 @@ enum Acting {
         if (Windows.value(current, kAXEnabledAttribute) as Bool?) == false {
             return (nil, nil, nil, nil, false, "\(shown) is greyed out right now.")
         }
-        let appMenu = tops.first.map { CFEqual($0, top) } ?? false
+        let appMenu = tops.firstIndex { CFEqual($0, top) }.map(UIMap.ownMenu(at:)) ?? false
         return (current, Windows.frame(of: top), walked.joined(separator: " › "), shown, appMenu, nil)
     }
 
     /// The enabled menu item whose shortcut is this key, if the app's menus have one: its title as the menus have it
-    /// (never told) and as the AI is told it (`shown`).
-    static func menuEquivalent(_ app: AXUIElement, _ key: UIMap.Key) -> (item: AXUIElement, title: String, shown: String)? {
+    /// (never told), from its menu's title as `menuItem` gives it, as the AI is told it (`shown`), and whether it's in
+    /// the app's own menu.
+    static func menuEquivalent(_ app: AXUIElement, _ key: UIMap.Key) -> (item: AXUIElement, title: String, shown: String, appMenu: Bool)? {
         guard let character = key.character, let bar: AXUIElement = Windows.value(app, kAXMenuBarAttribute) else { return nil }
         func find(_ element: AXUIElement, depth: Int, path: [String]) -> (AXUIElement, [String])? {
             guard depth < 4 else { return nil }
@@ -2561,9 +2563,10 @@ enum Acting {
             }
             return nil
         }
-        for menu in children(bar).dropFirst() {   // the first is the app's own menu (About, Quit)
-            if let found = find(menu, depth: 0, path: []) {
-                return (found.0, found.1.joined(separator: " › "), menuWords { UIMap.menuShown(found.1, shown: $0) })
+        // Never the Apple menu, which comes first: its keys (Lock Screen, Log Out, Force Quit) are the Mac's, not the app's.
+        for (index, menu) in children(bar).enumerated().dropFirst() {
+            if let found = find(menu, depth: 0, path: [title(menu)]) {
+                return (found.0, found.1.joined(separator: " › "), menuWords { UIMap.menuShown(found.1, shown: $0) }, UIMap.ownMenu(at: index))
             }
         }
         return nil

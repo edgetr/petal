@@ -82,9 +82,11 @@ extension Acting {
         let text = nodes.contains(where: UIMap.isText)
         let web = entry?.node.web ?? false
         // A menu item or key that opens something (File › Open, Open With, Show in Finder, ⌘O, ⌘↓ in Finder) could
-        // bring another app or window forward: it needs the window in front.
+        // bring another app or window forward: it needs the window in front. So does a menu item that hands the
+        // selection on (Share › Mail, a Service), chosen or by its key; a ⌘ key none of the menus has is only checked.
         let opens = ["menu", "key"].contains(action)
-            && (options.key.map { Background.keyOpens($0, finder: map.bundle == "com.apple.finder") } == true
+            && ((sends && prepared.menuItem != nil)
+                || options.key.map { Background.keyOpens($0, finder: map.bundle == "com.apple.finder") } == true
                 || menuOpens(prepared.menuItem, title: prepared.menuTitle))
         let step = Background.plan(Background.Target(action: action, text: text, web: web, clipboard: clipboard,
                                                       menuItem: prepared.menuItem != nil, opens: opens, element: element != nil,

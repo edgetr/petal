@@ -123,6 +123,14 @@ struct UIMapCheck {
         }
         // Services is a submenu of the app's own menu, in every language.
         expect(UIMap.sends(menu: "Safari › Dienste › Mit Google suchen", appMenu: true), "a submenu of the app's own menu")
+        // Accessibility lists an app's menu bar as Apple, then the app's own menu (Finder: Apple, Finder, File, Edit).
+        let bar = ["Apple", "Finder", "File", "Edit"]
+        let own = { (top: String) in bar.firstIndex(of: top).map(UIMap.ownMenu(at:)) ?? false }
+        expect(own("Finder") && !own("Apple") && !own("File"), "the app's own menu is the one after the Apple menu")
+        expect(UIMap.sends(menu: "Finder › Dienste › Mit Google suchen", appMenu: own("Finder"))
+               && !UIMap.sends(menu: "Apple › Benutzte Objekte › Notizen", appMenu: own("Apple"))
+               && !UIMap.sends(menu: "Ablage › Exportieren › PDF", appMenu: own("Ablage")),
+               "a Service in any language is known by where it is; other submenus aren't")
         expect(!UIMap.sends(menu: "Safari › Settings…", appMenu: true) && !UIMap.sends(menu: "Safari › Dienste › Mit Google suchen"),
                "the app menu's own items aren't; nor a submenu elsewhere, by that alone")
         // ⌘E is Use Selection for Find in every language; ⇧⌘E and an item with no ⌘ aren't.
