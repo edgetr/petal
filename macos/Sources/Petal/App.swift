@@ -449,7 +449,8 @@ final class PetalApp {
 
     /// What `petal` and the AI's tools can ask the running Petal, over its socket (IPC.swift).
     private func registerIPC() {
-        // Petal's tools changing settings or the dock (`Petal --mcp`): done here, in order.
+        // Petal's tools changing settings or the dock (`Petal --mcp`): done here, in order. Only those (MCP.answer):
+        // the rest of Petal AI's tools come in through `assist`, where who's asking is weighed.
         ipc.on("mcpCall") { args in MCP.answer(args.first ?? "", args.dropFirst().first ?? "{}") }
         // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
         // person to allow it.
@@ -480,7 +481,6 @@ final class PetalApp {
         ipc.on("ask") { [unowned self] _ in claude.open(asking: nil); return "ok" }
         ipc.on("chat") { [unowned self] args in claude.open(asking: args.joined(separator: " ")); return "ok" }
         ipc.on("options") { [unowned self] _ in claude.openOptions(); return "ok" }
-        ipc.on("allow") { [unowned self] _ in claude.agent.allow(); return "ok" }
         ipc.on("newChat") { [unowned self] _ in claude.agent.reset(); return "ok" }
         ipc.on("search") { [unowned self] _ in search.open(in: nil); return "ok" }
         ipc.on("settings") { [unowned self] args in
@@ -501,7 +501,6 @@ final class PetalApp {
             signals.bounce(id)
             return "ok"
         }
-        ipc.on("emptyTrash") { _ in Stacks.emptyTrash(); return "ok" }
         ipc.on("close") { [unowned self] _ in
             claude.close(); search.close(); popups.closeAll(); popups.closeAsk()
             return "ok"

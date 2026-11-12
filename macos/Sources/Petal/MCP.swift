@@ -217,9 +217,11 @@ enum MCP {
         return object["result"] ?? [:]
     }
 
-    /// What the running Petal does for `viaPetal`: one line of JSON, the result or the error.
+    /// What the running Petal does for `viaPetal`: one line of JSON, the result or the error. Only the write tools
+    /// `viaPetal` sends (`writeTools`); any other is refused, never done on the dock's thread.
     static func answer(_ name: String, _ json: String) -> String {
         var reply: [String: Any]
+        guard writeTools.contains(name) else { return #"{"error": "Only Petal's settings and dock tools come this way."}"# }
         do {
             let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
             reply = ["result": try call(name, args)]

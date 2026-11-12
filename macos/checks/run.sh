@@ -743,6 +743,13 @@ echo "pipes: a reader that has gone never ends Petal"
 n=$(grep -n 'CGDisplayIsOnline' Sources/Petal/*.swift | grep -v '^Sources/Petal/DisplayCheck\.swift:\|^Sources/Petal/Screens\.swift:[0-9]*: *///' || true)
 if [ -n "$n" ]; then echo "displays: CGDisplayIsOnline is relied on:"; echo "$n"; exit 1; fi
 echo "displays: online by macOS's own list"
+# What another program on the Mac can ask the running Petal over its socket: these functions, no others. Each one
+# that does something for the person on their own say (a chat, an Allow, a key, a tool) is one of these on purpose;
+# a new one is added here only after weighing what any program could do with it.
+n=$(grep -o 'ipc\.on\(From\)\{0,1\}("[A-Za-z]*")' Sources/Petal/App.swift | sed 's/.*("\(.*\)")/\1/' | sort | tr '\n' ' ')
+want="agentKeys ask assist bench chat chats close desktop dock mcpCall newChat options restart reveal search settings stack testBounce update version "
+if [ "$n" != "$want" ]; then echo "socket: the running Petal's functions changed: $n"; echo "        expected: $want"; exit 1; fi
+echo "socket: only the functions weighed"
 # Quitting answers later (notes are saved first), and AppKit waits for the answer inside `terminate`. Called from a
 # block of the main dispatch queue (a signal's handler, an asyncAfter), that wait stops the queue, the answer never
 # arrives and Petal never quits. So the one call to terminate is PetalApp.quit's, from the run loop, and the answer
