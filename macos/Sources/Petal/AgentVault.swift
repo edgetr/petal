@@ -199,7 +199,7 @@ extension Assist {
             guard let ref = entry["ref"] as? String, !ref.isEmpty else { return nil }
             return .init(ref: ref, variable: (entry["env"] as? String).flatMap { $0.isEmpty ? nil : $0 })
         }
-        let command = AgentAccess.clipped(args["command"] as? String ?? "", 200)
+        let command = AgentAccess.clipped(AgentAccess.visible(args["command"] as? String ?? ""), AgentAccess.commandWhole)
         let stdin = args["stdin"] as? Bool ?? false
         guard !wanted.isEmpty else { return fail("Say which key with --key.") }
         VaultStore.load { [self] read in
@@ -226,7 +226,7 @@ extension Assist {
             if let clash = AgentAccess.sameVariable(found.map { ($0.item.title, $0.variable) }) { return fail(clash) }
             let titles = found.map(\.item.title)
             let place = AgentAccess.shown(who.project, home: home)
-            let ran: HistoryLine = command.isEmpty ? "" : " for \(quoted: AgentAccess.clipped(command, 60), else: "a command")"
+            let ran: HistoryLine = command.isEmpty ? "" : " for \(quoted: AgentAccess.clipped(command, AgentAccess.commandShort), else: "a command")"
             let plural: HistoryLine = titles.count == 1 ? " key" : " keys"
             let record: HistoryLine = "\(named: who.label, else: "An agent") used your \(named: titles.joined(separator: ", "), else: "saved")\(plural)\(ran) in \(named: place, else: "a project")"
             // Read again right before the keys go (the card may have waited): each item still there as it was when
@@ -274,7 +274,9 @@ extension Assist {
                 let it = missing.count == 1 ? "it" : "them"
                 let card = UUID().uuidString
                 var kept: [String: String] = [:]
-                let detail = self.agentDetail(who, said: "", how: "It never sees \(it): Petal gives \(it) to the command and takes \(it) out of what the command prints.")
+                // The title says the command's beginning: where that isn't all of it, the rest is said here.
+                let how = "It never sees \(it): Petal gives \(it) to the command and takes \(it) out of what the command prints."
+                let detail = [AgentAccess.keyCommand(command), self.agentDetail(who, said: "", how: how)].compactMap { $0 }.joined(separator: " ")
                 self.ask("agent-key", AgentAccess.keyQuestion(who, titles: missing.map(\.item.title), command: command, home: self.home), detail: detail,
                          always: true, warn: true, allow: "Allow once", owner: owner, keep: keep ? "Always for this project" : nil, mark: who.agent,
                          kept: {

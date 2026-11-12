@@ -887,23 +887,80 @@ enum AgentAccess {
         return nil
     }
 
-    /// The command as the card shows it: its words, quoted where they have spaces.
+    /// The command as the card shows it: its words, quoted where they have spaces, and a word with anything in it
+    /// that wouldn't show as itself (`unseen`) written the way a shell reads it back (`$'a\u202eb'`), so what the
+    /// card shows is what runs.
     static func commandLine(_ words: [String]) -> String {
         let plain = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@%+=:,./_-")
         return words.map { word in
             guard word.isEmpty || !word.unicodeScalars.allSatisfy(plain.contains) else { return word }
-            return "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            guard word.unicodeScalars.contains(where: unseen) else { return "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+            var out = "$'"
+            for scalar in word.unicodeScalars {
+                switch scalar {
+                case "\\": out += "\\\\"
+                case "'": out += "\\'"
+                case "\n": out += "\\n"
+                case "\t": out += "\\t"
+                case "\r": out += "\\r"
+                default: if unseen(scalar) { out += escaped(scalar) } else { out.unicodeScalars.append(scalar) }
+                }
+            }
+            return out + "'"
         }.joined(separator: " ")
     }
 
+    /// A character that wouldn't show as itself on a card: a control or a line break, one that only formats (the
+    /// ones that turn the reading direction around, zero-width ones, tags), a space that isn't the ordinary one, one
+    /// with no meaning yet or a private one, and the few letters and marks that draw nothing.
+    static func unseen(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .unassigned, .surrogate: return true
+        case .spaceSeparator: return scalar != " "
+        default: break
+        }
+        switch scalar.value {
+        case 0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0, 0xFE00...0xFE0F, 0xE0100...0xE01EF: return true
+        default: return false
+        }
+    }
+
+    private static func escaped(_ scalar: Unicode.Scalar) -> String {
+        let hex = String(scalar.value, radix: 16)
+        if scalar.value < 0x100 { return "\\x" + String(repeating: "0", count: 2 - hex.count) + hex }
+        if scalar.value < 0x10000 { return "\\u" + String(repeating: "0", count: 4 - hex.count) + hex }
+        return "\\U" + String(repeating: "0", count: 8 - hex.count) + hex
+    }
+
+    /// `text` for a card, with nothing in it that wouldn't show as itself: each such character as its number
+    /// (`\u202e`). What `commandLine` wrote has none left; this is for a command line that came from anywhere else.
+    static func visible(_ text: String) -> String {
+        guard text.unicodeScalars.contains(where: unseen) else { return text }
+        var out = ""
+        for scalar in text.unicodeScalars {
+            if unseen(scalar) { out += escaped(scalar) } else { out.unicodeScalars.append(scalar) }
+        }
+        return out
+    }
+
     // MARK: Words
+
+    /// How much of a command a card's title and What Petal AI did say, and how much `petal run`'s card keeps at all.
+    static let commandShort = 60, commandWhole = 200
 
     /// "Codex in T3 Code wants your Anthropic key for “npm test” in ~/petal".
     static func keyQuestion(_ caller: Caller, titles: [String], command: String, home: String) -> String {
         let names = titles.count <= 1 ? (titles.first ?? "") : titles.dropLast().joined(separator: ", ") + " and " + titles.last!
         let what = "your \(names) key\(titles.count == 1 ? "" : "s")"
-        let command = clipped(command, 60)
+        let command = clipped(visible(command), commandShort)
         return "\(caller.label) wants \(what)" + (command.isEmpty ? "" : " for “\(command)”") + " in \(shown(caller.project, home: home))"
+    }
+
+    /// The card's line for a command its title had to cut short: all of it (as much as the card keeps), so the
+    /// person never allows a command by its beginning only. Nil when the title already says it whole.
+    static func keyCommand(_ command: String) -> String? {
+        let whole = clipped(visible(command), commandWhole)
+        return whole == clipped(whole, commandShort) ? nil : "The whole command: “\(whole)”."
     }
 
     /// "Claude Code in T3 Code wants to fill your github.com login in ~/petal".

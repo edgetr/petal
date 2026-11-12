@@ -800,6 +800,35 @@ struct AgentAccessCheck {
         expect(AgentAccess.fillQuestion(caller, what: "fill your github.com login", home: "/Users/me")
                == "Codex in T3 Code wants to fill your github.com login in ~/petal", "the fill card's question")
         expect(AgentAccess.clipped("npm\ntest " + String(repeating: "x", count: 80), 20).count == 20, "a long command is cut short on one line")
+        // A command longer than the title holds is said whole on the card: the person reads all of what they allow.
+        let long = AgentAccess.commandLine(["sh", "-c", "npm test --workspace packages/web --reporter dot --silent && node scripts/report.js --out coverage/summary.json"])
+        let title = AgentAccess.keyQuestion(caller, titles: ["Anthropic"], command: long, home: "/Users/me")
+        expect(!title.contains("summary.json") && title.contains("…"), "the title says a long command's beginning", title)
+        expect(AgentAccess.keyCommand(long)?.contains("coverage/summary.json") == true, "and the card says all of it", AgentAccess.keyCommand(long) ?? "nil")
+        expect(AgentAccess.keyCommand(long) == "The whole command: “\(long)”.", "in these words", AgentAccess.keyCommand(long) ?? "nil")
+        expect(AgentAccess.keyCommand("npm test") == nil && AgentAccess.keyCommand("") == nil, "a command the title says whole isn't said twice")
+        let longest = AgentAccess.keyCommand(String(repeating: "x", count: 500)) ?? ""
+        expect(longest.contains(String(repeating: "x", count: AgentAccess.commandWhole - 1) + "…") && !longest.contains(String(repeating: "x", count: AgentAccess.commandWhole)),
+               "as much as the card keeps, and a mark where it's cut")
+        // What shows is what runs: nothing that turns the reading around, hides or looks like something else.
+        let turned = AgentAccess.commandLine(["sh", "-c", "x\u{202E}y\u{200B}", "a\u{00A0}b", "tab\there", "line\nbreak", "it's\u{2066}", "\u{E0041}", "back\\slash\u{7}"])
+        expect(turned == "sh -c $'x\\u202ey\\u200b' $'a\\xa0b' $'tab\\there' $'line\\nbreak' $'it\\'s\\u2066' $'\\U000e0041' $'back\\\\slash\\x07'",
+               "each written the way a shell reads it back", turned)
+        expect(!turned.unicodeScalars.contains(where: AgentAccess.unseen), "nothing unseen is left in a command line")
+        for scalar in ["\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}", "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}", "\u{200E}", "\u{200F}", "\u{061C}",
+                       "\u{200B}", "\u{200C}", "\u{200D}", "\u{2060}", "\u{FEFF}", "\u{00AD}", "\u{2028}", "\u{2029}", "\u{0}", "\u{1B}", "\u{7F}", "\u{85}",
+                       "\u{3000}", "\u{2003}", "\u{3164}", "\u{2800}", "\u{FE0F}", "\u{E000}"] {
+            let line = AgentAccess.commandLine(["echo", "a" + scalar + "b"])
+            expect(!line.unicodeScalars.contains(where: AgentAccess.unseen) && !line.contains(scalar) && line.hasPrefix("echo $'a\\"),
+                   "U+\(String(scalar.unicodeScalars.first!.value, radix: 16)) is written as its number", line)
+        }
+        expect(AgentAccess.commandLine(["npm", "run", "test it", "it's", "héllo wörld", "日本語"]) == "npm run 'test it' 'it'\\''s' 'héllo wörld' '日本語'",
+               "ordinary words stay as they were", AgentAccess.commandLine(["héllo wörld", "日本語"]))
+        // A command line that came from anywhere else is shown the same way.
+        expect(AgentAccess.visible("npm test\u{202E}tset") == "npm test\\u202etset" && AgentAccess.visible("npm test") == "npm test", "a command line from elsewhere")
+        let sent = AgentAccess.keyQuestion(caller, titles: ["Anthropic"], command: "sh -c 'a\u{202E}b'", home: "/Users/me")
+        expect(!sent.unicodeScalars.contains(where: AgentAccess.unseen) && sent.contains("a\\u202eb"), "the title too", sent)
+        expect(AgentAccess.keyCommand("x\u{202E}" + String(repeating: "y", count: 80))?.unicodeScalars.contains(where: AgentAccess.unseen) == false, "and the whole command")
     }
 
     /// `petal run`'s streams (AgentAccess.relay): the moment after the command ends stops the reading, never the
