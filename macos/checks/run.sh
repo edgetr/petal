@@ -58,7 +58,7 @@ swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift So
 swiftc -parse-as-library -O -o "$out/notelibrary" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteTasks.swift Sources/Petal/RunApps.swift Sources/Petal/ViewerFile.swift checks/NoteLibraryCheck.swift
 "$out/notelibrary"
 # A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
-swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/Screens.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift Sources/Petal/Scale.swift checks/NoteRichCheck.swift
+swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/Screens.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/NoteTasks.swift Sources/Petal/RunApps.swift Sources/Petal/ViewerFile.swift Sources/Petal/EditMenu.swift Sources/Petal/Scale.swift checks/NoteRichCheck.swift
 "$out/noterich"
 # Petal Notes' files on throwaway folders in the temporary folder: saves that keep both, names from the disk, no
 # writes through symbolic links, two notebooks' Todo.md, a renamed file's bookmark, the journal's launch recovery
@@ -83,6 +83,11 @@ perl -0777 -ne '
         print "NoteHelpers: the clock acts only on a chain, watcher or morning note this Mac keeps\n"; exit 1 }
     print "helpers: the clock does only what was set up on this Mac\n";
 ' Sources/Petal/NoteHelpers.swift
+# A click on a link in a note goes through NoteTasks alone (a web or mail address, a file by Open all's rule, else
+# nothing): the editor and the paper open nothing themselves.
+if grep -n 'NSWorkspace.shared.open' Sources/Petal/NoteEditor.swift Sources/Petal/NoteViews.swift; then echo "A note's link opened outside NoteTasks"; exit 1; fi
+grep -q 'NoteTasks.openLink(link)' Sources/Petal/NoteEditor.swift || { echo "NoteEditor: a clicked link goes through NoteTasks.openLink"; exit 1; }
+echo "notes: a link in a note opens only through NoteTasks"
 # The Shielded boundary is the compiler's: what a helper tells an AI can't be made from a raw string. Each of these
 # must fail to compile (a raw string interpolated into a prompt, put into what a helper is told, or made Shielded
 # outside NoteShield), and the shielded way must compile.

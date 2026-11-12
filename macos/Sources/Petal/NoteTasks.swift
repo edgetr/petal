@@ -159,9 +159,44 @@ enum NoteTasks {
         return parts.count
     }
 
-    /// A link a helper left (a pull request's address): opened only when it's http or https.
+    /// A link a helper left (a pull request's address), or a link's card: opened only when it's http or https.
     @MainActor static func openWeb(_ link: String) {
         if let url = web(link) { NSWorkspace.shared.open(url) }
+    }
+
+    /// What a click on a link in a note's own words may do. A note's words can come from sync or a tool, like a
+    /// task's parts, and a link shows only its words: a web address (http or https) or a mail address (`mailto:`)
+    /// opens; a file on this Mac (a `file:` address with a full path) goes by Open all's rule (`decide`: a document
+    /// opens, anything else is shown in Finder); any other kind of address does nothing.
+    enum LinkAction: Equatable { case open(URL), file(URL), nothing }
+
+    static func link(_ link: Any) -> LinkAction {
+        guard let url = link as? URL ?? (link as? String).flatMap(URL.init(string:)), let scheme = url.scheme?.lowercased() else { return .nothing }
+        switch scheme {
+        case "http", "https": return web(url.absoluteString).map { .open($0) } ?? .nothing
+        case "mailto": return .open(url)
+        case "file":
+            guard url.isFileURL, ["", "localhost"].contains(url.host ?? ""), url.path.hasPrefix("/"), !url.path.contains("\0") else { return .nothing }
+            return .file(URL(fileURLWithPath: url.path))
+        default: return .nothing
+        }
+    }
+
+    /// The click itself: a web or mail address opened; a file resolved and looked at off the main thread first
+    /// (`decide`), then opened if it's a document, else shown in Finder, never opened; one that's gone does nothing.
+    @MainActor static func openLink(_ link: Any) {
+        switch NoteTasks.link(link) {
+        case .open(let url): NSWorkspace.shared.open(url)
+        case .file(let named):
+            DispatchQueue.global(qos: .userInitiated).async {
+                let (real, action) = decide(named)
+                guard FileManager.default.fileExists(atPath: real.path) else { return }
+                DispatchQueue.main.async {
+                    if action == .open { NSWorkspace.shared.open(real) } else { NSWorkspace.shared.activateFileViewerSelecting([real]) }
+                }
+            }
+        case .nothing: break
+        }
     }
 
     private final class Counter: @unchecked Sendable {

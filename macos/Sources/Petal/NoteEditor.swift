@@ -758,8 +758,8 @@ final class LinkCell: NSTextAttachmentCell {
 
     override func wantsToTrackMouse() -> Bool { true }
     override func trackMouse(with event: NSEvent, in frame: NSRect, of view: NSView?, atCharacterIndex index: Int, untilMouseUp flag: Bool) -> Bool {
-        guard event.type == .leftMouseDown, event.clickCount == 1, let address = URL(string: url) else { return false }
-        NSWorkspace.shared.open(address)
+        guard event.type == .leftMouseDown, event.clickCount == 1, NoteTasks.web(url) != nil else { return false }
+        MainActor.assumeIsolated { NoteTasks.openWeb(url) }
         return true
     }
 }
@@ -1609,9 +1609,11 @@ struct NoteEditorView: NSViewRepresentable {
             parent.height(ceil(used))
         }
 
+        /// A click on a link in the note's words: only what `NoteTasks.link` lets it do (a web or mail address
+        /// opens, a file goes by Open all's rule, anything else does nothing). Always handled here, so AppKit never
+        /// opens one itself.
         @MainActor func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
-            guard let url = link as? URL ?? (link as? String).flatMap(URL.init(string:)) else { return false }
-            NSWorkspace.shared.open(url)
+            NoteTasks.openLink(link)
             return true
         }
     }

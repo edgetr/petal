@@ -1256,6 +1256,27 @@ struct NoteHelpCheck {
         expect(NoteTasks.url(part("window", "com.example.app")) == nil, "a window never launches its app")
         expect(NoteTasks.web("https://github.com/a/b/pull/1") != nil && NoteTasks.web("file:///etc/hosts") == nil && NoteTasks.web("x-man-page://ls") == nil,
                "a helper's link: http or https only")
+        // A click on a link in a note's own words (NoteTasks.link): a web or mail address opens, a file goes by the
+        // file rule above, anything else does nothing. Nothing is opened here.
+        let clicked = { (address: String) in NoteTasks.link(URL(string: address) as Any) }
+        expect(clicked("https://example.com/a?b=c#d") == .open(URL(string: "https://example.com/a?b=c#d")!) && clicked("HTTP://example.com") == .open(URL(string: "HTTP://example.com")!)
+               && clicked("mailto:someone@example.com") == .open(URL(string: "mailto:someone@example.com")!), "a link in a note: a web or mail address opens")
+        for other in ["smb://server/share", "shortcuts://run-shortcut?name=x", "javascript:alert(1)", "x-apple.systempreferences:com.apple.preference", "vnc://host", "ssh://host",
+                      "tel:5550100", "message://%3Cabc%40example.com%3E", "x-man-page://ls", "data:text/html,hi", "ftp://example.com/x", "relative/path.md", "https:///no-host", ""] {
+            expect(clicked(other) == .nothing, "a link in a note: “\(other)” does nothing", "\(clicked(other))")
+        }
+        expect(NoteTasks.link("smb://server/share") == .nothing && NoteTasks.link(42) == .nothing && NoteTasks.link("https://example.com/x") == .open(URL(string: "https://example.com/x")!),
+               "the same for a link kept as text, and nothing for what isn't an address")
+        expect(clicked("file://server.example/share/Quote.pdf") == .nothing && clicked("file:Quote.pdf") == .nothing, "a file on another Mac, or with no full path: nothing")
+        // A file on this Mac is never opened as it's named: it's looked at first, by the rule Open all goes by.
+        let clickedFile = { (url: URL) -> NoteTasks.FileAction? in
+            guard case .file(let named) = NoteTasks.link(url) else { return nil }
+            return named.path == url.path ? NoteTasks.decide(named).1 : nil
+        }
+        expect(clickedFile(pdf) == .open && clickedFile(plainText) == .open && clicked("file://localhost" + pdf.path) == .file(pdf), "a link to a document on this Mac: opened")
+        for blocked in [script, command, workflow, webloc, dmg, pkg, app, folder, linkToScript, aliasToScript] {
+            expect(clickedFile(blocked) == .reveal, "a link to \(blocked.lastPathComponent): shown in Finder, never opened", "\(String(describing: clickedFile(blocked)))")
+        }
 
         // MARK: Round eighteen: one launch order, one result, pause ends app actions, ordinary chats never wait
 
