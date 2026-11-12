@@ -626,7 +626,7 @@ extension Assist {
                 let place = places[wanted.firstIndex { Vault.field($0.word) == .password } ?? 0]
                 // A page Petal can't verify: the login for the address it gives, which then asks (never one saved
                 // for the browser as an app).
-                let host = place.web ? place.site : place.unverified ? place.claimedURL.flatMap(VaultSite.site) : nil
+                let host = place.web ? place.site : place.unverified ? place.claimedURL.flatMap { VaultSite.site($0, page: true) } : nil
                 let logins = Vault.logins(items, host: host, bundle: place.web || place.unverified ? nil : place.bundle)
                 guard !logins.isEmpty else {
                     return fail("There's no login saved for \(place.where_). Ask the person with action request (kind login, fields {username: id, password: id}): they type it into Petal's card, and Petal fills it.")

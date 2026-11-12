@@ -577,7 +577,7 @@ enum Vault {
         var host: String? { frameURL.flatMap(Vault.siteHost) }
         /// What a login is saved for and matched by: the host, and for a page of this Mac its port too
         /// ("localhost:3000"), since each port there is another program's page.
-        var site: String? { frameURL.flatMap { Vault.siteHost($0) == nil ? nil : VaultSite.site($0) } }
+        var site: String? { frameURL.flatMap { Vault.siteHost($0) == nil ? nil : VaultSite.site($0, page: true) } }
         /// Where a purchase is made: the tab's whole page (a card form often sits in a payment company's frame).
         var shop: String? { (topURL ?? frameURL).flatMap(Vault.siteHost) }
         var where_: String { web ? host ?? appName : appName }
@@ -2025,11 +2025,12 @@ enum VaultSite {
     }
 
     /// What something is saved for: an address's host, and for a page of this Mac its port too ("localhost:3000",
-    /// "[::1]:8080"), since each port there is another program's. A bare host stays as it is ("localhost": the
-    /// person's own word for every port).
-    static func site(_ text: String) -> String? {
+    /// "[::1]:8080"), since each port there is another program's. For a page Petal reads (`page`), the port it's on,
+    /// its scheme's when none is written; for an address in a file or typed in Settings, only a port it writes, so
+    /// "https://localhost/" and a bare "localhost" stay the person's word for every port.
+    static func site(_ text: String, page: Bool = false) -> String? {
         guard let host = host(text) else { return nil }
-        guard isLocal(host), let port = port(text) else { return host }
+        guard isLocal(host), let port = page ? port(text) : parts(text)?.parts.port else { return host }
         return (host.contains(":") ? "[\(host)]" : host) + ":\(port)"
     }
 

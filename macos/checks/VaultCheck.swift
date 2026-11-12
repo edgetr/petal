@@ -1148,7 +1148,14 @@ struct VaultCheck {
         expect(VaultSite.site("http://localhost:3000/login") == "localhost:3000" && VaultSite.site("http://127.0.0.1:8080/") == "127.0.0.1:8080"
                && VaultSite.site("http://[::1]:8080/x") == "[::1]:8080" && VaultSite.site("https://app.localhost:8443/") == "app.localhost:8443",
                "a page of this Mac is saved with its port")
-        expect(VaultSite.site("http://localhost/") == "localhost:80" && VaultSite.site("https://localhost/") == "localhost:443", "the scheme's port when none is written")
+        expect(VaultSite.site("http://localhost/", page: true) == "localhost:80" && VaultSite.site("https://localhost/", page: true) == "localhost:443",
+               "a page's scheme's port when none is written")
+        expect(VaultSite.site("http://localhost/") == "localhost" && VaultSite.site("https://127.0.0.1/x") == "127.0.0.1"
+               && VaultSite.site("http://localhost:3000/") == "localhost:3000", "an address in a file or typed in Settings: only a port it writes")
+        // An export writes "https://<site>/": read back, every site is the one saved, a bare one still every port's.
+        for saved in ["localhost", "localhost:3000", "[::1]:8080", "127.0.0.1", "github.com"] {
+            expect(VaultSite.hosts("https://\(saved)/") == [saved], "an export's site reads back as saved: \(saved) (\(VaultSite.hosts("https://\(saved)/")))")
+        }
         expect(VaultSite.site("localhost") == "localhost" && VaultSite.site("localhost:3000") == "localhost:3000" && VaultSite.site("::1") == "::1"
                && VaultSite.site("[::1]:3000") == "[::1]:3000", "a bare host stays as written")
         expect(VaultSite.site("https://GitHub.com:8443/x") == "github.com" && VaultSite.site("github.com") == "github.com" && VaultSite.site("not a url") == nil,
