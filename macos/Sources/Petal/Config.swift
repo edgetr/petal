@@ -218,10 +218,33 @@ final class Config {
 
     /// Both files as they are on disk. One that's there but doesn't read as JSON (an editor halfway through writing
     /// it, a typo) keeps what was read before until it does: the dock never loses its apps to a file being edited.
+    /// Once Petal runs, what Petal AI may do grows only in Petal itself (`ConfigRules.taken`): a change in the file
+    /// that would turn on Full access or using apps, allow more without asking or take an app off the private list
+    /// isn't taken, and the file is written to say what Petal goes by again. One that narrows any of them is taken.
     private func reload() {
-        settings = ConfigRules.reread(Self.parse(settingsFile), exists: FileManager.default.fileExists(atPath: settingsFile.path), before: settings)
+        var read = ConfigRules.reread(Self.parse(settingsFile), exists: FileManager.default.fileExists(atPath: settingsFile.path), before: settings)
+        var refused: [String] = []
+        if loaded { (read, refused) = ConfigRules.taken(read, over: settings, defaults: Settings.defaults) }
+        settings = read
         dock = ConfigRules.reread(Self.parse(dockFile), exists: FileManager.default.fileExists(atPath: dockFile.path), before: dock)
+        loaded = true
+        guard !refused.isEmpty else { return }
+        // Once for the file as it is now: one that can't be written is left, and Petal goes by what it has.
+        let stamp = Self.stamp(settingsFile) ?? .distantPast
+        guard stamp != putBack else { return }
+        putBack = stamp
+        NSLog("Petal settings: %@ changed in settings.json would let Petal AI do more, so it wasn't taken; that changes only in Petal's settings.",
+              refused.joined(separator: ", "))
+        update(settingsFile) { root in
+            for key in refused { root[key] = read[key] }
+        }
     }
+
+    /// The files were read once (at launch, as they are: the person's own choices from before). From then on
+    /// `reload` keeps what Petal AI may do from growing through the file.
+    @ObservationIgnored private var loaded = false
+    /// settings.json's date when it was last written to say what Petal goes by.
+    @ObservationIgnored private var putBack: Date?
 
     /// Looks for changes once a second. Modification times catch both ways a file gets written: replaced whole (as
     /// Petal and many editors do) and rewritten in place.

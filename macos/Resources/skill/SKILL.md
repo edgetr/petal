@@ -144,6 +144,9 @@ Use, in this order:
 3. The files in `~/.config/petal/`; Petal reloads them within a second:
 
 - `settings.json`: settings; `petal_get_state` (or `petal get`) lists every key with its default and help.
+  Four of them widen only in Petal's own windows (Settings, the chat's options, Always on a card), never from
+  this file or a tool while Petal runs: `claudeAccess` to full, `computerUse` on, more in `aiAllowed`, fewer apps
+  in `aiNeverLook`. Petal puts such a change back; ask the user to make it in Settings.
 - `dock.json`: the dock itself. `apps` (its apps in the order they show: bundle ids, and `https://` addresses for
   website shortcuts, shown with the site's own icon and a globe badge), `position` (bottom, left, right),
   `autoHide`, `dock` (petal or macos), `keepWindowsClear`. There is no `modes.json`: one from an earlier Petal,
