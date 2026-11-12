@@ -791,6 +791,18 @@ perl -0777 -ne '
     END { if ($bad) { print "personal update: $bad"; exit 1 } print "personal update: its source is the checked release\x27s commit\n" }
 ' Sources/Petal/Personal.swift Sources/Petal/Updater.swift
 bash checks/PersonalUpdateCheck.sh
+# The keychain Petal signs the person's own builds with is unlocked only while one build is signed: locked again on
+# every way out, and set to lock by itself (PersonalSigning; no `security` command is run, no keychain touched). And
+# Personal.swift opens it nowhere else: every unlock, lock and setting is PersonalSigning's, and codesign is given
+# the keychain only inside `withIdentity`, which is `PersonalSigning.unlocked`.
+swiftc -parse-as-library -O -o "$out/personalsigning" Sources/Petal/PersonalSigning.swift checks/PersonalSigningCheck.swift
+"$out/personalsigning"
+n=$(grep -c 'unlock-keychain\|lock-keychain\|set-keychain-settings\|create-keychain' Sources/Petal/Personal.swift || true)
+u=$(grep -c 'PersonalSigning\.unlocked(' Sources/Petal/Personal.swift || true)
+k=$(grep -c '"--keychain"' Sources/Petal/Personal.swift || true)
+w=$(awk '/try withIdentity \{ keychain, hash in/,/^        \}$/' Sources/Petal/Personal.swift | grep -c '"--keychain", keychain, "--sign", hash' || true)
+if [ "$n" != 0 ] || [ "$u" != 1 ] || [ "$k" != 1 ] || [ "$w" != 1 ]; then echo "personal signing: the keychain is opened outside PersonalSigning.unlocked"; exit 1; fi
+echo "personal signing: the keychain is open only while a build is signed"
 # IPC.swift on a throwaway socket in the temporary folder (never Petal's): a request whose client hangs up first is
 # never done.
 swiftc -parse-as-library -O -o "$out/ipc" Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/IPCCheck.swift
