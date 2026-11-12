@@ -229,7 +229,7 @@ enum VaultIndex {
             let extra = typed
             lock.unlock()
             guard let items = try? VaultStore.items() else { return nil }
-            return UIMap.SecretIndex(items.flatMap(Vault.secrets) + extra, words: items.flatMap(Vault.noteCodes))
+            return UIMap.SecretIndex(items.flatMap(Vault.secrets) + items.flatMap(Vault.noteNumbers) + extra, words: items.flatMap(Vault.noteCodes))
         }
         lock.lock()
         defer { lock.unlock() }

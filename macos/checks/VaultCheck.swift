@@ -1249,6 +1249,23 @@ struct VaultCheck {
         }
         let both = UIMap.SecretIndex(Vault.secrets(plain), words: codes)
         expect(both.redacted(ordinary) == ordinary, "an email, a name or a host with digits in them is told as it is")
+        // Codes of digits only, where the notes say they're codes: hidden as they're written, as digits, and in
+        // groups either way; a phone number, a date or a number the notes don't call a code stays.
+        var backup = VaultItem(kind: .login, title: "Google")
+        backup[.notes] = "Backup codes: 1234 5678, 8765-4321 and 11223344.\nPhone 5551234567. Renewed 2026-11-12. Account 99887766.\nBackup phone 5559876543\nMore codes 2468 1357 9753 8642"
+        let numbers = Vault.noteNumbers(backup)
+        expect(Set(numbers) == ["12345678", "1234 5678", "1234-5678", "87654321", "8765-4321", "8765 4321", "11223344",
+                                "2468135797538642", "2468 1357 9753 8642", "2468-1357-9753-8642",
+                                "24681357", "2468 1357", "2468-1357", "97538642", "9753 8642", "9753-8642"], "numbers the notes call codes (\(numbers))")
+        let numbered = UIMap.SecretIndex(Vault.secrets(backup) + numbers, words: Vault.noteCodes(backup))
+        expect(numbered.matches("Your backup code: 1234 5678") && numbered.matches("12345678") && numbered.matches("use 8765 4321") && numbered.matches("1122-3344") == false
+               && numbered.matches("11223344"), "a digit code is caught as written, as digits, and in groups")
+        for words in ["Call 5551234567", "Renewed 2026-11-12", "Account 99887766", "5559876543", "Order 1234"] {
+            expect(!numbered.matches(words), "a number the notes don't call a code stays: \(words)")
+        }
+        var person = VaultItem(kind: .contact, title: "Ada")
+        person[.notes] = "Her backup code 12345678"
+        expect(Vault.noteNumbers(person).isEmpty, "a contact's notes give none")
         expect(Vault.turns("a1b2c-3d4e5") == 9 && Vault.turns("Office365") == 1 && Vault.turns("12-Nov-2026") == 2 && Vault.turns("XK7P-9QRT") == 4,
                "turns between letters and digits")
         // The vault itself never tells a note.

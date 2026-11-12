@@ -400,6 +400,46 @@ enum Vault {
         return out
     }
 
+    /// What in an item's notes reads as a code of digits only (a recovery code, "1234 5678"): in a line or sentence of
+    /// its notes that names codes ("code", "backup", "recovery", Turkish's "kod", "yedek", "kurtarma") and no phone,
+    /// each number of 6 to 19 digits, whole or in groups of three or more joined by a space or a dash. They're
+    /// searched for as secrets are (UIMap.SecretIndex): their digits, as written, and their groups joined each way.
+    static func noteNumbers(_ item: VaultItem) -> [String] {
+        guard item.kind != .contact, item.kind != .address else { return [] }
+        var out: [String] = [], seen = Set<String>()
+        let clauses = item[.notes].components(separatedBy: CharacterSet(charactersIn: "\n;")).flatMap { $0.components(separatedBy: ". ") }
+        for clause in clauses {
+            let words = UIMap.words(UIMap.fold(clause))
+            guard words.contains(where: { word in codeLabels.contains { word.hasPrefix($0) } }),
+                  !words.contains(where: { word in phoneLabels.contains { word.hasPrefix($0) } }) else { continue }
+            let text = clause as NSString
+            for match in numberPattern.matches(in: clause, range: NSRange(location: 0, length: text.length)) {
+                let written = text.substring(with: match.range)
+                let all = written.split(whereSeparator: { $0 == " " || $0 == "-" }).map(String.init)
+                // Maybe several codes written in a row ("1234 5678 8765 4321"): the whole, and each group of six digits
+                // or more, else each two groups.
+                let parts = all.count < 3 ? [] : all.allSatisfy({ $0.count >= 6 }) ? all.map { [$0] }
+                    : stride(from: 0, to: all.count, by: 2).map { Array(all[$0..<min($0 + 2, all.count)]) }
+                let codes = [all] + parts
+                for groups in codes {
+                    let digits = groups.joined()
+                    guard (6...19).contains(digits.count) else { continue }
+                    for form in [digits, groups.joined(separator: " "), groups.joined(separator: "-")] where seen.insert(form).inserted {
+                        out.append(form)
+                    }
+                    if out.count >= noteCodeCap { return out }
+                }
+            }
+        }
+        return out
+    }
+
+    /// Words that say a part of a note holds codes, and words that say it's a phone number.
+    static let codeLabels = ["code", "backup", "recovery", "kod", "yedek", "kurtarma"]
+    static let phoneLabels = ["phone", "tel", "mobile", "cep", "fax"]
+    /// A number of three digits or more, or groups of them joined by one space or dash, not run into other digits.
+    static let numberPattern = try! NSRegularExpression(pattern: "(?<![0-9])[0-9]{3,}(?:[ -][0-9]{3,})*(?![0-9])")
+
     /// How many times `text` goes from a letter to a digit or back, the dashes and underscores between aside.
     static func turns(_ text: String) -> Int {
         var count = 0
