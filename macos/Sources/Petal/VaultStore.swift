@@ -346,6 +346,8 @@ final class VaultModel {
         var usedSkipped = 0
         var older = 0
         var widened = 0
+        /// Conflicts that would only add sites or apps (Vault.Merge.places), by the saved item's id.
+        var places: [String: [String]] = [:]
         var skipped = 0
         /// Rows Petal couldn't read, each with why.
         var unreadable: [String] = []
@@ -378,6 +380,7 @@ final class VaultModel {
                     }
                     result.older = merge.older
                     result.widened = merge.widened
+                    result.places = merge.places
                     result.skipped = parsed.skipped
                     result.unreadable = parsed.unreadable
                     } else {

@@ -1645,6 +1645,26 @@ enum Vault {
         var older = 0
         /// Saved logins the import added sites or apps to (the same login, also kept for somewhere else).
         var widened = 0
+        /// Conflicts that would only add sites or apps to a saved login or key, from an entry that came without its
+        /// password or key: the saved item's id → what it would add, to say so by name.
+        var places: [String: [String]] = [:]
+    }
+
+    /// The secret a kind's sites and apps let Petal fill by itself: a login's password, a key (an unsorted secret
+    /// too, for once it's sorted). Other kinds' sites decide nothing.
+    static func placedSecret(_ kind: VaultKind) -> VaultField? {
+        switch kind {
+        case .login: .password
+        case .apiKey, .unsorted: .value
+        default: nil
+        }
+    }
+
+    /// A conflict as an import's summary names it: its title, and the sites or apps it would add when that's all it
+    /// does ("GitHub (adds gist.github.com)").
+    static func conflictName(_ item: VaultItem, adds: [String]?) -> String {
+        guard let adds, !adds.isEmpty else { return item.title }
+        return "\(item.title) (adds \(adds.prefix(3).joined(separator: ", "))\(adds.count > 3 ? ", …" : ""))"
     }
 
     /// An import against what's saved. Something already there changes nothing unless it differs. Matched by its id
@@ -1652,7 +1672,9 @@ enum Vault {
     /// title, sites and apps), restored as it was backed up. Matched by what it holds (the same site and username,
     /// card number, …): a login takes only the import's password, the sites and apps the saved one doesn't have yet
     /// (and its notes where none are saved, or Petal's newer ones; another app's other title or notes are offered as a
-    /// conflict, never dropped); anything else takes the import's fields. Either way a secret (a password, security
+    /// conflict, never dropped); anything else takes the import's fields. Sites and apps come only with the secret
+    /// they were saved with: an entry without a password (or key) never adds a place to a saved login (or key) by
+    /// itself, and is never the newer one; what it would add is offered as a conflict (`places`). Either way a secret (a password, security
     /// code or key) is replaced only when Petal's own export says it's newer: from any other export, a different secret is a
     /// conflict, kept as it is and said. Petal's export older than what's saved changes nothing. An entry repeated
     /// with the same id (Petal's export) lands on one item, the later winning.
@@ -1711,23 +1733,41 @@ enum Vault {
                 var detailed: VaultItem?
                 // A login the import only adds sites or apps to: said as such, not as something newer.
                 var onlyPlaces = false
+                // The saved item with the sites and apps of an entry that came without its secret: where the saved
+                // password or key would fill by itself is the person's to say, so it's offered, never saved here.
+                var placed: VaultItem?
                 if byID {
                     // Petal's own backup of this very item: all of it, as backed up.
                     next = item
                 } else if saved.kind == .login {
-                    if !item[.password].isEmpty { next[.password] = item[.password] }
-                    let newer = petal && item.updated > saved.updated
+                    // An entry with no password says nothing of where the saved one goes, and is never the newer one.
+                    let brings = !item[.password].isEmpty
+                    if brings { next[.password] = item[.password] }
+                    let newer = petal && brings && item.updated > saved.updated
                     if next[.notes].isEmpty || (newer && !item[.notes].isEmpty) { next[.notes] = item[.notes] }
                     let before = next
-                    next = withPlaces(next, from: item)
+                    let wider = withPlaces(next, from: item)
+                    if brings { next = wider } else if !identical(wider, next) { placed = wider }
                     onlyPlaces = identical(before, saved) && !identical(next, saved)
-                    if !petal { detailed = withDetails(next, from: item) }
+                    if !petal {
+                        // Its other title or notes go with the same offer.
+                        if let offered = placed { placed = withDetails(offered, from: item) ?? offered } else { detailed = withDetails(next, from: item) }
+                    }
                 } else {
                     next.fields = saved.fields.merging(item.fields) { _, new in new }
-                    next.sites = saved.sites + item.sites.filter { !saved.sites.contains($0) }
                     next.title = item.title.isEmpty ? saved.title : item.title
+                    let more = item.sites.filter { !saved.sites.contains($0) }
+                    // A key's sites are where it fills by itself: they come only with the key.
+                    if let secret = placedSecret(saved.kind), item[secret].isEmpty {
+                        if !more.isEmpty {
+                            placed = next
+                            placed?.sites = saved.sites + more
+                        }
+                    } else {
+                        next.sites = saved.sites + more
+                    }
                 }
-                guard !identical(next, saved) || detailed != nil else { result.same += 1; continue }
+                guard !identical(next, saved) || detailed != nil || placed != nil else { result.same += 1; continue }
                 let replaces = replacesSecret(saved, with: next)
                 if petal {
                     // Petal's own dates say which is newer.
@@ -1751,7 +1791,7 @@ enum Vault {
                 // A later entry with the same id that's taken wins over its earlier conflict.
                 result.conflicts.removeAll { $0.id == next.id }
                 if !identical(next, saved) {
-                    if saved.kind == .login, !byID, !identical(withPlaces(saved, from: item), saved) { result.widened += 1 }
+                    if saved.kind == .login, !byID, placed == nil, !identical(withPlaces(saved, from: item), saved) { result.widened += 1 }
                     current[index] = next
                     if !onlyPlaces, !result.updated.contains(next.title) { result.updated.append(next.title) }
                     if let at = touched[next.id] { result.save[at] = next } else { touched[next.id] = result.save.count; result.save.append(next) }
@@ -1760,6 +1800,12 @@ enum Vault {
                     // The secrets agree; the title or notes don't: yours stay, the import's are offered.
                     detailed.updated = date
                     result.conflicts.append(detailed)
+                }
+                if var placed {
+                    // It came without the secret: where the saved one goes stays as it is, the entry's places offered.
+                    placed.updated = date
+                    result.conflicts.append(placed)
+                    result.places[placed.id] = placed.sites.filter { !saved.sites.contains($0) } + placed.apps.filter { !saved.apps.contains($0) }
                 }
             } else {
                 if item.updated == Date(timeIntervalSince1970: 0) { item.updated = date }

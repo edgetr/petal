@@ -328,7 +328,7 @@ struct VaultSettings: View {
                 Text(Self.summary(result)).font(.system(size: TextSize.callout)).fixedSize(horizontal: false, vertical: true)
                 if !result.conflicts.isEmpty {
                     HStack(spacing: 8) {
-                        Text(result.usedImported ? Self.usedText(result.usedSkipped, of: result.conflicts.count) : Self.conflictText(result.conflicts))
+                        Text(result.usedImported ? Self.usedText(result.usedSkipped, of: result.conflicts.count) : Self.conflictText(result.conflicts, places: result.places))
                             .font(.system(size: TextSize.callout)).fixedSize(horizontal: false, vertical: true)
                         Spacer()
                         if !result.usedImported {
@@ -384,11 +384,11 @@ struct VaultSettings: View {
         return skipped >= count ? "Nothing was replaced: \(left)." : "Petal now uses the file's, except: \(left)."
     }
 
-    static func conflictText(_ items: [VaultItem]) -> String {
+    static func conflictText(_ items: [VaultItem], places: [String: [String]] = [:]) -> String {
         let kinds = Set(items.map(\.kind))
         let noun = kinds == [.login] ? (items.count == 1 ? "login differs" : "logins differ")
             : items.count == 1 ? "item differs" : "items differ"
-        let names = items.prefix(5).map(\.title).joined(separator: ", ") + (items.count > 5 ? ", …" : "")
+        let names = items.prefix(5).map { Vault.conflictName($0, adds: places[$0.id]) }.joined(separator: ", ") + (items.count > 5 ? ", …" : "")
         return "\(items.count) \(noun) from what's saved, so Petal kept yours: \(names)."
     }
 

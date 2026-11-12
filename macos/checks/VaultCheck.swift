@@ -44,6 +44,7 @@ struct VaultCheck {
         untrusted()
         joinedPieces()
         importConflicts()
+        importPlaces()
         buyRevoked()
         buyTokens()
         joinedControls()
@@ -1050,6 +1051,86 @@ struct VaultCheck {
         var card4 = VaultItem(kind: .card, title: "Visa"); card4[.number] = "4111111111111111"
         var noCode = card4; noCode.id = Vault.newID(); noCode[.securityCode] = "123"
         expect(Vault.merge(existing: [card4], incoming: [noCode]).conflicts.isEmpty, "a secret saved for the first time isn't a conflict")
+    }
+
+    /// Sites and apps come only with the secret they were saved with: an entry that matches a saved login or key by
+    /// what it holds, but came without its password or key, never adds a place to it by itself and is never the
+    /// newer one. What it would add is offered to the person, by name.
+    static func importPlaces() {
+        let then = Date(timeIntervalSince1970: 1_700_000_000), later = Date(timeIntervalSince1970: 1_800_000_000)
+        let secure = Vault.Target(secure: true, text: true), text = Vault.Target(secure: false, text: true)
+        func web(_ frame: String) -> Vault.Place {
+            Vault.Place(web: true, frameURL: frame, topURL: frame, bundle: "com.apple.Safari", appName: "Safari", signed: true)
+        }
+        func isAsk(_ d: Vault.Decision) -> Bool { if case .ask = d { return true }; return false }
+        func after(_ merge: Vault.Merge, _ saved: VaultItem) -> VaultItem { merge.save.first { $0.id == saved.id } ?? saved }
+        var saved = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"], updated: then)
+        saved[.username] = "ada"; saved[.password] = "the-real-password"
+        // Petal's own format, a later date, no password: one more site and an app.
+        var bare = VaultItem(kind: .login, title: "GitHub", sites: ["github.com", "other.example"], updated: later)
+        bare[.username] = "ada"
+        bare.apps = ["com.example.app"]
+        for petal in [true, false] {
+            let merged = Vault.merge(existing: [saved], incoming: [bare], petal: petal, at: later)
+            let kept = after(merged, saved)
+            expect(kept.sites == ["github.com"] && kept.apps.isEmpty && kept[.password] == "the-real-password",
+                   "an entry with no password adds no site or app to the saved login (petal: \(petal))")
+            expect(merged.save.isEmpty && merged.widened == 0 && merged.updated.isEmpty && merged.added == 0, "nothing is saved or said as newer (petal: \(petal))")
+            expect(isAsk(Vault.decide(kept, .password, target: secure, place: web("https://other.example/login"))),
+                   "so the saved password still asks on the site the file named (petal: \(petal))")
+            expect(merged.conflicts.count == 1 && merged.conflicts[0].id == saved.id && merged.conflicts[0][.password] == "the-real-password"
+                   && merged.conflicts[0].sites == ["github.com", "other.example"] && merged.conflicts[0].apps == ["com.example.app"],
+                   "what it would add is offered as a conflict (petal: \(petal))")
+            expect(merged.places[saved.id] == ["other.example", "com.example.app"], "with the places it would add, to name them (petal: \(petal))")
+        }
+        // Older than what's saved, or the same date: yours, nothing offered.
+        var stale = bare; stale.updated = then.addingTimeInterval(-60)
+        let older = Vault.merge(existing: [saved], incoming: [stale], petal: true, at: later)
+        expect(older.save.isEmpty && older.conflicts.isEmpty && older.older == 1, "an older entry with no password changes nothing")
+        // It is never the newer one: its notes don't replace the saved ones (they fill only where none are saved).
+        var noted = saved; noted[.notes] = "mine"
+        var talks = bare; talks[.notes] = "theirs"; talks.sites = ["github.com"]; talks.apps = []
+        let notes = Vault.merge(existing: [noted], incoming: [talks], petal: true, at: later)
+        expect(after(notes, noted)[.notes] == "mine" && notes.conflicts.isEmpty, "an entry with no password is never newer: the saved notes stay")
+        // The same password brings its other site, as before; another password brings its own places with it.
+        var carries = bare; carries[.password] = "the-real-password"
+        let widened = Vault.merge(existing: [saved], incoming: [carries], petal: true, at: later)
+        expect(widened.widened == 1 && widened.conflicts.isEmpty && after(widened, saved).sites == ["github.com", "other.example"]
+               && widened.places.isEmpty, "the same password brings its other site and app")
+        var differs = bare; differs[.password] = "another-password"
+        let replaced = Vault.merge(existing: [saved], incoming: [differs], petal: true, at: later)
+        expect(after(replaced, saved)[.password] == "another-password" && after(replaced, saved).sites.count == 2,
+               "Petal's newer export with another password is that login whole: its password with its sites")
+        let offered = Vault.merge(existing: [saved], incoming: [differs])
+        expect(offered.save.isEmpty && offered.conflicts.count == 1 && offered.conflicts[0][.password] == "another-password" && offered.places.isEmpty,
+               "another app's other password is the usual conflict")
+        // An API key is matched by its title alone: its sites come only with the key.
+        var key = VaultItem(kind: .apiKey, title: "OpenAI", sites: ["platform.openai.com"], updated: then)
+        key[.value] = "sk-check-0123456789abcdef"
+        let empty = VaultItem(kind: .apiKey, title: "openai", sites: ["other.example"], updated: later)
+        for petal in [true, false] {
+            let merged = Vault.merge(existing: [key], incoming: [empty], petal: petal, at: later)
+            let kept = after(merged, key)
+            expect(kept.sites == ["platform.openai.com"] && kept[.value] == "sk-check-0123456789abcdef",
+                   "an entry with no key adds no site to the saved key (petal: \(petal))")
+            expect(isAsk(Vault.decide(kept, .value, target: text, place: web("https://other.example/setup"))), "so the key still asks there (petal: \(petal))")
+            expect(merged.conflicts.count == 1 && merged.conflicts[0].sites == ["platform.openai.com", "other.example"]
+                   && merged.conflicts[0][.value] == "sk-check-0123456789abcdef" && merged.places[key.id] == ["other.example"],
+                   "its site is offered, by name (petal: \(petal))")
+        }
+        var withKey = empty; withKey[.value] = "sk-check-0123456789abcdef"
+        let more = Vault.merge(existing: [key], incoming: [withKey], petal: true, at: later)
+        expect(after(more, key).sites == ["platform.openai.com", "other.example"] && more.conflicts.isEmpty, "the same key brings its other site")
+        // A card's or a contact's sites decide nothing, so they merge as before.
+        var card = VaultItem(kind: .card, title: "Visa", updated: then); card[.number] = "4111111111111111"; card[.securityCode] = "737"
+        var cardRow = VaultItem(kind: .card, title: "Visa", sites: ["shop.example"], updated: later); cardRow[.number] = "4111111111111111"
+        let carded = Vault.merge(existing: [card], incoming: [cardRow], petal: true, at: later)
+        expect(carded.conflicts.isEmpty && after(carded, card).sites == ["shop.example"], "other kinds' details merge as before")
+        // The summary names what a conflict would add.
+        expect(Vault.conflictName(saved, adds: ["other.example", "com.example.app"]) == "GitHub (adds other.example, com.example.app)"
+               && Vault.conflictName(saved, adds: nil) == "GitHub" && Vault.conflictName(saved, adds: []) == "GitHub"
+               && Vault.conflictName(saved, adds: ["a.example", "b.example", "c.example", "d.example"]) == "GitHub (adds a.example, b.example, c.example, …)",
+               "a conflict that only adds places is named with them")
     }
 
     /// Buy on tab A, tab B seen in that window (a petal_ui read, an act, a title change), back on A: the Buy is over.
