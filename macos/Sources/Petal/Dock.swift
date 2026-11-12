@@ -520,15 +520,16 @@ final class DockController {
             guard Windows.focusing.current(ticket) else { return }
             let windows = Windows.windows(of: pid)
             func rank(_ w: AppWindow) -> Int { w.minimized ? 1 : (onScreen.contains { $0.equalTo(w.frame, within: 4) } ? 0 : 2) }
-            let sorted = windows.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
-            var pick = sorted.first
-            if active, !sorted.isEmpty {
-                // The window in front now: the next one along comes forward (clicking again cycles through them).
+            var focused: AXUIElement?
+            if active, !windows.isEmpty {
+                // The window in front now: the next one along comes forward (clicking again cycles through them all).
                 let app = AXUIElementCreateApplication(pid)
                 AXUIElementSetMessagingTimeout(app, 0.3)
-                let focused: String = (Windows.value(app, kAXFocusedWindowAttribute) as AXUIElement?).flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
-                if let index = sorted.firstIndex(where: { $0.title == focused && !$0.minimized }) { pick = sorted[(index + 1) % sorted.count] }
+                focused = Windows.value(app, kAXFocusedWindowAttribute)
             }
+            let weighed = windows.map { DockRules.Window(rank: rank($0), number: Windows.id(of: $0.element), title: $0.title, minimized: $0.minimized) }
+            let pick = DockRules.pick(weighed, active: active, focused: focused.flatMap { Windows.id(of: $0) },
+                                      focusedTitle: focused.flatMap { Windows.value($0, kAXTitleAttribute) } ?? "").map { windows[$0] }
             let onIt = pick.map { rank($0) == 0 } ?? false
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {

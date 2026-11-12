@@ -33,6 +33,10 @@ swiftc -parse-as-library -O -o "$out/look" Sources/Petal/LookSchedule.swift chec
 # starts, and a dot becoming a count is going up), and a player playing shows before one paused (SignalRules).
 swiftc -parse-as-library -O -o "$out/signals" Sources/Petal/SignalRules.swift checks/SignalRulesCheck.swift
 "$out/signals"
+# Clicking an app in front again brings its next window forward, through every one of them and back, whatever order
+# the app lists them in as they come forward (DockRules).
+swiftc -parse-as-library -O -o "$out/dockrules" Sources/Petal/DockRules.swift checks/DockRulesCheck.swift
+"$out/dockrules"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
