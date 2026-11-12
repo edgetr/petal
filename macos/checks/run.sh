@@ -66,8 +66,8 @@ grep -q 'menuWords { UIMap.noMenu(path\[0\], menus: names, shown: \$0) }' Source
 # A menu item or key that hands what's selected to another app without the clipboard (UIMap.sends: a Service, Share,
 # Look Up) gets a copy's check right before it, in front and in the background alike; the app's own menu, where
 # Services is in every language, is known by its place (UIMap.ownMenu), for a menu path and a key's item alike; in
-# the background such an item needs the window in front. And the text Services (Ask Petal AI, Add to Petal AI) take
-# no text holding a vault secret, as a paste doesn't.
+# the background such an item needs the window in front. And the text Services (Ask Petal AI, Add to Petal AI) quote
+# the text only as Petal AI may be told it, each vault secret hidden.
 grep -q 'case .send?: return copyRefusal(map, element, sending: true)' Sources/Petal/ComputerUse.swift \
     && grep -q 'return UIMap.sends(menu: title ?? own, appMenu: appMenu, character: character, modifiers: modifiers) ? .send : nil' Sources/Petal/ComputerUse.swift \
     && grep -q 'key.map { UIMap.sends(key: \$0, claimed: false) } ?? UIMap.sends(menu: title, appMenu: appMenu)' Sources/Petal/ComputerUse.swift \
@@ -75,8 +75,9 @@ grep -q 'case .send?: return copyRefusal(map, element, sending: true)' Sources/P
     && [ "$(grep -c 'prepared.menuApp = found.appMenu' Sources/Petal/ComputerUse.swift)" = 2 ] \
     && [ "$(grep -c 'if sends, let why = sendRefusal(map, ' Sources/Petal/BackgroundActing.swift)" = 2 ] \
     && grep -q '(sends && prepared.menuItem != nil)' Sources/Petal/BackgroundActing.swift \
-    && grep -q 'guard Assist.vaultCheck(text) == .clean else { return }' Sources/Petal/TextServices.swift \
-    || { echo "petal_act: what hands the selection to another app is checked as a copy; the text Services refuse a vault secret"; exit 1; }
+    && grep -q 'let shown = Assist.shownText(text, limit: .max)' Sources/Petal/TextServices.swift \
+    && ! grep -q 'app.claude.quote(text, ' Sources/Petal/TextServices.swift \
+    || { echo "petal_act: what hands the selection to another app is checked as a copy; the text Services quote no vault secret"; exit 1; }
 echo "menus: titles told redacted; handing the selection on checked as a copy"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
 "$out/notes"

@@ -18,15 +18,16 @@ final class TextServices: NSObject {
         guard !Assist.isConcealed(pasteboard), !PetalApp.shared.assist.neverLook(NSWorkspace.shared.frontmostApplication?.bundleIdentifier),
               let text = pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty else { return }
         let source = NSWorkspace.shared.frontmostApplication?.localizedName ?? ""
-        // Nor text holding one of the vault's secrets, as a paste: checked off the main thread (the Keychain may take a
-        // while), and nothing is quoted unless it comes back clean.
+        // Nor one of the vault's secrets: the text is quoted as Petal AI may be told it (each secret as "(hidden)", or
+        // a line saying the vault can't be read now), checked off the main thread (the Keychain may take a while).
+        // Text too long to search is never quoted; Ask Petal AI still opens the chat.
         DispatchQueue.global(qos: .userInitiated).async {
-            guard Assist.vaultCheck(text) == .clean else { return }
+            let shown = Assist.shownText(text, limit: .max)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     let app = PetalApp.shared
-                    app.claude.quote(text, from: source)
-                    if open { app.claude.open(asking: nil) } else { app.claude.noteAdded() }
+                    if let shown { app.claude.quote(shown, from: source) }
+                    if open { app.claude.open(asking: nil) } else if shown != nil { app.claude.noteAdded() }
                 }
             }
         }
