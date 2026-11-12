@@ -37,6 +37,10 @@ swiftc -parse-as-library -O -o "$out/signals" Sources/Petal/SignalRules.swift ch
 # the app lists them in as they come forward (DockRules).
 swiftc -parse-as-library -O -o "$out/dockrules" Sources/Petal/DockRules.swift checks/DockRulesCheck.swift
 "$out/dockrules"
+# Petal's own files: an entry in dock.json's apps that isn't text never empties the dock, and a file someone is
+# editing that doesn't read as JSON yet keeps what was read before (ConfigRules).
+swiftc -parse-as-library -O -o "$out/configrules" Sources/Petal/ConfigRules.swift checks/ConfigRulesCheck.swift
+"$out/configrules"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift

@@ -90,7 +90,7 @@ enum MCP {
             let dock = read(dockFile) ?? [:]
             let environment = ProcessInfo.processInfo.environment
             return ["settings": effective, "settings_help": help,
-                    "dock": ["apps": dock["apps"] as? [String] ?? [], "position": dock["position"] ?? "bottom",
+                    "dock": ["apps": ConfigRules.apps(dock["apps"]), "position": dock["position"] ?? "bottom",
                              "autohide": dock["autoHide"] ?? false, "dock": dock["dock"] ?? "petal"],
                     "files": ["settings": settingsFile.path, "dock": dockFile.path,
                               "instructions": folder.appending(path: "instructions.md").path,
@@ -152,7 +152,7 @@ enum MCP {
                 if let hide = args["autohide"] as? Bool { dock["autoHide"] = hide; done["autohide"] = hide }
                 guard whole != nil || add != nil || remove != nil else { return }
                 var apps: [String] = []
-                for app in (whole ?? dock["apps"] as? [String] ?? []) + (add ?? []) where !apps.contains(app) { apps.append(app) }
+                for app in (whole ?? ConfigRules.apps(dock["apps"])) + (add ?? []) where !apps.contains(app) { apps.append(app) }
                 apps.removeAll { remove?.contains($0) == true }
                 dock["apps"] = apps
                 done["apps"] = apps

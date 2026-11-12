@@ -107,7 +107,7 @@ final class Config {
 
     /// The dock's apps, in the order they show: bundle identifiers, and https:// addresses for website shortcuts.
     var apps: [String] {
-        (dock["apps"] as? [String] ?? []).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        ConfigRules.apps(dock["apps"])
     }
 
     func setApps(_ apps: [String]) {
@@ -216,9 +216,11 @@ final class Config {
         }
     }
 
+    /// Both files as they are on disk. One that's there but doesn't read as JSON (an editor halfway through writing
+    /// it, a typo) keeps what was read before until it does: the dock never loses its apps to a file being edited.
     private func reload() {
-        settings = Self.readObject(settingsFile)
-        dock = Self.readObject(dockFile)
+        settings = ConfigRules.reread(Self.parse(settingsFile), exists: FileManager.default.fileExists(atPath: settingsFile.path), before: settings)
+        dock = ConfigRules.reread(Self.parse(dockFile), exists: FileManager.default.fileExists(atPath: dockFile.path), before: dock)
     }
 
     /// Looks for changes once a second. Modification times catch both ways a file gets written: replaced whole (as

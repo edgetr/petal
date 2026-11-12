@@ -40,7 +40,7 @@ enum CLI {
         case "help":
             print(help)
         case "apps":
-            for app in MCP.read(MCP.dockFile)?["apps"] as? [String] ?? [] { print(app) }
+            for app in ConfigRules.apps(MCP.read(MCP.dockFile)?["apps"]) { print(app) }
         case "get":
             output(try? MCP.call("petal_get_state", [:]))
         case "set":
