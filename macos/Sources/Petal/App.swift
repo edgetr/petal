@@ -479,7 +479,8 @@ final class PetalApp {
 
         ipc.on("desktop") { [unowned self] _ in (docks.focusedDock?.desktop).map(String.init) ?? "" }
         ipc.on("ask") { [unowned self] _ in claude.open(asking: nil); return "ok" }
-        ipc.on("chat") { [unowned self] args in claude.open(asking: args.joined(separator: " ")); return "ok" }
+        // Words from another program are typed into the chat for the person to send (Return), never sent as theirs.
+        ipc.on("chat") { [unowned self] args in claude.open(asking: args.joined(separator: " "), send: false); return "ok" }
         ipc.on("options") { [unowned self] _ in claude.openOptions(); return "ok" }
         ipc.on("newChat") { [unowned self] _ in claude.agent.reset(); return "ok" }
         ipc.on("search") { [unowned self] _ in search.open(in: nil); return "ok" }

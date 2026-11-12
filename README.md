@@ -83,7 +83,7 @@ petal apps                the dock's apps, in the order they show
 petal get                 everything about the dock: settings (with help), its apps, files
 petal set <key> <value>   change a setting
 petal dock [petal|macos]  which dock is showing, or switch
-petal ask | chat <text>   open the AI panel, or ask it something
+petal ask | chat <text>   open the AI panel, or open it with <text> typed for you to send
 petal doctor [--fix]      check Petal, and repair what it safely can
 petal restore-dock        give macOS its Dock back, even if Petal crashed
 petal update              check for a new version
