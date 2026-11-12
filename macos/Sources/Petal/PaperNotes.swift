@@ -3161,6 +3161,9 @@ struct NoteLocal: Codable, Equatable {
     /// helpers' clock does only these, never one that is only in a note's file. Nil: none kept yet (a Petal from
     /// before this was kept), so the ones this Mac already had going are taken once (`NoteHelp.adopted`).
     var standing: [NoteHelp.Standing]? = nil
+    /// That taking was done before the folder was read whole (the person set one up first, or the read took too
+    /// long): the rest is taken, adding, once it is.
+    var adoptPending: Bool? = nil
 
     mutating func copyHandle(_ key: String, redact: ((String) -> String)? = nil) -> String {
         if let made = copies?[key] { return made }

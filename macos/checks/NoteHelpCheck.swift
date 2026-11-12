@@ -241,6 +241,14 @@ struct NoteHelpCheck {
             let taken = NoteHelp.adopted([(note: "W2", file: waitingFile), (note: "W5", file: othersFile), (note: "W6", file: startedFile), (note: "W1", file: doneFile)], mac: "this-mac")
             expect(taken.count == 3 && entries.allSatisfy { NoteHelp.stands($0, in: taken) }, "the ones this Mac already had going are taken once", "\(taken)")
             expect(NoteHelp.adopted([(note: "W2", file: waitingFile)], mac: "").isEmpty, "a Mac with no id takes none")
+            // Taken before the folder was read whole: the rest are added later, and what was kept stays as it is.
+            let early = [entries[0]]
+            let merged = NoteHelp.standing(early, merging: taken)
+            expect(merged.count == 3 && entries.allSatisfy { NoteHelp.stands($0, in: merged) } && merged.first == entries[0], "the ones found later are added", "\(merged)")
+            let changed = NoteHelp.standing([NoteHelp.Standing(otherLine, on: "W2")], merging: taken)
+            expect(changed.contains(NoteHelp.Standing(otherLine, on: "W2")) && !NoteHelp.stands(NoteHelp.Standing(watch, on: "W2"), in: changed),
+                   "a note's one already kept isn't replaced by what its file said", "\(changed)")
+            expect(NoteHelp.standing(nil, merging: []).isEmpty && NoteHelp.standing(taken, merging: taken) == taken, "nothing found adds nothing")
             // What this Mac keeps survives being written and read (its notes state is JSON).
             let coded = (try? JSONEncoder().encode(taken)).flatMap { try? JSONDecoder().decode([NoteHelp.Standing].self, from: $0) }
             expect(coded == taken, "kept as written")

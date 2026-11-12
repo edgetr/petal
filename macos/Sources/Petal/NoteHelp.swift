@@ -662,6 +662,14 @@ enum NoteHelp {
         held?.filter { $0.kind != kind || $0.note != note }
     }
 
+    /// The taking finished once the folder is read whole: what was kept, with the ones found since added; a note's
+    /// one of a kind already kept stays as it is.
+    static func standing(_ held: [Standing]?, merging found: [Standing]) -> [Standing] {
+        var out = held ?? []
+        for entry in found where !out.contains(where: { $0.kind == entry.kind && $0.note == entry.note }) { out.append(entry) }
+        return out
+    }
+
     /// Once, for a Mac that kept none yet (a Petal from before this was kept): the chains not yet started, the
     /// watchers and the morning notes already in the notes' folder that name this Mac go on as they were. From then
     /// on only the person's own line adds one.

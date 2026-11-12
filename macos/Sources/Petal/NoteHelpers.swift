@@ -2150,13 +2150,27 @@ final class NoteHelpers {
     /// A Mac that kept none yet takes, once, the ones it already had going in the notes' folder (`NoteHelp.adopted`),
     /// as soon as the notes are read; before that nothing of the clock's is done for any.
     /// It waits for a read of the whole folder (a file iCloud hasn't downloaded yet is read later), for a while at
-    /// most; the person setting one up here (`now`) takes them at once.
+    /// most; the person setting one up here (`now`) takes them at once. Taken before the folder was read whole, the
+    /// rest are added once it is (`adoptPending`, kept across launches), so none it had going is left out.
     private func adoptStanding(now: Bool = false) {
-        guard let desk, desk.acceptsChanges, desk.local.standing == nil else { return }
-        if !now, !desk.store.readComplete, adoptWaits < 20 { adoptWaits += 1; return }
-        desk.local.standing = NoteHelp.adopted(desk.store.notes.filter { $0.version == nil }.map { (note: $0.noteID, file: $0.file) }, mac: mac)
+        guard let desk, desk.acceptsChanges else { return }
+        let complete = desk.store.readComplete
+        let found = { NoteHelp.adopted(desk.store.notes.filter { $0.version == nil }.map { (note: $0.noteID, file: $0.file) }, mac: self.mac) }
+        if desk.local.standing == nil {
+            if !now, !complete, adoptWaits < 20 { adoptWaits += 1; return }
+            desk.local.standing = found()
+            desk.local.adoptPending = complete ? nil : true
+        } else if desk.local.adoptPending == true, complete {
+            desk.local.standing = NoteHelp.standing(desk.local.standing, merging: found())
+            desk.local.adoptPending = nil
+        } else {
+            return
+        }
         desk.local.save(pending: desk.store.pendingIDs)
     }
+
+    /// What setting one up here does first (`keepGoing`), for `Petal --helpers-check`.
+    func adoptForCheck() { adoptStanding(now: true) }
 
     /// Clock turns adoption has waited for the folder to be read whole (`adoptStanding`).
     @ObservationIgnored private var adoptWaits = 0

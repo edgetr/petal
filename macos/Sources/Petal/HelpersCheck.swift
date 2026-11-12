@@ -663,7 +663,22 @@ private final class HelpersChecker {
             // Exactly one fetch since the file's watcher was written: the adopted look, none before it.
             expect(server.served == servedBeforeFile + 1, "the file's watcher fetched nothing before it was taken (\(server.served - servedBeforeFile) requests)")
             expect(app.paper.local.standing?.contains { $0.note == earlier } == true, "and keeps it from then on")
-            return "a chain and a watcher written into a file started nothing and fetched nothing; the same asked by a typed line started once and looked; a Mac that kept none yet took the watcher it had"
+
+            // Taken before the folder was read whole (the person set one up first): one that arrives later, from
+            // before as well, is added once the folder is read whole, and the ones kept stay.
+            app.paper.local.standing = nil
+            app.paper.store.readComplete = false
+            helpers.adoptForCheck()
+            expect(app.paper.local.standing?.contains { $0.note == earlier } == true && app.paper.local.adoptPending == true,
+                   "taken early, it keeps what it found and waits for the rest (\(String(describing: app.paper.local.adoptPending)))")
+            let late = UUID().uuidString
+            let lateText = "---\nid: \(late)\nwatch:\n  every: 1h\n  line: under $90\n  mac: \(mac)\n  paused: false\n  url: http://127.0.0.1:\(server.port)/item\n---\nDownloaded late\n"
+            expect(written("Downloaded late.md", id: late, lateText), "the store read a watcher from before that came late")
+            expect(wait(10) { app.paper.store.readComplete }, "the folder was read whole")
+            helpers.clockTurn()
+            expect(app.paper.local.standing?.contains { $0.note == late } == true && app.paper.local.standing?.contains { $0.note == earlier } == true
+                   && app.paper.local.adoptPending == nil, "the late one was added, the earlier one kept, and the taking is done")
+            return "a chain and a watcher written into a file started nothing and fetched nothing; the same asked by a typed line started once and looked; a Mac that kept none yet took the watcher it had, and one from before that came late"
         }
     }
 
