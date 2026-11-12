@@ -655,7 +655,10 @@ final class NoteHelpers {
             return
         }
         // No run here (a chain waiting, or a helper left at work by a Petal that quit): its waiting ends.
-        if paper(noteID)?.file.helper?.state != .done { write(noteID) { $0.helper = nil; $0.chain = nil } }
+        if paper(noteID)?.file.helper?.state != .done {
+            letGo(NoteHelp.Standing.chain, on: noteID)
+            write(noteID) { $0.helper = nil; $0.chain = nil }
+        }
     }
 
     /// Pause: the run's token pauses (its processes end; nothing of it is admitted) and it stays paused; Go on (or
@@ -823,10 +826,12 @@ final class NoteHelpers {
         case .stopWatching:
             looks.cancel(noteID)
             looking.remove(noteID)
+            letGo(NoteHelp.Standing.watch, on: noteID)
             write(noteID) { $0.watch = nil }
             reply(noteID, giveBack: nil) { _ in "Stopped watching." }
         case .stopMorning:
             guard let cover = coverToChange(paper, none: { _ in "This notebook has no cover to keep that on." }) else { return }
+            letGo(NoteHelp.Standing.morning, on: cover.noteID)
             write(cover.noteID) { $0.morning = nil }
             reply(noteID, giveBack: nil, [paper.notebook]) { "No more morning notes from \($0[0])." }
         case .pause:
@@ -904,6 +909,8 @@ final class NoteHelpers {
             if let old = self.paper(paper.noteID)?.file.watch, old.url == url { watch.last = old.last; watch.history = old.history; watch.hint = old.hint }
             self.looks.cancel(paper.noteID)
             self.looking.remove(paper.noteID)
+            // The person's own line set it up here: this Mac keeps it, and only then does its clock look.
+            self.keepGoing(NoteHelp.Standing(watch, on: paper.noteID))
             self.write(paper.noteID) { $0.watch = watch }
             self.reply(paper.noteID, giveBack: nil, [NoteText.host(url), NoteHelp.cadence(every: words.every, at: words.at).lowercased()]) {
                 "Watching \($0[0]) \($0[1]) on this Mac. Petal tells you here when it's \(words.line)."
@@ -915,6 +922,7 @@ final class NoteHelpers {
     private func morning(_ paper: PaperNote, time: String, asked: String) {
         guard let cover = coverToChange(paper, none: { "\($0) has no cover to keep that on." }) else { return }
         let mac = self.mac
+        keepGoing(NoteHelp.Standing(morning: time, on: cover.noteID))
         write(cover.noteID) { $0.morning = (time, mac) }
         reply(paper.noteID, giveBack: nil, [time, paper.notebook]) { "Every morning at \($0[0]), \($0[1]) leaves you a note on this Mac." }
     }
@@ -950,6 +958,7 @@ final class NoteHelpers {
             let thenTitle = told.sources[1].title
             let mac = self.mac
             let chain = NoteHelp.Chain(after: first.noteID, afterTitle: afterTitle.text, then: target.noteID, ask: ask.text, mac: mac, since: Date())
+            self.keepGoing(NoteHelp.Standing(chain, on: target.noteID))
             self.write(target.noteID) { file in
                 file.chain = chain
                 file.helper = NoteHelp.Helper(state: .waiting, who: Self.petalWho, step: "Waiting for \(afterTitle.text)", mac: mac, at: Date())
@@ -2098,9 +2107,13 @@ final class NoteHelpers {
 
     // MARK: The clock: coming back, watchers, chains, morning notes, merged worktrees
 
+    /// One turn of the clock, for `Petal --helpers-check` (headless, its timer never starts).
+    func clockTurn() { tick() }
+
     private func tick() {
         // Nothing of the clock's (a note coming back, a look, a chain, a morning note) while notes aren't ready.
         guard let desk, desk.on, desk.acceptsChanges else { return }
+        adoptStanding()
         // Results a refused write left in the journal are tried again.
         applyHeld()
         let now = Date()
@@ -2110,9 +2123,13 @@ final class NoteHelpers {
                 summon(paper.noteID, open: false)
                 write(paper.noteID) { $0.back = nil }
             }
-            if let watch = file.watch, watch.mac == mac, NoteHelp.due(watch, now: now) { look(paper.noteID) }
-            if let chain = file.chain, chain.ready(mac: mac, after: self.paper(chain.after)?.file.helper) { fire(paper) }
-            if let morning = file.morning, morning.mac == mac, cover(of: paper.notebook)?.key == paper.key { leaveMorning(paper, at: morning.time, now: now) }
+            // A watcher, a chain or a morning note: only one the person set up on this Mac (`stands`), never one that
+            // is only in the file.
+            if let watch = file.watch, watch.mac == mac, stands(NoteHelp.Standing(watch, on: paper.noteID)), NoteHelp.due(watch, now: now) { look(paper.noteID) }
+            if let chain = file.chain, stands(NoteHelp.Standing(chain, on: paper.noteID)),
+               chain.ready(mac: mac, after: self.paper(chain.after)?.file.helper) { fire(paper) }
+            if let morning = file.morning, morning.mac == mac, stands(NoteHelp.Standing(morning: morning.time, on: paper.noteID)),
+               cover(of: paper.notebook)?.key == paper.key { leaveMorning(paper, at: morning.time, now: now) }
             if file.worktree != nil, let link = file.ink.first(where: { !$0.opinion && !$0.link.isEmpty })?.link, runs[paper.noteID] == nil,
                now.timeIntervalSince(mergeChecked[paper.noteID] ?? .distantPast) > 600 {
                 mergeChecked[paper.noteID] = now
@@ -2123,6 +2140,34 @@ final class NoteHelpers {
                 }
             }
         }
+    }
+
+    // MARK: What this Mac keeps going
+
+    /// Whether this Mac holds that chain, watcher or morning note just as its note's file says it now.
+    private func stands(_ entry: NoteHelp.Standing) -> Bool { NoteHelp.stands(entry, in: desk?.local.standing) }
+
+    /// A Mac that kept none yet takes, once, the ones it already had going in the notes' folder (`NoteHelp.adopted`),
+    /// as soon as the notes are read; before that nothing of the clock's is done for any.
+    private func adoptStanding() {
+        guard let desk, desk.acceptsChanges, desk.local.standing == nil else { return }
+        desk.local.standing = NoteHelp.adopted(desk.store.notes.filter { $0.version == nil }.map { (note: $0.noteID, file: $0.file) }, mac: mac)
+        desk.local.save(pending: desk.store.pendingIDs)
+    }
+
+    /// The person's own line set this up here: kept on this Mac, in its note's one place of that kind.
+    private func keepGoing(_ entry: NoteHelp.Standing) {
+        adoptStanding()
+        guard let desk, desk.local.standing != nil else { return }
+        desk.local.standing = NoteHelp.standing(desk.local.standing, adding: entry)
+        desk.local.save(pending: desk.store.pendingIDs)
+    }
+
+    /// It started, or was stopped: no longer this Mac's to do.
+    private func letGo(_ kind: String, on noteID: String) {
+        guard let desk, let now = NoteHelp.standing(desk.local.standing, without: kind, on: noteID), now != desk.local.standing else { return }
+        desk.local.standing = now
+        desk.local.save(pending: desk.store.pendingIDs)
     }
 
     /// A chain's note is done: its run is registered first, then `fired` is written (landed, on this Mac only), then
@@ -2143,10 +2188,11 @@ final class NoteHelpers {
     @ObservationIgnored private var firing: Set<String> = []
 
     private func fireNow(_ paper: PaperNote) {
-        guard var chain = paper.file.chain, runs[paper.noteID] == nil else { return }
+        guard var chain = paper.file.chain, runs[paper.noteID] == nil, stands(NoteHelp.Standing(chain, on: paper.noteID)) else { return }
         // Its predecessor is a source of this run: read by its id, in its notebook now, by the same rule as the gate
         // (a note private to a notebook this one isn't in, or gone, is never read): else it doesn't fire, and says so.
         guard let first = self.paper(chain.after), mayRead(first.notebook, from: paper) else {
+            letGo(NoteHelp.Standing.chain, on: paper.noteID)
             write(paper.noteID) { file in file.chain = nil; if file.helper?.state == .waiting { file.helper = nil } }
             return reply(paper.noteID, giveBack: nil) { _ in "The note this one was waiting for can't be read from here now (private, or gone), so it didn't start." }
         }
@@ -2160,6 +2206,8 @@ final class NoteHelpers {
                   mine.after == chain.after, mine.fired.map({ abs($0.timeIntervalSince(fired)) < 1 }) == true else {
                 return self.stopped(run, saying: "Petal couldn't record that this chain started, so it didn't.")
             }
+            // Its start is in its file now (`fired`): it never starts again, so this Mac lets it go.
+            self.letGo(NoteHelp.Standing.chain, on: paper.noteID)
             // The done note's whole body goes with it, checked again (its access may have changed meanwhile): its title
             // is derived only after it's shielded (NoteHelp.brief), and the gate checks its access again before it goes.
             guard let first = self.paper(chain.after), self.mayRead(first.notebook, from: now) else {
@@ -2229,8 +2277,8 @@ final class NoteHelpers {
     /// the watcher is the one it began under (its id) and not paused; the note says a crossing only when that write
     /// newly crossed the line.
     func look(_ noteID: String) {
-        guard let paper = paper(noteID), let watch = paper.file.watch, watch.mac == mac, !watch.paused, !looking.contains(noteID),
-              let url = URL(string: watch.url), ["http", "https"].contains(url.scheme ?? "") else { return }
+        guard let paper = paper(noteID), let watch = paper.file.watch, watch.mac == mac, stands(NoteHelp.Standing(watch, on: noteID)),
+              !watch.paused, !looking.contains(noteID), let url = URL(string: watch.url), ["http", "https"].contains(url.scheme ?? "") else { return }
         looking.insert(noteID)
         let id = watch.id
         // The look's own token, kept with the watcher: pausing, stopping or changing it cancels the fetch and its
@@ -2517,7 +2565,7 @@ final class NoteHelpers {
         DispatchQueue.global(qos: .utility).async {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            process.arguments = ["gh", "pr", "view", link, "--json", "state", "-q", ".state"]
+            process.arguments = NoteHelp.mergedArguments(link)
             var environment = ProcessInfo.processInfo.environment
             environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
             environment["GH_PROMPT_DISABLED"] = "1"

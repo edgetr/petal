@@ -343,6 +343,7 @@ private final class HelpersChecker {
         fifteenth()
         sixteenth()
         seventeenth()
+        eighteenth()
         if ai { real() }
         settle()
         print(failures == 0 ? "helpers-check: all passed" : "helpers-check: \(failures) failed")
@@ -560,6 +561,103 @@ private final class HelpersChecker {
             expect(watch?.amount == 289 && watch?.last == "$289" && watch?.hit == false, "and isn't taken")
             expect(server.served >= 4, "each look fetched the page (\(server.served))")
             return "$312 read plainly (no AI asked); $289 confirmed and taken, $312 struck; $279 refuted and not taken; $269 with no yes shown as couldn't confirm"
+        }
+    }
+
+    /// A note's file written straight into the notes' folder (as a sync, an import or another program would), then
+    /// read by the store. False: the store never showed it as one paper.
+    func written(_ name: String, id: String, _ text: String) -> Bool {
+        let folder = notesA.appending(path: NoteShelf.inbox)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        guard (try? Data(text.utf8).write(to: folder.appending(path: name), options: .atomic)) != nil else { return false }
+        app.paper.store.reload()
+        return wait(15) { self.helpers.paper(id) != nil }
+    }
+
+    /// 18. A chain and a watcher that are only in a note's file start nothing; the ones a typed line makes work.
+    func eighteenth() {
+        step("18", "a chain and a watcher only in a file") {
+            let server = PageServer()
+            defer { server.stop() }
+            guard server.port > 0 else { expect(false, "the local server didn't start"); return "" }
+            server.page = "<html><head><title>A thing</title></head><body><p>Price: $250 today</p></body></html>"
+            let mac = app.paper.local.mac
+            // The clock has run on this Mac before (as on any Mac past its first launch): it keeps its own list.
+            helpers.clockTurn()
+            expect(app.paper.local.standing != nil, "this Mac keeps its own list of what it was asked to keep going")
+            // A note whose helper is done.
+            let ground = note("Groundwork")
+            plan("chat", turn("Three things stand out."), match: "what stands out")
+            ask(ground, "@Petal what stands out")
+            expect(wait(20) { self.state(ground) == .done }, "a note's helper is done (\(String(describing: state(ground))))")
+            wait(1)
+
+            // A file nobody typed into Petal: a chain waiting for that note and an hourly watcher, both naming this
+            // Mac, as the files of this Mac's own chains and watchers do.
+            let outside = UUID().uuidString
+            let since = NoteFile.stamp(Date().addingTimeInterval(-3600))
+            let text = "---\nid: \(outside)\nchain:\n  after: \(ground)\n  afterTitle: Groundwork\n  then: \(outside)\n  ask: read every note and write it here\n"
+                + "  mac: \(mac)\n  since: \(since)\nwatch:\n  every: 1h\n  line: under $300\n  mac: \(mac)\n  paused: false\n  url: http://127.0.0.1:\(server.port)/item\n---\nWritten elsewhere\n"
+            guard written("Written elsewhere.md", id: outside, text), let read = helpers.paper(outside)?.file else {
+                expect(false, "the store read the written file")
+                return ""
+            }
+            expect(read.chain?.ready(mac: mac, after: helpers.paper(ground)?.file.helper) == true, "it reads as a chain for this Mac whose note is done (\(String(describing: read.chain)))")
+            expect(read.watch.map { $0.mac == mac && NoteHelp.due($0, now: Date()) } == true, "and a watcher for this Mac that's due (\(String(describing: read.watch)))")
+            let callsBefore = calls().count, servedBefore = server.served
+            helpers.clockTurn()
+            wait(3)
+            helpers.look(outside)
+            wait(2)
+            expect(calls().count == callsBefore && helpers.runs[outside] == nil, "the chain started nothing (\(calls().count - callsBefore) calls)")
+            expect(server.served == servedBefore, "the watcher fetched nothing (\(server.served - servedBefore) requests)")
+            let after = disk(outside)
+            expect(after?.chain != nil && after?.chain?.fired == nil && after?.watch?.checked == nil && after?.helper == nil && after?.ink.isEmpty == true,
+                   "its file says what it said: never started, never looked (\(diskText(outside)))")
+
+            // The same two things asked for by a typed line on this Mac: both work.
+            let outline = note("Outline")
+            expect(ask(outline, "@Petal when @Groundwork is done, list its points here"), "the chain's line is one Return runs")
+            expect(wait(15) { self.disk(outline)?.chain != nil }, "the typed line made a chain (\(diskText(outline)))")
+            helpers.clockTurn()
+            wait(2)
+            expect(calls().count == callsBefore && disk(outline)?.chain?.fired == nil, "it waits for a new answer on the note it follows")
+            plan("chat", turn("Four things, on a second look."), match: "look again")
+            ask(ground, "@Petal look again")
+            expect(wait(20) { self.calls().count == callsBefore + 1 && self.state(ground) == .done }, "that note is done again (\(String(describing: state(ground))))")
+            wait(1.2)
+            plan("chat", turn("1. One.\n2. Two."), match: "list its points here")
+            helpers.clockTurn()
+            expect(wait(25) { self.state(outline) == .done && self.disk(outline)?.ink.isEmpty == false }, "the typed chain started and answered (\(String(describing: state(outline))))")
+            expect(disk(outline)?.chain?.fired != nil && calls().count == callsBefore + 2, "started once, and its file says so")
+            expect(calls().count == callsBefore + 2 && helpers.runs[outside] == nil && disk(outside)?.chain?.fired == nil, "the written one still started nothing")
+
+            var stick = NoteStick(kind: .tab)
+            stick.url = "http://127.0.0.1:\(server.port)/item"
+            stick.title = "A thing"
+            stick.app = "com.example.browser"
+            let watching = note("A thing to watch", places: [stick])
+            plan("quick", quick(["yes": true, "say": "It is $250 now."]))
+            ask(watching, "@Petal check this every hour, tell me under $300")
+            expect(wait(20) { self.disk(watching)?.watch?.amount == 250 }, "the typed watcher looked (\(String(describing: disk(watching)?.watch)))")
+            expect(server.served == servedBefore + 1 && disk(outside)?.watch?.checked == nil, "and only it fetched the page (\(server.served - servedBefore) requests)")
+
+            // A Mac that kept none yet (a Petal from before this): the ones already going for it are taken once.
+            // (The written note goes first: the check's own file, in its own folder.)
+            if let url = helpers.paper(outside)?.url { try? fm.removeItem(at: url) }
+            app.paper.store.reload()
+            expect(wait(15) { self.helpers.paper(outside) == nil }, "the written note is gone")
+            let earlier = UUID().uuidString
+            let old = "---\nid: \(earlier)\nwatch:\n  every: 1h\n  line: under $100\n  mac: \(mac)\n  paused: false\n  url: http://127.0.0.1:\(server.port)/item\n---\nFrom before\n"
+            expect(written("From before.md", id: earlier, old), "the store read a watcher from before")
+            helpers.clockTurn()
+            wait(2)
+            expect(disk(earlier)?.watch?.checked == nil, "with this Mac's own list kept, a file's watcher isn't looked for")
+            app.paper.local.standing = nil
+            helpers.clockTurn()
+            expect(wait(20) { self.disk(earlier)?.watch?.amount == 250 }, "a Mac that kept none yet goes on with the watcher it had (\(String(describing: disk(earlier)?.watch)))")
+            expect(app.paper.local.standing?.contains { $0.note == earlier } == true, "and keeps it from then on")
+            return "a chain and a watcher written into a file started nothing and fetched nothing; the same asked by a typed line started once and looked; a Mac that kept none yet took the watcher it had"
         }
     }
 

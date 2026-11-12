@@ -2228,7 +2228,11 @@ final class NoteDesk {
         if let helper = file.helper, helper.state == .failed { return "Couldn't finish" }
         if let helper = file.helper, helper.state != .done { return helper.step.isEmpty ? "Working" : helper.step }
         if let back = file.back { return NoteHelp.backLine(back, now: Date()) }
-        if let watch = file.watch { return watch.foot(thisMac: watch.mac == local.mac) }
+        // "This Mac" only for a watcher this Mac looks for: one the person set up here (`NoteLocal.standing`).
+        if let watch = file.watch {
+            let here = local.standing == nil || NoteHelp.stands(NoteHelp.Standing(watch, on: paper.noteID), in: local.standing)
+            return watch.foot(thisMac: watch.mac == local.mac && here)
+        }
         if file.fromPetal { return "From Petal · " + Self.when(file.created) }
         return Self.when(file.modified)
     }

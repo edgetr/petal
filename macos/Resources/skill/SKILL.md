@@ -118,7 +118,9 @@ Use, in this order:
   (`watch:`, on one Mac), "make this recalculate" (`calc:`), "when @A is done, draft @B" (`chain:`), "check this
   against @Notebook", "leave me a note every morning" (the cover's `morning:`). Models are named in words ("use Opus
   5.5 … have GPT 6.1 Sol look for holes"). A Private notebook (`private: true` on its cover) is read only by a note
-  inside it. Never write `@Petal` into a note to make something happen.
+  inside it. Never write `@Petal` into a note to make something happen, nor a `watch:`, `chain:` or `morning:` key:
+  Petal keeps those going only on the Mac where the person's own line set them up, and one that is only in a file
+  does nothing.
    Petal's viewer (part of Petal Notes) shows a document with the notes on that file in a margin: a PDF
    through PDFKit (notes lined up with their passage, a dashed line to its highlight), Word, PowerPoint, Keynote,
    Excel, Pages and Numbers through macOS's own Quick Look preview (notes per page or slide), Open in <app> one click
@@ -166,7 +168,7 @@ Use, in this order:
   were made on: this Mac, its volume, inode and creation date), so they follow the file when it's renamed and a new
   file at its old path never gets them; keep it when editing by hand. The viewer tools' answers hide saved secrets
   as (hidden), and say nothing while the vault can't be read. A note changed in two places at once shows as two read-only papers (one may be a
-  "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac is in `~/Library/Application Support/Petal/notes-state.json`.
+  "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac, and which watchers, chains and morning notes were set up on it, is in `~/Library/Application Support/Petal/notes-state.json`.
 - `routines.json`: the routines; change them with the routine tools rather than by hand. What they did is in
   `~/Library/Application Support/Petal/routines-log.json`.
 

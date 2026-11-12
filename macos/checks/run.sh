@@ -69,6 +69,20 @@ swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/Screens.swift Sourc
 # (NoteTasks: real files, a link and a Finder alias in a throwaway folder in the temporary folder; nothing is opened).
 swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteTasks.swift Sources/Petal/RunApps.swift Sources/Petal/ViewerFile.swift checks/NoteHelpCheck.swift
 "$out/notehelp"
+# The helpers' clock does only what the person set up on this Mac (NoteLocal.standing, NoteHelp.stands, checked
+# above): a watcher's look, a chain's start and a morning note each ask it first, in the clock and again where the
+# look and the start begin; and each of the three is kept when the person's own line makes it.
+perl -0777 -ne '
+    my @kept = (/keepGoing\(NoteHelp\.Standing\(/g);
+    unless (/if let watch = file\.watch, watch\.mac == mac, stands\(NoteHelp\.Standing\(watch, on: paper\.noteID\)\), NoteHelp\.due\(/
+            && /if let chain = file\.chain, stands\(NoteHelp\.Standing\(chain, on: paper\.noteID\)\),\s*chain\.ready\(/
+            && /if let morning = file\.morning, morning\.mac == mac, stands\(NoteHelp\.Standing\(morning: morning\.time, on: paper\.noteID\)\),/
+            && /guard var chain = paper\.file\.chain, runs\[paper\.noteID\] == nil, stands\(NoteHelp\.Standing\(chain, on: paper\.noteID\)\) else \{ return \}/
+            && /let watch = paper\.file\.watch, watch\.mac == mac, stands\(NoteHelp\.Standing\(watch, on: noteID\)\),/
+            && @kept == 3 && /process\.arguments = NoteHelp\.mergedArguments\(link\)/) {
+        print "NoteHelpers: the clock acts only on a chain, watcher or morning note this Mac keeps\n"; exit 1 }
+    print "helpers: the clock does only what was set up on this Mac\n";
+' Sources/Petal/NoteHelpers.swift
 # The Shielded boundary is the compiler's: what a helper tells an AI can't be made from a raw string. Each of these
 # must fail to compile (a raw string interpolated into a prompt, put into what a helper is told, or made Shielded
 # outside NoteShield), and the shielded way must compile.

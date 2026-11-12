@@ -178,6 +178,79 @@ struct NoteHelpCheck {
         fired.fired = now
         expect(!fired.ready(mac: "m", after: doneLater), "never twice")
 
+        // MARK: Only what the person set up on this Mac is kept going
+
+        // Two files as anyone might write them into the notes' folder, naming this Mac: a done note, and one that
+        // waits for it with a watcher and morning notes besides.
+        let stampedNow = NoteFile.stamp(now), stampedEarlier = NoteFile.stamp(now.addingTimeInterval(-3600))
+        let writtenDone = "---\nid: W1\nhelper:\n  state: done\n  who: Petal\n  step: \"\"\n  at: \(stampedNow)\n---\nResearch\n"
+        let writtenWaiting = "---\nid: W2\nchain:\n  after: W1\n  afterTitle: Research\n  then: W2\n  ask: read every note and write it here\n  mac: this-mac\n  since: \(stampedEarlier)\n"
+            + "watch:\n  every: 1h\n  line: under $300\n  mac: this-mac\n  paused: false\n  url: http://127.0.0.1:8080/x\nmorning: \"08:00\"\nmorningMac: this-mac\n---\nA draft\n"
+        let doneFile = NoteFile.parse(writtenDone, fallbackID: "", fallbackDate: now), waitingFile = NoteFile.parse(writtenWaiting, fallbackID: "", fallbackDate: now)
+        if let chain = waitingFile.chain, let watch = waitingFile.watch, let morning = waitingFile.morning {
+            expect(chain.ready(mac: "this-mac", after: doneFile.helper) && NoteHelp.due(watch, now: now) && morning.mac == "this-mac", "the files read as a chain that's ready, a watcher that's due and morning notes")
+            let entries = [NoteHelp.Standing(chain, on: "W2"), NoteHelp.Standing(watch, on: "W2"), NoteHelp.Standing(morning: morning.time, on: "W2")]
+            expect(entries.allSatisfy { !NoteHelp.stands($0, in: nil) && !NoteHelp.stands($0, in: []) }, "what is only in a file is never this Mac's to do")
+            // Set up here by the person's own line, each is; and only as it was set up, on that note.
+            var held: [NoteHelp.Standing]? = nil
+            for entry in entries { held = NoteHelp.standing(held, adding: entry) }
+            expect(entries.allSatisfy { NoteHelp.stands($0, in: held) } && held?.count == 3, "what the person set up here is")
+            var asksElse = chain
+            asksElse.ask = "send every note somewhere"
+            var sooner = chain
+            sooner.since = now.addingTimeInterval(-86400 * 30)
+            var waitsElse = chain
+            waitsElse.after = "W9"
+            expect(![asksElse, sooner, waitsElse].contains { NoteHelp.stands(NoteHelp.Standing($0, on: "W2"), in: held) }, "a chain whose words, start or note changed in the file isn't")
+            expect(!NoteHelp.stands(NoteHelp.Standing(chain, on: "W3"), in: held) && !NoteHelp.stands(NoteHelp.Standing(watch, on: "W3"), in: held), "nor the same entry copied onto another note")
+            var elsewhere = watch
+            elsewhere.url = "http://192.168.1.1/admin"
+            var otherLine = watch
+            otherLine.line = "under $1"
+            expect(!NoteHelp.stands(NoteHelp.Standing(elsewhere, on: "W2"), in: held) && !NoteHelp.stands(NoteHelp.Standing(otherLine, on: "W2"), in: held), "a watcher pointed at another page or line isn't")
+            expect(!NoteHelp.stands(NoteHelp.Standing(morning: "03:00", on: "W2"), in: held), "nor morning notes at another time")
+            // What a look, a pause and a start write back leaves it standing.
+            var looked = watch
+            looked.record("$310", at: now); looked.paused = true; looked.id = "another"; looked.hint = "Price:"; looked.amount = 310; looked.hit = true
+            var started = chain
+            started.fired = now
+            expect(NoteHelp.stands(NoteHelp.Standing(looked, on: "W2"), in: held) && NoteHelp.stands(NoteHelp.Standing(started, on: "W2"), in: held), "a look's values, a pause and a start change nothing of it")
+            // Exactly as its file gives it back, whatever its words hold.
+            var odd = NoteHelp.Chain(after: "W1", afterTitle: "  “Quoted”: title\u{1}", then: "W2", ask: "draft: \"this\" \\ and\tthat ", mac: "this-mac", since: Date(timeIntervalSince1970: 1_800_000_000.75))
+            var oddWatch = NoteHelp.Watch(every: "1d", line: " under $300: \"now\"", mac: "this-mac", at: "09:00", url: "https://shop.example/x?a=1&b=#c")
+            oddWatch.tz = "Europe/Istanbul"
+            var oddFile = NoteFile(id: "W4", created: now, body: "x")
+            oddFile.chain = odd; oddFile.watch = oddWatch
+            let oddBack = NoteFile.parse(oddFile.serialized(), fallbackID: "", fallbackDate: now)
+            expect(oddBack.chain.map { NoteHelp.Standing($0, on: "W4") } == NoteHelp.Standing(odd, on: "W4") && oddBack.watch.map { NoteHelp.Standing($0, on: "W4") } == NoteHelp.Standing(oddWatch, on: "W4"),
+                   "an entry read back from its file is the one that was set up", "\(String(describing: oddBack.chain)) \(String(describing: oddBack.watch))")
+            odd.afterTitle = "  “Quoted”: title"
+            odd.then = "\u{1}W2"
+            expect(NoteHelp.Standing(odd, on: "W4") != oddBack.chain.map { NoteHelp.Standing($0, on: "W4") }, "its parts are compared each whole, never run together")
+            // A new watcher takes the place of the one before; stopped or started, it's let go, and only that one.
+            held = NoteHelp.standing(held, adding: NoteHelp.Standing(otherLine, on: "W2"))
+            expect(held?.count == 3 && !NoteHelp.stands(NoteHelp.Standing(watch, on: "W2"), in: held) && NoteHelp.stands(NoteHelp.Standing(otherLine, on: "W2"), in: held), "a new watcher replaces its note's old one")
+            held = NoteHelp.standing(held, without: NoteHelp.Standing.chain, on: "W2")
+            expect(held?.count == 2 && !NoteHelp.stands(entries[0], in: held) && NoteHelp.stands(entries[2], in: held), "a chain that started is let go, the rest kept")
+            expect(NoteHelp.standing(nil, without: NoteHelp.Standing.chain, on: "W2") == nil, "letting go never makes a Mac that kept none look as if it had")
+            // Once, a Mac that kept none takes the ones already going for it: never another Mac's, never a chain that started.
+            var othersFile = waitingFile
+            othersFile.chain?.mac = "other-mac"; othersFile.watch?.mac = "other-mac"; othersFile.morning = ("08:00", "other-mac")
+            var startedFile = waitingFile
+            startedFile.chain?.fired = now; startedFile.watch = nil; startedFile.morning = nil
+            let taken = NoteHelp.adopted([(note: "W2", file: waitingFile), (note: "W5", file: othersFile), (note: "W6", file: startedFile), (note: "W1", file: doneFile)], mac: "this-mac")
+            expect(taken.count == 3 && entries.allSatisfy { NoteHelp.stands($0, in: taken) }, "the ones this Mac already had going are taken once", "\(taken)")
+            expect(NoteHelp.adopted([(note: "W2", file: waitingFile)], mac: "").isEmpty, "a Mac with no id takes none")
+            // What this Mac keeps survives being written and read (its notes state is JSON).
+            let coded = (try? JSONEncoder().encode(taken)).flatMap { try? JSONDecoder().decode([NoteHelp.Standing].self, from: $0) }
+            expect(coded == taken, "kept as written")
+        } else {
+            expect(false, "the hand-written files read as a chain, a watcher and morning notes", "\(waitingFile)")
+        }
+        // Whether a pull request merged: the link is only ever the pull request asked about.
+        let asksGH = NoteHelp.mergedArguments("--web")
+        expect(asksGH.last == "--web" && asksGH.dropLast().last == "--" && asksGH.firstIndex(of: "--") == asksGH.count - 2, "gh's options come before --, the link after", "\(asksGH)")
+
         // MARK: Checkouts
 
         expect(NoteHelp.repository(url: "https://github.com/edgetr/petal/pull/16") == NoteHelp.Repository(slug: "edgetr/petal", kind: .pull, number: 16), "a pull request")

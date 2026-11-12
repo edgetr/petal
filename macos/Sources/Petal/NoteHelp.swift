@@ -613,6 +613,69 @@ enum NoteHelp {
         return false
     }
 
+    /// What asks `gh` whether a pull request merged: its options first, then `--`, then the link, so a link is only
+    /// ever read as the pull request to look at, whatever it says.
+    static func mergedArguments(_ link: String) -> [String] { ["gh", "pr", "view", "--json", "state", "-q", ".state", "--", link] }
+
+    // MARK: What this Mac was asked to keep going
+
+    /// A chain, a watcher or a morning note as this Mac keeps it for itself (`NoteLocal.standing`, in Application
+    /// Support, never synced): written only when the person's own line set one up here, with the note it's on and
+    /// its words as they were then. The clock acts on what a note's file says only while this Mac holds exactly that
+    /// (`NoteHelp.stands`): an entry that is only in a file (synced, imported, written by hand or by a tool), or
+    /// whose words aren't the ones the person set up, is left in its file as it is and nothing is done for it. The
+    /// `mac` in a file says where an entry runs; it never starts one.
+    struct Standing: Codable, Equatable, Sendable {
+        static let chain = "chain", watch = "watch", morning = "morning"
+        var kind: String
+        var note: String
+        /// Everything of the entry that says what is done, where and when (never what a look or a start writes back),
+        /// each part whole.
+        var mark: [String]
+
+        init(kind: String, note: String, mark: [String]) { self.kind = kind; self.note = note; self.mark = mark }
+
+        /// A chain on its note: what it waits for, what it asks and since when (`fired` is its start's to write).
+        init(_ chain: Chain, on note: String) {
+            self.init(kind: Self.chain, note: note, mark: [chain.after, chain.afterTitle, chain.then, chain.ask, NoteFile.stamp(chain.since)])
+        }
+
+        /// A watcher on its note: its page, its line and its clock (its values, `paused` and `id` change as it runs).
+        init(_ watch: Watch, on note: String) {
+            self.init(kind: Self.watch, note: note, mark: [watch.url, watch.line, watch.every, watch.at, watch.tz])
+        }
+
+        /// A notebook's morning note, on its cover: its time.
+        init(morning time: String, on cover: String) { self.init(kind: Self.morning, note: cover, mark: [time]) }
+    }
+
+    /// Whether this Mac holds `entry` just as a note's file says it now. Nothing held yet (`nil`): nothing stands.
+    static func stands(_ entry: Standing, in held: [Standing]?) -> Bool { held?.contains(entry) == true }
+
+    /// `held` with `entry` as its note's one of that kind (a new watcher takes the place of the one before).
+    static func standing(_ held: [Standing]?, adding entry: Standing) -> [Standing] {
+        (held ?? []).filter { $0.kind != entry.kind || $0.note != entry.note } + [entry]
+    }
+
+    /// `held` without that note's one of that kind (a chain that started, a watcher or morning notes stopped).
+    static func standing(_ held: [Standing]?, without kind: String, on note: String) -> [Standing]? {
+        held?.filter { $0.kind != kind || $0.note != note }
+    }
+
+    /// Once, for a Mac that kept none yet (a Petal from before this was kept): the chains not yet started, the
+    /// watchers and the morning notes already in the notes' folder that name this Mac go on as they were. From then
+    /// on only the person's own line adds one.
+    static func adopted(_ notes: [(note: String, file: NoteFile)], mac: String) -> [Standing] {
+        guard !mac.isEmpty else { return [] }
+        var held: [Standing] = []
+        for (note, file) in notes {
+            if let chain = file.chain, chain.mac == mac, chain.fired == nil { held = standing(held, adding: Standing(chain, on: note)) }
+            if let watch = file.watch, watch.mac == mac { held = standing(held, adding: Standing(watch, on: note)) }
+            if let morning = file.morning, morning.mac == mac { held = standing(held, adding: Standing(morning: morning.time, on: note)) }
+        }
+        return held
+    }
+
     // MARK: Mentions and the words they bind
 
     /// What one @ or understood word bound to, for its chip: `@Petal` (no chip), a note, a notebook, a time, a
