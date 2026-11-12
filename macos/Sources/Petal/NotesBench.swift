@@ -410,6 +410,26 @@ enum NotesBench {
                 moves.append(WindowBench.ms(relaid, WindowBench.now()))
             }
             row("  laid out again as the window moves", median(moves), "median of \(moves.count) moves; the slowest \(f(moves.max() ?? 0)) ms")
+            // Two windows with 15 notes each, coming forward in turn (as switching between them does): each one's tabs
+            // laid out and drawn, and how many tab panels were made for them in all (each panel a window of its own).
+            let firstKeys = Array(keysOnWindow.prefix(15)), secondKeys = Array(keysOnWindow.suffix(15))
+            let other = NoteScene(mac: app.paper.local.mac, app: "com.example.editor", pid: 1, window: 8, title: "Another made-up window")
+            // (Held here, so a panel let go can't hand its address to a new one and be counted once for two.)
+            var panelsSeen: [ObjectIdentifier: NSPanel] = [:]
+            for tab in app.paper.benchTabs { panelsSeen[ObjectIdentifier(tab)] = tab }
+            var turns: [Double] = []
+            for turn in 0..<20 {
+                let keys = turn % 2 == 0 ? secondKeys : firstKeys
+                let shown = WindowBench.now()
+                app.paper.previewWindow(turn % 2 == 0 ? other : scene, frame: CGRect(x: 200, y: 120, width: 1100, height: 760),
+                                        here: Dictionary(uniqueKeysWithValues: keys.map { ($0, 0) }))
+                app.paper.layout()
+                draw()
+                turns.append(WindowBench.ms(shown, WindowBench.now()))
+                for tab in app.paper.benchTabs { panelsSeen[ObjectIdentifier(tab)] = tab }
+            }
+            row("  switching between two windows' tabs", median(turns),
+                "median of \(turns.count) switches; the slowest \(f(turns.max() ?? 0)) ms; \(panelsSeen.count) tab panels made in all")
             app.paper.previewWindow(nil, frame: nil, here: [:])
             app.paper.layout()
 
