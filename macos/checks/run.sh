@@ -78,6 +78,10 @@ grep -q 'case .send?: return copyRefusal(map, element, sending: true)' Sources/P
     && grep -q 'let shown = Assist.shownText(text, limit: .max)' Sources/Petal/TextServices.swift \
     && ! grep -q 'app.claude.quote(text, ' Sources/Petal/TextServices.swift \
     || { echo "petal_act: what hands the selection to another app is checked as a copy; the text Services quote no vault secret"; exit 1; }
+# petal_windows finds a window by its id or by words of the title it told, never by its own title's hidden words.
+if grep -n '\$0\.title\.localizedCaseInsensitiveContains(wanted)' Sources/Petal/Assist.swift; then
+    echo "petal_windows: a window is found only by the title as it was told"; exit 1
+fi
 echo "menus: titles told redacted; handing the selection on checked as a copy"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
 "$out/notes"

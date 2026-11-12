@@ -974,7 +974,11 @@ final class Assist {
                             return item
                         }])
                     }
-                    let window = found.first { $0.id == wanted } ?? found.first { !wanted.isEmpty && $0.title.localizedCaseInsensitiveContains(wanted) }
+                    // Found by its id, or by words of its title as the list told it (never its own title's hidden
+                    // words, nor a private app's title, which the list leaves empty).
+                    let hidden = self.privatePIDs
+                    let window = found.first { $0.id == wanted }
+                        ?? found.first { !wanted.isEmpty && !hidden.contains($0.pid) && (titles[$0.id] ?? "").localizedCaseInsensitiveContains(wanted) }
                         ?? (wanted.isEmpty ? found.first { !$0.minimized } : nil)
                     guard let window else { return fail("No such window; list them first.") }
                     // Nothing on a run's own display comes forward: the person can't see it there.
