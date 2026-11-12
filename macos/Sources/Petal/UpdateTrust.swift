@@ -78,6 +78,14 @@ enum UpdateTrust {
         newer(version, than: running) && release(app, is: version, as: requirement)
     }
 
+    /// Puts a checked update (`app`) in place of the Petal at `place`, then looks at what is there now: true only
+    /// when the bundle in place is itself what an update may install (`update`). What was checked a moment before,
+    /// in the folder it was unpacked into, isn't taken for what was put in place.
+    static func install(_ app: URL, in place: URL, is version: String, over running: String, as requirement: String = maker) throws -> Bool {
+        _ = try FileManager.default.replaceItemAt(place, withItemAt: app)
+        return update(place, is: version, over: running, as: requirement)
+    }
+
     /// The app at `app` is validly signed, nothing in it changed since, and its signature meets `requirement`.
     static func signed(_ app: URL, as requirement: String = maker) -> Bool {
         var wanted: SecRequirement?

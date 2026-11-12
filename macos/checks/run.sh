@@ -766,6 +766,12 @@ maker=$(sed -n 's/^    static let maker = #"\(.*\)"#$/\1/p' Sources/Petal/Update
 grep -qF "MAKER='$maker'" ../get.sh || { echo "update trust: get.sh doesn't check the same signature as UpdateTrust.swift"; exit 1; }
 grep -qF "MAKER: '$maker'" ../.github/workflows/release-macos.yml || { echo "update trust: the release workflow doesn't check the same signature as UpdateTrust.swift"; exit 1; }
 echo "update trust: the app, get.sh and the release workflow ask for the same signature"
+# The updater puts a checked update in place only through UpdateTrust.install, which looks at the bundle in place
+# afterwards (the check above runs it on bundles of its own): never a bare move of what was checked a moment before.
+n=$(grep -c 'replaceItemAt' Sources/Petal/Updater.swift || true)
+grep -q 'guard try UpdateTrust\.install(app, in: bundle, is: release\.version, over: running) else' Sources/Petal/Updater.swift && [ "$n" = 0 ] \
+    || { echo "update trust: the updater puts an update in place without looking at it there"; exit 1; }
+echo "update trust: an update is looked at again once it's in place"
 # An update rebuilt with the person's own changes to Petal's code takes its source from the release Petal checked:
 # Personal.update asks the updater for the commit that release's own Petal.app says (Updater.source, which checks the
 # download as an installed update is and reads the commit through UpdateTrust.source) and hands petal-personal that

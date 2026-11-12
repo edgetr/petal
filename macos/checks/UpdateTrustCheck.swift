@@ -153,6 +153,36 @@ struct UpdateTrustCheck {
         let unsignedBuild = bundle("UnsignedBuild", in: folder, identifier: nil, version: "2.1.4", commit: sha)
         expect(UpdateTrust.source(of: unsignedBuild, is: "2.1.4", over: "2.1.3", as: asked) == nil, "a bundle that was never signed gives none")
 
+        // Put in place, then looked at where it is: the bundle that ends up there is the one that counts.
+        let spot = folder.appending(path: "Applications")
+        try? FileManager.default.createDirectory(at: spot, withIntermediateDirectories: true)
+        func inPlace(_ name: String) -> URL {
+            let from = bundle(name, in: folder, identifier: "check.petal.ours", version: "2.1.3")
+            let to = spot.appending(path: "\(name).app")
+            try? FileManager.default.moveItem(at: from, to: to)
+            return to
+        }
+        let installed = inPlace("Installed")
+        // As a Petal that has been on the Mac for a while: macOS's own marks on the bundle itself.
+        run("/usr/bin/xattr", ["-w", "com.apple.quarantine", "0081;00000000;Check;", installed.path])
+        run("/usr/bin/xattr", ["-wx", "com.apple.FinderInfo", "0000000000000000040000000000000000000000000000000000000000000000", installed.path])
+        run("/usr/bin/xattr", ["-w", "com.apple.metadata:_kMDItemUserTags", "check", installed.path])
+        let next = bundle("Next", in: folder, identifier: "check.petal.ours", version: "2.1.4")
+        expect((try? UpdateTrust.install(next, in: installed, is: "2.1.4", over: "2.1.3", as: asked)) == true, "a checked update put in place is still what was checked")
+        expect(UpdateTrust.version(of: installed) == "2.1.4" && !FileManager.default.fileExists(atPath: next.path), "and it is where the old one was")
+        // Changed between the check and the move: what's in place isn't what was checked, and that's said.
+        let swapped = inPlace("Swapped")
+        let late = bundle("Late", in: folder, identifier: "check.petal.ours", version: "2.1.4")
+        expect(UpdateTrust.update(late, is: "2.1.4", over: "2.1.3", as: asked), "the update is fine when it's checked")
+        try? Data("changed since\n".utf8).write(to: late.appending(path: "Contents/Resources/words.txt"))
+        expect((try? UpdateTrust.install(late, in: swapped, is: "2.1.4", over: "2.1.3", as: asked)) == false, "an update changed after its check isn't taken for the one checked")
+        let added2 = inPlace("Slipped")
+        let extra = bundle("Extra", in: folder, identifier: "check.petal.ours", version: "2.1.4")
+        try? Data("slipped in\n".utf8).write(to: extra.appending(path: "Contents/Resources/extra.txt"))
+        expect((try? UpdateTrust.install(extra, in: added2, is: "2.1.4", over: "2.1.3", as: asked)) == false, "nor one with a file added after its check")
+        expect((try? UpdateTrust.install(folder.appending(path: "Missing.app"), in: installed, is: "2.1.5", over: "2.1.4", as: asked)) == nil
+               && UpdateTrust.version(of: installed) == "2.1.4", "an update that isn't there throws, and the Petal in place stays")
+
         if failures > 0 { print("\(failures) update trust check(s) failed"); exit(1) }
         print("update trust: all checks passed")
     }

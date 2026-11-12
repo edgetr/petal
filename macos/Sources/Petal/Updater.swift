@@ -103,7 +103,10 @@ final class Updater {
 
     nonisolated private static func swap(in file: URL, release: Release, over bundle: URL, running: String) throws {
         try checked(file, release: release, running: running) { app in
-            _ = try FileManager.default.replaceItemAt(bundle, withItemAt: app)
+            // Checked where it was unpacked; what's in place now is looked at once more.
+            guard try UpdateTrust.install(app, in: bundle, is: release.version, over: running) else {
+                throw UpdateError("what was put in place isn't the Petal \(release.version) that was checked. Check for updates again before restarting Petal")
+            }
         }
     }
 
