@@ -63,7 +63,8 @@ Use, in this order:
    Where you need real keys in an app the user is using right now, Petal waits for them to leave it first.
    A browser of your own (`petal_browser`, with `runDisplays` on): for web work in a run, never the user's own
    browser. Petal starts a separate copy of a browser they have installed (Chrome, Edge, Brave, Vivaldi or Helium;
-   `runBrowser` picks) with a fresh profile, signed in to nothing, on your display, and drives it directly: no
+   `runBrowser` picks; never the one their links open in, so with only that one installed there is none and Petal
+   says so) with a fresh profile, signed in to nothing, on your display, and drives it directly: no
    pointer, no keyboard, nothing in front. `open` an address (https, or http on this Mac), `read` the page as text
    with an id (b12) on every link, button, field, select and checkbox, then `click`, `type`, `select`, `check`,
    `key`, `scroll` and `wait` by id; `tabs`, `tab`, `close_tab`, `back`, `forward`, `reload`. After anything that

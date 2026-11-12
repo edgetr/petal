@@ -77,6 +77,17 @@ enum RunDisplayRules {
         return .go
     }
 
+    /// The process an open for a run's display started, for that run to put away when it ends; nil where it started
+    /// none. `wasRunning`: the person had the app open before. `answered`: the process macOS says took the open.
+    /// `runs`: that process is a run's own browser (the same app as the person's, as a second process), which is
+    /// its own run's and never another's to quit. `persons`: the person's copies of the app now, for where macOS
+    /// named none.
+    static func started(wasRunning: Bool, answered: Int32?, runs: (Int32) -> Bool, persons: [Int32]) -> Int32? {
+        guard !wasRunning else { return nil }
+        if let answered { return runs(answered) ? nil : answered }
+        return persons.first { !runs($0) }
+    }
+
     // MARK: Where a display goes
 
     /// Two rectangles share a stretch of edge longer than a point: the pointer could cross there.

@@ -736,7 +736,10 @@ final class Assist {
                     // Its asker gone while the app was looked up: nothing opens.
                     guard live() else { return }
                     if let appURL {
-                        NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
+                        let configuration = NSWorkspace.OpenConfiguration()
+                        // A run's own copy of that browser is never the one this opens in (as DockController.launch).
+                        if RunApps.running(bundle: opener.bundle) { configuration.createsNewApplicationInstance = true }
+                        NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: configuration)
                     } else {
                         NSWorkspace.shared.open(url)
                     }

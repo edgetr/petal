@@ -1306,8 +1306,9 @@ final class RunBrowsers {
     }
 
     private var starting: [String: Starting] = [:]
-    /// Which installed browser a run gets (`setting`: `runBrowser`), off the main thread. A check hands in its own.
-    var finder: @Sendable (_ setting: String) -> RunBrowser.Spec? = { RunBrowsers.find(setting: $0) }
+    /// Which installed browser a run gets (`setting`: `runBrowser`), or why none, off the main thread. A check hands
+    /// in its own.
+    var finder: @Sendable (_ setting: String) -> Result<RunBrowser.Spec, RunBrowser.Problem> = { RunBrowsers.find(setting: $0) }
     private var watching: NSObjectProtocol?
     /// The app the person last had in front that isn't a run's browser.
     private var lastFront: pid_t = 0
@@ -1353,19 +1354,25 @@ final class RunBrowsers {
     /// The browser a run gets: installed, one Petal knows, its code signed by its maker (checked here on the app, and
     /// again on the running process whenever the vault asks). Off the main thread: it asks Launch Services and reads
     /// the app's signature.
-    nonisolated static func find(setting: String) -> RunBrowser.Spec? {
+    nonisolated static func find(setting: String) -> Result<RunBrowser.Spec, RunBrowser.Problem> {
         var found: [String: URL] = [:]
         for known in RunBrowserRules.browsers {
             guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: known.bundle), signed(url, by: known) else { continue }
             found[known.bundle] = url
         }
-        guard !found.isEmpty else { return nil }
+        let none = RunBrowser.Problem(RunBrowserRules.none)
+        guard !found.isEmpty else { return .failure(none) }
         let running = Set(NSWorkspace.shared.personsApplications.compactMap(\.bundleIdentifier))
+        // The browser the person's links open in, by macOS's own word, asked now: a run never gets that one.
         let standard = URL(string: "https://example.com").flatMap { NSWorkspace.shared.urlForApplication(toOpen: $0) }.flatMap { Bundle(url: $0)?.bundleIdentifier }
-        guard let pick = RunBrowserRules.pick(installed: Array(found.keys), running: running, standard: standard, setting: setting),
-              let url = found[pick.bundle], let executable = Bundle(url: url)?.executableURL?.path else { return nil }
-        let bundle = pick.bundle
-        return RunBrowser.Spec(bundle: bundle, name: pick.name, executable: executable, verify: { VaultReader.isBrowser(pid: $0, bundle: bundle) })
+        switch RunBrowserRules.choose(installed: Array(found.keys), running: running, standard: standard, setting: setting) {
+        case .none: return .failure(none)
+        case .theirs(let known, let named): return .failure(.init(RunBrowserRules.theirs(known.name, named: named)))
+        case .browser(let pick):
+            guard let url = found[pick.bundle], let executable = Bundle(url: url)?.executableURL?.path else { return .failure(none) }
+            let bundle = pick.bundle
+            return .success(RunBrowser.Spec(bundle: bundle, name: pick.name, executable: executable, verify: { VaultReader.isBrowser(pid: $0, bundle: bundle) }))
+        }
     }
 
     /// The app at `url` is that browser, signed by its maker (its code's signature, not every file in it: the running
@@ -1431,10 +1438,9 @@ final class RunBrowsers {
         DispatchQueue.global(qos: .userInitiated).async {
             var result: Result<RunBrowser, RunBrowser.Problem> = .failure(.init(RunDisplays.Failure.ended.words))
             if !launch.cancelled {
-                if let spec = finder(setting) {
-                    result = RunBrowser.launch(spec: spec, group: group, profile: profile, frame: frame, launch: launch)
-                } else {
-                    result = .failure(.init(RunBrowserRules.none))
+                switch finder(setting) {
+                case .success(let spec): result = RunBrowser.launch(spec: spec, group: group, profile: profile, frame: frame, launch: launch)
+                case .failure(let why): result = .failure(why)
                 }
             }
             let finished = result

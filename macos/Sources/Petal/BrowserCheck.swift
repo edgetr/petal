@@ -499,8 +499,8 @@ private final class BrowserChecker {
         // process of its own (as the browsers people use do), and no maker's signature to check, so the check says
         // it's verified (only here).
         app.runBrowsers.finder = { _ in
-            RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
-                            extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true })
+            .success(RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
+                                     extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true }))
         }
         let profiles = URL(fileURLWithPath: RunBrowsers.root)
 
@@ -993,23 +993,29 @@ private final class BrowserChecker {
             expect(error(off) == RunBrowserRules.off, "and with them off the tool says why (\(error(off)))")
             app.config.set("runDisplays", true)
             // No browser installed: said plainly.
-            app.runBrowsers.finder = { _ in nil }
+            app.runBrowsers.finder = { _ in .failure(.init(RunBrowserRules.none)) }
             let none = browser("open", ["address": base() + "/"], answer: [.once], task: "fourth run")
             expect(error(none) == RunBrowserRules.none, "with no browser installed it says so (\(error(none)))")
             app.displays.ended(caller)
-            return "the run's end and the switch each ended theirs (pids \(pid), \(secondPID)); no profile left; off and no browser say why"
+            // Only the browser the person's links open in: the run gets none, and hears why.
+            let theirs = RunBrowserRules.theirs("Google Chrome", named: false)
+            app.runBrowsers.finder = { _ in .failure(.init(theirs)) }
+            let only = browser("open", ["address": base() + "/"], answer: [.once], task: "fifth run")
+            expect(error(only) == theirs && current == nil && runProcesses().isEmpty, "with only the person's link browser installed it starts none and says so (\(error(only)))")
+            app.displays.ended(caller)
+            return "the run's end and the switch each ended theirs (pids \(pid), \(secondPID)); no profile left; off, no browser and only the person's own say why"
         }
 
         // A browser that starts and never answers (a script that only sleeps), to hold a launch open.
         let slow = root.appending(path: "slow-browser").path
         try? Data("#!/bin/sh\nsleep 40\n".utf8).write(to: URL(fileURLWithPath: slow))
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slow)
-        let slowSpec: @Sendable (String) -> RunBrowser.Spec? = { _ in
-            RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: slow, headless: true, verify: { _ in true })
+        let slowSpec: @Sendable (String) -> Result<RunBrowser.Spec, RunBrowser.Problem> = { _ in
+            .success(RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: slow, headless: true, verify: { _ in true }))
         }
-        let realSpec: @Sendable (String) -> RunBrowser.Spec? = { _ in
-            RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
-                            extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true })
+        let realSpec: @Sendable (String) -> Result<RunBrowser.Spec, RunBrowser.Problem> = { _ in
+            .success(RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
+                                     extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true }))
         }
 
         step("a browser still starting is already a run's, and ends with its run") {
@@ -1174,8 +1180,11 @@ enum BrowserLiveCheck {
 
         // 1. What it needs.
         step(VirtualDisplay.available, "macOS has the classes Petal makes a display with", VirtualDisplay.available ? "" : "missing: " + VirtualDisplay.missing.joined(separator: ", "))
-        let spec = off(30) { RunBrowsers.find(setting: "") } ?? nil
-        step(spec != nil, "a browser Petal can start for a run is installed, signed by its maker", spec.map { "\($0.name), \($0.executable)" } ?? RunBrowserRules.none)
+        let found = off(30) { RunBrowsers.find(setting: "") } ?? .failure(.init(RunBrowserRules.none))
+        let spec = try? found.get()
+        var why = RunBrowserRules.none
+        if case .failure(let problem) = found { why = problem.words }
+        step(spec != nil, "a browser Petal can start for a run is installed, signed by its maker", spec.map { "\($0.name), \($0.executable)" } ?? why)
         let trusted = AXIsProcessTrusted()
         say("Accessibility: \(trusted ? "allowed" : "not allowed (the window in front can't be named; the rest still runs)")")
         let recording = CGPreflightScreenCaptureAccess()

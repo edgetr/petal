@@ -662,6 +662,17 @@ perl -ne '
     END { exit($bad ? 1 : 0) }
 ' Sources/Petal/*.swift
 echo "run browser: the dock, the tools and routines list only the person's own apps"
+# An open through macOS never lands in a run's own browser: wherever Petal opens something in an app it names, for a
+# run's display or the person's screen, a run's copy of that app going means it's opened as a new one; and what an
+# open for a run's display started is asked of the rule, which never gives a run's own browser to another run.
+for file in Dock RunDisplay Assist; do
+    grep -Eq 'if Run(Apps|Browsers)\.running\(bundle: [a-zA-Z.]+\) \{ configuration\.createsNewApplicationInstance = true \}' "Sources/Petal/$file.swift" \
+        || { echo "run browser: $file.swift opens in an app without opening a new copy while a run has its own going"; exit 1; }
+done
+grep -q 'opened.launched = RunDisplayRules.started(' Sources/Petal/RunDisplay.swift \
+    || { echo "run browser: RunDisplays.open doesn't ask RunDisplayRules.started which process it started"; exit 1; }
+grep -q 'personsOnly: true' Sources/Petal/RunDisplay.swift || { echo "run browser: RunDisplays.open may take a run's own browser window for one it made"; exit 1; }
+echo "run browser: an open through macOS never lands in a run's own copy"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift
 "$out/vault"
 swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/AgentAccessCheck.swift
