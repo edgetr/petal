@@ -779,21 +779,27 @@ private final class BrowserChecker {
             expect(error(refused).contains("didn't let") && current?.checkEvaluate("document.getElementById('pass').value") == "", "Don't: nothing filled (\(refused))")
             let allowed = call("petal_vault", ["action": "fill", "item": loginID, "fields": ["username": user, "password": pass]], answer: [.once], asker: agent)
             expect((allowed["filled"] as? [String])?.count == 2, "Allow once: filled, by the vault's own rules for the page (\(allowed))")
-            // Full access and an Always are Petal AI's own. The real Assist.ask, with nothing behind its answer: that
-            // agent is asked all the same, on a card that says who asks, with no Always to keep; Petal's own chat and
-            // a routine's own run go on as they did.
+            // Full access and an Always cover the person's own Claude Code and Codex; any other program is asked every
+            // time. The real Assist.ask, with nothing behind its answer.
             app.config.set("claudeAccess", "full")
             app.config.set("aiAllowed", ["trash"])
             var said: [String: Bool] = [:]
+            app.assist.ask("trash", "Move “keep.txt” to the Trash", wants: "move “keep.txt” to the Trash", owner: caller) { said["agent always"] = $0 }
+            app.assist.ask("quit", "Quit Mail", wants: "quit Mail", owner: caller) { said["agent full"] = $0 }
+            expect(said["agent always"] == true && said["agent full"] == true && app.assist.pending == nil,
+                   "Codex in T3 Code (signed by its maker) goes by an Always and by Full access, as before (\(said))")
+            // The same name asking, now as a program Petal can't verify.
+            let program = AgentAccess.Caller(agent: .unknown, host: nil, project: root.appending(path: "project").path, program: "python3", peerIsPetal: false, pid: 4242)
+            _ = call("petal_memories", [:], asker: program)
             app.assist.ask("trash", "Move “keep.txt” to the Trash", wants: "move “keep.txt” to the Trash", owner: caller) { said["always"] = $0 }
             var shown = app.assist.pending
-            expect(said["always"] == nil && shown?.title == "Codex in T3 Code wants to move “keep.txt” to the Trash" && shown?.every == true && shown?.mark == .codex,
-                   "an Always for it doesn't cover an agent outside Petal: asked, by its name and mark, with no Always (\(shown?.title ?? "no card"))")
+            expect(said["always"] == nil && shown?.title == "An unknown program (python3) wants to move “keep.txt” to the Trash" && shown?.every == true && shown?.mark == .unknown,
+                   "an Always doesn't cover a program Petal can't verify: asked, by its name, with no Always (\(shown?.title ?? "no card"))")
             app.assist.choose(.no, for: shown?.id)
             expect(said["always"] == false, "Don't is Don't")
             app.assist.ask("quit", "Quit Mail", wants: "quit Mail", owner: caller) { said["full"] = $0 }
             shown = app.assist.pending
-            expect(said["full"] == nil && shown?.title == "Codex in T3 Code wants to quit Mail" && shown?.every == true, "nor does Full access (\(shown?.title ?? "no card"))")
+            expect(said["full"] == nil && shown?.title == "An unknown program (python3) wants to quit Mail" && shown?.every == true, "nor does Full access (\(shown?.title ?? "no card"))")
             app.assist.choose(.always, for: shown?.id)
             expect(said["full"] == true && app.config.strings("aiAllowed") == ["trash"], "and nothing it's allowed is kept for anyone else (\(app.config.strings("aiAllowed")))")
             app.assist.ask("quit", "Quit Mail", wants: "quit Mail", owner: app.claude.current.id.uuidString) { said["own"] = $0 }
@@ -814,7 +820,7 @@ private final class BrowserChecker {
             VaultStore.standUnreadable = false
             VaultIndex.changed()
             expect(wait(5) { !VaultIndex.current().unreadable } && error(browser("read")).isEmpty, "readable again, it reads again")
-            return "Codex in T3 Code asked on its own card, Don't and Allow once each did as said, and Full access and an Always didn't answer for it; unreadable, the page stayed untold and untouched"
+            return "Codex in T3 Code asked on its own card, Don't and Allow once each did as said; Full access and an Always answered for it and not for a program Petal can't verify; unreadable, the page stayed untold and untouched"
         }
 
         let agent = AgentAccess.Caller(agent: .codex, host: "T3 Code", project: root.appending(path: "project").path)

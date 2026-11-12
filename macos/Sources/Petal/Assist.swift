@@ -9,9 +9,9 @@ import ScreenCaptureKit
 /// browser's Automation), so the AI never needs them itself.
 ///
 /// Looking is free. Anything that changes something asks first, with a card in the dock's style (Allow once,
-/// Always, Don't), unless the chat has Full access or the person said Always for that kind of thing. Both are Petal
-/// AI's own: an AI session or a program outside Petal is asked every time, on a card that says who it is. Files go
-/// to the Trash, never away for good, and the last batch can be put back.
+/// Always, Don't), unless the chat has Full access or the person said Always for that kind of thing. Both cover Petal
+/// AI and the person's own Claude Code and Codex; any other program is asked every time, on a card that says who it
+/// is. Files go to the Trash, never away for good, and the last batch can be put back.
 ///
 /// It also remembers what the person says to remember and what the AI notices on its own (`aiMemory`).
 @MainActor @Observable
@@ -73,13 +73,15 @@ final class Assist {
     /// `keep`: the label of an Always kept as `kept` says (an agent's grant), shown even when Don't is the default.
     /// `owner`: the chat or AI session asking (Assist.handle's caller), always said: its Stop, next turn or hanging up
     /// answers its card Don't. Only what no chat asked for (a routine's own run) passes nil.
-    /// Full access and Always are Petal AI's: only Petal's own chats and helpers (an owner the panel knows) and a
-    /// routine's own run are ever allowed by them. Anyone else (an AI session or a program outside Petal) gets a card
-    /// every time, with no Always, that says who asks and `wants` (what for: "use Mail") under that agent's mark.
+    /// Full access and Always cover Petal's own chats and helpers (an owner the panel knows), a routine's own run, and
+    /// the person's own Claude Code and Codex outside Petal (signed by their makers), whose cards say who asks and
+    /// `wants` (what for: "use Mail") under that agent's mark. Anyone else (a program, a command, an agent Petal
+    /// can't verify) gets a card every time, with no Always, that says the same.
     func ask(_ kind: String, _ title: String, wants: String? = nil, detail: String = "", always: Bool = false, form: VaultForm? = nil, warn: Bool = false,
              allow: String = "Allow", owner: String?, keep: String? = nil, mark: AgentAccess.Agent? = nil, kept: (() -> Void)? = nil,
              typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
-        let asker = NoteHelp.asker(owner: owner, known: owner.map { app.claude.note(withID: $0) != nil } ?? false)
+        let asker = NoteHelp.asker(owner: owner, known: owner.map { app.claude.note(withID: $0) != nil } ?? false,
+                                   verified: owner.flatMap { outside[$0] }?.agent.verified ?? false)
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
         // An automatic approval (an Always given earlier, or Full access) is registered on the asking helper's run
         // first: taking that Always back cancels every run using it. A run that isn't going on is refused.
@@ -91,10 +93,10 @@ final class Assist {
         formTyped = typed
         keptAlways = keep == nil ? nil : kept
         // Who asks, when it isn't Petal AI: as Petal read it off the socket with this caller's request.
-        let who = asker == .outside ? owner.flatMap { outside[$0] } : nil
+        let who = asker == .outside || asker == .agent ? owner.flatMap { outside[$0] } : nil
         let card = NoteHelp.card(title: title, wants: wants, every: always || warn, asker: asker, label: who?.label)
         let request = Request(kind: kind, title: card.title, detail: detail, every: card.every, owner: owner, form: form, warn: warn,
-                              allow: allow, keep: keep, mark: mark ?? (asker == .outside ? who?.agent ?? .unknown : nil))
+                              allow: allow, keep: keep, mark: mark ?? (asker == .outside || asker == .agent ? who?.agent ?? .unknown : nil))
         pending = request
         answer = done
         // In the chat when it's open and the question is its own (the card shows there); over the dock otherwise

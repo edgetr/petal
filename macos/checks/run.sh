@@ -676,15 +676,16 @@ grep -qF 'AgentCallers.started(process.processIdentifier, for: noteID.uuidString
 if grep -nE 'agent == \.petal|kind: \.petal|pass\(\.petal' Sources/Petal/AgentVault.swift; then echo "agents: petal run must ask for every caller, Petal's own chats too"; exit 1; fi
 if grep -nE 'who\.agent == \.petal' Sources/Petal/App.swift; then echo "agents: a chat's id comes from Petal's record, never from who claims it"; exit 1; fi
 echo "agents: Petal AI is only the tools of an AI Petal started; petal run always asks"
-# Full access and Always are Petal AI's own (NoteHelp.autoGrant, checked above with the helpers): Assist.ask works out
-# who a question is for from its owner, makes the card NoteHelp.card says (who asks, no Always, for anyone outside
-# Petal), and every card a caller outside Petal can bring up says what it wants.
+# Full access and Always cover Petal AI and the person's own Claude Code and Codex (NoteHelp.autoGrant, checked above
+# with the helpers): Assist.ask works out who a question is for from its owner and what Petal read of that caller,
+# makes the card NoteHelp.card says (who asks; no Always for a caller Petal can't verify), and every card a caller
+# outside Petal can bring up says what it wants.
 perl -0777 -ne '
-    unless (/let asker = NoteHelp\.asker\(owner: owner, known: owner\.map \{ app\.claude\.note\(withID: \$0\) != nil \} \?\? false\)/
+    unless (/let asker = NoteHelp\.asker\(owner: owner, known: owner\.map \{ app\.claude\.note\(withID: \$0\) != nil \} \?\? false,\s*verified: owner\.flatMap \{ outside\[\$0\] \}\?\.agent\.verified \?\? false\)/
             && /NoteHelp\.autoGrant\(kind: kind, [^\n]*, asker: asker\)/
             && /let card = NoteHelp\.card\(title: title, wants: wants, every: always \|\| warn, asker: asker, label: who\?\.label\)\s*let request = Request\(kind: kind, title: card\.title, detail: detail, every: card\.every,/) {
         print "Assist.ask: who a question is for decides whether it is asked, and what its card says\n"; exit 1 }
-    print "asking: Full access and Always cover only Petal AI; an outside caller\x27s card says who asks\n";
+    print "asking: Full access and Always cover Petal AI and the person\x27s own verified agents; an outside caller\x27s card says who asks\n";
 ' Sources/Petal/Assist.swift
 perl -ne '
     next if $ARGV =~ m{/(AgentVault|VaultFill|NoteHelpers)\.swift$};   # the vault\x27s cards say who asks themselves; a helper\x27s are its own

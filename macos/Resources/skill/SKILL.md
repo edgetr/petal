@@ -39,7 +39,8 @@ Use, in this order:
    bring it forward (clicking the note in the AI button's preview does), then `petal_ui` again. The
    first use of an app in a reply asks the user; from a session outside Petal's own chat, the first in a task (pass
    the same `task` words with each act; a new task, two quiet minutes or a Stop asks again), on a card that says
-   who you are, whatever the chat's Full access or an earlier Always allows Petal AI. Menus and keys go only to the window `petal_ui` looked at, and an
+   who you are (Full access and an earlier Always cover the user's own Claude Code and Codex; any other program is
+   asked every time). Menus and keys go only to the window `petal_ui` looked at, and an
    act on a window that changed since (another row selected, another title) is refused: call `petal_ui` again.
    Never private apps or password fields; what only a real click could do, ask the user to do. Only the user
    turns `computerUse` on.

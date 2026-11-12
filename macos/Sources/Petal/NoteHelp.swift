@@ -1957,32 +1957,40 @@ extension RunToken {
 
 extension NoteHelp {
     /// Who a question is asked for: one of Petal's own chats or helpers, a routine running by itself (no chat asked),
-    /// or anyone else who reached Petal's tools (an AI session or a program outside Petal).
-    enum Asker: Equatable { case own, routine, outside }
+    /// the person's own Claude Code or Codex outside Petal (signed by its maker: `agent`), or anyone else who reached
+    /// Petal's tools (a program, a command, an agent Petal can't verify: `outside`).
+    enum Asker: Equatable { case own, routine, agent, outside }
 
     /// `owner`: the chat or session a question is for, nil when no chat asked. `known`: it's one of Petal's own chats.
-    static func asker(owner: String?, known: Bool) -> Asker {
+    /// `verified`: an outside caller is Claude Code or Codex signed by its maker (AgentAccess.Agent.verified).
+    static func asker(owner: String?, known: Bool, verified: Bool = false) -> Asker {
         guard owner != nil else { return .routine }
-        return known ? .own : .outside
+        return known ? .own : verified ? .agent : .outside
     }
 
     /// The authorization an automatic approval stands for (registered on the asking run's token before it goes on):
-    /// an Always given earlier, or Full access; nil when the person must be asked. Full access and Always are what the
-    /// person said to Petal AI: anyone outside Petal is asked every time, whatever they are.
+    /// an Always given earlier, or Full access; nil when the person must be asked. Full access and Always cover Petal
+    /// AI and the person's own Claude Code and Codex; any other caller is asked every time, whatever they say.
     static func autoGrant(kind: String, fullAccess: Bool, allowed: [String], asker: Asker) -> String? {
         guard asker != .outside else { return nil }
         if allowed.contains(kind) { return "always:" + kind }
         return fullAccess ? "full-access" : nil
     }
 
-    /// A card for `asker`: whether it offers an Always kept for every chat (never to anyone outside Petal, whose
-    /// Always would go on to cover Petal AI and every other caller), and its title: Petal AI's own, or, for anyone
-    /// outside, who asks (`label`: "Codex in T3 Code", "An unknown program (python3)") and what for (`wants`: "use
-    /// Mail"), where the card says what it wants.
+    /// A card for `asker`: its title, Petal AI's own or, for a caller outside Petal, who asks (`label`: "Codex in T3
+    /// Code", "An unknown program (python3)") and what for (`wants`: "use Mail"), where the card says what it wants;
+    /// and whether it is asked every time with no Always (an Always is kept for every chat, so it's never offered to
+    /// a caller Petal can't verify).
     static func card(title: String, wants: String?, every: Bool, asker: Asker, label: String?) -> (title: String, every: Bool) {
-        guard asker == .outside else { return (title, every) }
-        guard let wants, !wants.isEmpty else { return (title, true) }
-        return ("\(label ?? "Another program") wants to \(wants)", true)
+        switch asker {
+        case .own, .routine: return (title, every)
+        case .agent:
+            guard let wants, !wants.isEmpty, let label else { return (title, every) }
+            return ("\(label) wants to \(wants)", every)
+        case .outside:
+            guard let wants, !wants.isEmpty else { return (title, true) }
+            return ("\(label ?? "Another program") wants to \(wants)", true)
+        }
     }
 
     /// Which checkout a coding helper works in. A checkout named in the person's words is always checked, however
