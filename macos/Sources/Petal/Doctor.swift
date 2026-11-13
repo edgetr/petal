@@ -62,7 +62,7 @@ enum Doctor {
         let dock = Config.parse(folder.appending(path: "dock.json")) ?? [:]
         if let apps = dock["apps"] as? [String] {
             let missing = apps.filter { !Sites.isWeb($0) && NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) == nil }.sorted()
-            note("ok", "apps", "\(apps.count) apps in your dock." + (missing.isEmpty ? "" : " \(missing.count) aren’t installed and are left out."))
+            note("ok", "apps", "\(apps.count) apps in your dock." + (missing.isEmpty ? "" : missing.count == 1 ? " One isn’t installed and is left out." : " \(missing.count) aren’t installed and are left out."))
         } else if FileManager.default.fileExists(atPath: folder.appending(path: "modes.json").path) {
             // Petal for macOS had modes once; opening it moves the default mode's apps into the dock, unless it can't read them.
             note("warn", "apps", "Your dock from when Petal had modes hasn't been moved over. Open Petal; if the dock stays empty, "
