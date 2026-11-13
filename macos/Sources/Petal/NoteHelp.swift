@@ -183,6 +183,13 @@ extension NoteFile {
         set { set("ink", newValue.isEmpty ? nil : .list(newValue.map(\.value))) }
     }
 
+    /// `asks:`: what the person sent to Petal from this note, in the order they sent it (each line Return took out of
+    /// the writing), each with what came back. Shown as bubbles after the writing; never run by being here.
+    var asks: [NoteHelp.Ask] {
+        get { value("asks")?.items.compactMap(NoteHelp.Ask.init) ?? [] }
+        set { set("asks", newValue.isEmpty ? nil : .list(newValue.map(\.value))) }
+    }
+
     var steps: [String] {
         get { value("steps")?.items.compactMap(\.string) ?? [] }
         set { set("steps", newValue.isEmpty ? nil : .list(newValue.suffix(NoteHelp.stepsKept).map { .text($0) })) }
@@ -267,6 +274,109 @@ enum NoteHelp {
             if let at { pairs.append(("at", .text(NoteFile.stamp(at)))) }
             return .map(pairs)
         }
+    }
+
+    /// One request the person sent from a note (`asks:`): Return at the end of their own @Petal line took it out of
+    /// the writing. It keeps the line as they wrote it (`words`), when and on which Mac it was sent, and once it's
+    /// over, how it ended and what came back (`said`: the answer, Petal's own reply, or why it didn't finish), all of
+    /// it shielded before it's kept. Being in a file never runs anything: only Try again, pressed by the person, does.
+    struct Ask: Equatable, Sendable {
+        /// `done`: answered (`said` is the answer); `replied`: Petal answered without a helper ("Remembered …");
+        /// `refused`: Petal didn't send it, and says why; `failed`: it ran and couldn't finish; `stopped`.
+        enum End: String, Sendable { case done, replied, refused, failed, stopped }
+        var id: String
+        var words: String
+        var at: Date? = nil
+        var mac = ""
+        var end: End? = nil
+        var said = ""
+        var who = ""
+        /// Its reason is a key or a sign-in to fix (Settings › Petal AI's button on the bubble).
+        var settings = false
+
+        init(id: String, words: String, at: Date? = nil, mac: String = "") {
+            self.id = id; self.words = words; self.at = at; self.mac = mac
+        }
+
+        init?(_ value: NoteValue) {
+            guard case .map = value, !value.text("id").isEmpty else { return nil }
+            self.init(id: value.text("id"), words: value.text("words"), at: NoteFile.date(value.text("at")), mac: value.text("mac"))
+            end = End(rawValue: value.text("end"))
+            said = value.text("said")
+            who = value.text("who")
+            settings = value.text("settings") == "true"
+        }
+
+        var value: NoteValue {
+            var pairs: [(String, NoteValue)] = [("id", .text(id)), ("words", .text(words))]
+            if let at { pairs.append(("at", .text(NoteFile.stamp(at)))) }
+            if !mac.isEmpty { pairs.append(("mac", .text(mac))) }
+            if let end { pairs.append(("end", .text(end.rawValue))) }
+            if !said.isEmpty { pairs.append(("said", .text(said))) }
+            if !who.isEmpty { pairs.append(("who", .text(who))) }
+            if settings { pairs.append(("settings", .text("true"))) }
+            return .map(pairs)
+        }
+
+        /// Try again and Edit are offered: Petal didn't send it, or it didn't finish (stopped, failed, or never ended:
+        /// a Petal that quit while it worked).
+        var again: Bool { end == nil || end == .refused || end == .failed || end == .stopped }
+
+        /// How a request ended, as a run's result carries it (`Result.asks`): set on the request with this id, if the
+        /// note still has it (one taken back with Edit meanwhile is gone, and nothing is added for it).
+        struct Outcome: Equatable, Sendable {
+            var id: String
+            /// Nil: sent again (Try again), its last ending cleared.
+            var end: End?
+            var said = ""
+            var who = ""
+            var settings = false
+
+            init(id: String, end: End?, said: Shielded = "", who: String = "", settings: Bool = false) {
+                self.init(stored: id, end: end, said: said.text, who: who, settings: settings)
+            }
+
+            /// What a run's ink says (ink is made only from `Shielded`), as its request's ending.
+            init(id: String, end: End, ink: Ink, settings: Bool = false) {
+                self.init(stored: id, end: end, said: ink.text, who: ink.heading, settings: settings || ink.link == NoteHelp.settingsLink)
+            }
+
+            fileprivate init(stored id: String, end: End?, said: String, who: String, settings: Bool) {
+                self.id = id; self.end = end; self.said = said; self.who = who; self.settings = settings
+            }
+
+            init?(_ value: NoteValue) {
+                guard case .map = value, !value.text("id").isEmpty else { return nil }
+                self.init(stored: value.text("id"), end: End(rawValue: value.text("end")), said: value.text("said"), who: value.text("who"),
+                          settings: value.text("settings") == "true")
+            }
+
+            var value: NoteValue {
+                var pairs: [(String, NoteValue)] = [("id", .text(id))]
+                if let end { pairs.append(("end", .text(end.rawValue))) }
+                if !said.isEmpty { pairs.append(("said", .text(said))) }
+                if !who.isEmpty { pairs.append(("who", .text(who))) }
+                if settings { pairs.append(("settings", .text("true"))) }
+                return .map(pairs)
+            }
+
+            func apply(to asks: inout [Ask]) {
+                guard let index = asks.firstIndex(where: { $0.id == id }) else { return }
+                asks[index].end = end
+                asks[index].said = said
+                asks[index].who = who
+                asks[index].settings = settings
+            }
+        }
+    }
+
+    /// What a paper shows under each request, in order: whether its answer is the note's ink as it is now (the last
+    /// one answered, which shows the whole ink: its proof, a second opinion), and whether the note's ink comes
+    /// before every request (ink from before requests were bubbles, or with none answered yet).
+    static func askLayout(_ asks: [Ask], ink: [Ink]) -> (inkFirst: Bool, inkUnder: String?) {
+        guard !ink.isEmpty else { return (false, nil) }
+        guard let last = asks.last(where: { $0.end == .done }) else { return (true, nil) }
+        return (false, last.id)
     }
 
     /// One block of a helper's ink on the note's front: who wrote it, its words, and for a coding helper its proof
@@ -2483,18 +2593,21 @@ extension NoteHelp {
         private(set) var calc: Calc?
         private(set) var task: [TaskItem]?
         private(set) var helper: HelperChange
+        /// How the requests it answered ended (the person's bubbles): set on each one the note still has.
+        private(set) var asks: [Ask.Outcome] = []
 
         /// A primary run's result (a chat helper's, a coding one's, a quick one's).
-        init(answer ink: Ink?, steps: [Shielded]? = nil, calc: Calc? = nil, task: [TaskItem]? = nil, helper: HelperChange) {
+        init(answer ink: Ink?, steps: [Shielded]? = nil, calc: Calc? = nil, task: [TaskItem]? = nil, helper: HelperChange, asks: [Ask.Outcome] = []) {
             self.ink = ink
             self.steps = steps.map { $0.map(\.text) }
             self.calc = calc
             self.task = task
             self.helper = helper
+            self.asks = asks
         }
 
         /// A reviewer's result: only its own opinion, with the answer it reviewed (`reviewed`: that primary ink's hash).
-        init(opinion ink: Ink?, reviewed: String, steps: [Shielded]? = nil, helper: HelperChange) {
+        init(opinion ink: Ink?, reviewed: String, steps: [Shielded]? = nil, helper: HelperChange, asks: [Ask.Outcome] = []) {
             if var ink {
                 ink.opinion = true
                 ink.reviewed = reviewed
@@ -2502,6 +2615,7 @@ extension NoteHelp {
                 said = (steps ?? []).map { "\(ink.who): \($0.text)" }
             }
             self.helper = helper
+            self.asks = asks
         }
 
         /// On the note as it is now, all of it in one change.
@@ -2513,6 +2627,11 @@ extension NoteHelp {
             if let calc { file.calc = calc }
             if let task { file.task = task }
             helper.apply(to: &file)
+            if !asks.isEmpty {
+                var all = file.asks
+                for outcome in asks { outcome.apply(to: &all) }
+                file.asks = all
+            }
         }
 
         /// This, then `later`, as one result: what landing each in turn would leave (two held for one note are one entry).
@@ -2525,6 +2644,7 @@ extension NoteHelp {
             if let calc = later.calc { all.calc = calc }
             if let task = later.task { all.task = task }
             if later.helper != .keep { all.helper = later.helper }
+            for outcome in later.asks { all.asks = all.asks.filter { $0.id != outcome.id } + [outcome] }
             return all
         }
 
@@ -2537,6 +2657,7 @@ extension NoteHelp {
             if !said.isEmpty { file.set("said", .list(said.map { .text($0) })) }
             file.calc = calc
             if let task { file.task = task }
+            if !asks.isEmpty { file.set("askEnds", .list(asks.map(\.value))) }
             switch helper {
             case .keep: file.set("result", .text("keep"))
             case .clear: file.set("result", .text("clear"))
@@ -2555,6 +2676,7 @@ extension NoteHelp {
             said = file.value("said")?.items.compactMap(\.string) ?? []
             calc = file.calc
             task = file.task.isEmpty ? nil : file.task
+            asks = file.value("askEnds")?.items.compactMap(Ask.Outcome.init) ?? []
             switch mode {
             case "keep": helper = .keep
             case "clear": helper = .clear

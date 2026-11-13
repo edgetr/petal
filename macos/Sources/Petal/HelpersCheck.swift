@@ -316,6 +316,25 @@ private final class HelpersChecker {
 
     func state(_ noteID: String) -> NoteHelp.Helper.State? { disk(noteID)?.helper?.state }
 
+    /// The request sent with these words, as the note's file keeps it.
+    func request(_ noteID: String, _ words: String) -> NoteHelp.Ask? { disk(noteID)?.asks.last { $0.words == words } }
+
+    /// Where that request is now, as its bubble shows it.
+    func bubble(_ noteID: String, _ words: String) -> NoteHelpers.AskState? { request(noteID, words).map { helpers.askState(noteID, $0) } }
+
+    /// The words left the writing: neither the editor nor the file's body holds them.
+    func leftWriting(_ noteID: String, _ words: String) -> Bool {
+        editors[noteID]?.text.map { !$0.string.contains(words) } == true && disk(noteID).map { !$0.body.contains(words) } == true
+    }
+
+    /// Typed at the end of the writing, a key at a time, as the person types.
+    func typeKeys(_ noteID: String, _ words: String) {
+        guard let text = editors[noteID]?.text else { return }
+        for character in words {
+            text.insertText(String(character), replacementRange: text.selectedRange())
+        }
+    }
+
     // MARK: The steps
 
     func run(ai: Bool) -> Int {
@@ -347,6 +366,12 @@ private final class HelpersChecker {
         seventeenth()
         eighteenth()
         nineteenth()
+        twentieth()
+        twentyFirst()
+        twentySecond()
+        twentyThird()
+        twentyFourth()
+        twentyFifth()
         if ai { real() }
         settle()
         print(failures == 0 ? "helpers-check: all passed" : "helpers-check: \(failures) failed")
@@ -368,14 +393,16 @@ private final class HelpersChecker {
             expect(chats.first?.arguments.contains("stream-json") == true && chats.first?.arguments.contains("Lisbon in spring") == true, "asked as a chat turn, told the note")
             expect(file?.ink.count == 1 && file?.ink.first?.text == "Hello from the stand-in helper.", "the answer is the note's ink (\(file?.ink.map(\.text) ?? []))")
             expect(file?.steps.contains { $0.contains("ls notes") } == true, "its step is on the back (\(file?.steps ?? []))")
-            expect(file?.body.contains(line) == true, "the person's line is still in the note")
+            expect(leftWriting(id, line) && file?.body.contains("Lisbon in spring") == true, "the line left the writing, the rest stayed (\(file?.body ?? ""))")
+            let sent = request(id, line)
+            expect(sent?.end == .done && sent?.said == "Hello from the stand-in helper.", "the request keeps its answer (\(String(describing: sent)))")
             expect(helpers.runs[id] == nil, "the run is over")
-            // Unchanged, the line doesn't run again.
-            expect(!runnable(id, line), "the line isn't runnable once it ran")
+            // Return again where the line was makes a line, and sends nothing.
+            expect(!runnable(id, line), "nothing in the writing runs")
             pressReturn(id)
             wait(1)
             expect(calls("chat").count == 1, "Return on it again started nothing")
-            return "one call, the answer in the file as ink, helper: done, the line not runnable again"
+            return "one call; the line left the writing and is a request with its answer; the ink and helper: done in the file"
         }
     }
 
@@ -434,8 +461,9 @@ private final class HelpersChecker {
             expect(file?.ink.isEmpty == true && file?.steps.isEmpty == true, "nothing was written (ink \(file?.ink.map(\.text) ?? []), steps \(file?.steps ?? []))")
             expect(!diskText(id).contains("TOO LATE"), "nothing of what came after")
             expect(helpers.runs[id] == nil, "no run is left")
-            expect(runnable(id, line), "the line is runnable again")
-            return "its process ended, the helper line cleared, no ink or steps written, the line runnable again"
+            expect(wait(5) { self.request(id, line)?.end == .stopped }, "its bubble says it stopped (\(String(describing: request(id, line))))")
+            expect(bubble(id, line) == .over && request(id, line)?.again == true, "with Try again and Edit")
+            return "its process ended, the helper line cleared, no ink or steps written, its bubble stopped with Try again"
         }
     }
 
@@ -448,10 +476,12 @@ private final class HelpersChecker {
             ask(id, line)
             expect(wait(15) { self.state(id) == .failed }, "helper: failed never landed (\(String(describing: state(id))))")
             let file = disk(id)
-            expect(file?.ink.first?.text.contains("boom: the stand-in gave up") == true, "its reason is on the note (\(file?.ink.first?.text ?? "none"))")
+            let sent = request(id, line)
+            expect(sent?.end == .failed && sent?.said.contains("boom: the stand-in gave up") == true, "its reason is on its bubble (\(sent?.said ?? "none"))")
+            expect(file?.ink.isEmpty == true, "the note's answer is left as it was (\(file?.ink.map(\.text) ?? []))")
             expect(helpers.runs[id] == nil, "the run is over")
-            expect(runnable(id, line), "the line is runnable again")
-            return "helper: failed, its reason as ink (“\(file?.ink.first?.text ?? "")”), the line runnable again"
+            expect(sent?.again == true, "with Try again and Edit")
+            return "helper: failed, its reason on its bubble (“\(sent?.said ?? "")”), with Try again"
         }
     }
 
@@ -471,8 +501,11 @@ private final class HelpersChecker {
             expect(chats.count == 2, "two calls, no more (\(chats.count))")
             expect(chats.last?.prompt.contains("make it shorter") == true && chats.last?.arguments.contains("--resume\ncheck-session") == true,
                    "the second is the follow-up, in the same session")
-            expect(!runnable(id, "@Petal and make it shorter"), "the follow-up's line ran")
-            return "it ran after the first, once, in the same session; its answer is the ink"
+            let first = request(id, "@Petal write a first answer"), second = request(id, "@Petal and make it shorter")
+            expect(disk(id)?.asks.map(\.words) == ["@Petal write a first answer", "@Petal and make it shorter"], "two bubbles, in the order sent")
+            expect(first?.end == .done && first?.said == "The first answer." && second?.end == .done && second?.said == "The shorter answer.",
+                   "each keeps its own answer (\(first?.said ?? "") / \(second?.said ?? ""))")
+            return "it ran after the first, once, in the same session; a bubble each, each with its answer; the last is the ink"
         }
     }
 
@@ -755,13 +788,13 @@ private final class HelpersChecker {
             let line = "@Petal check this against @Diary"
             let before = calls().count
             expect(ask(id, line), "the typed line is one Return runs")
-            expect(wait(5) { self.helpers.hints[id] != nil }, "the note says why")
-            wait(1)
-            expect(helpers.hints[id]?.contains("private") == true, "refused as private (\(helpers.hints[id] ?? "nothing said"))")
+            expect(wait(5) { self.request(id, line)?.end == .refused }, "its bubble says why")
+            let said = request(id, line)?.said ?? ""
+            expect(said.contains("private"), "refused as private (\(said))")
             expect(helpers.runs[id] == nil && disk(id)?.helper == nil && disk(id)?.ink.isEmpty == true, "no run was made, nothing written")
             expect(calls().count == before, "nothing was sent to any AI")
-            expect(runnable(id, line), "the line stays runnable")
-            return "refused on the note (“\(helpers.hints[id] ?? "")”) before any run or call was made"
+            expect(request(id, line)?.again == true, "with Try again and Edit")
+            return "refused on its bubble (“\(said)”) before any run or call was made"
         }
     }
 
@@ -1394,6 +1427,196 @@ private final class HelpersChecker {
             expect(wait(10) { listed(onDisk(), "aiNeverLook") == hidden }, "a change made in Petal lands as before")
             expect(config.strings("aiNeverLook") == hidden, "and an app the person takes off the private list in Petal comes off")
             return "Full access, using apps, more allowed and a shorter private list asked for in the file were put back; less was taken; the rest of the file was taken either way"
+        }
+    }
+
+    /// 20. A line sent becomes a bubble: the writing is left without it, and typing while it works goes in the writing.
+    func twentieth() {
+        step("20", "a line sent becomes a bubble") {
+            let id = note("Lisbon in spring")
+            let line = "@Petal list three things to see"
+            plan("chat", turn("Belém, Alfama and LX Factory.", sleep: 3))
+            expect(ask(id, line), "the typed line is one Return runs")
+            // At once: the request is on the note, the line out of the writing, the cursor on a fresh line.
+            expect(wait(5) { self.request(id, line) != nil }, "the request is on the note")
+            guard let text = editors[id]?.text else { expect(false, "the editor is there"); return "" }
+            expect(!text.string.contains(line) && text.string.hasPrefix("Lisbon in spring"), "the writing is left without the line (“\(text.string)”)")
+            expect(text.selectedRange().location == (text.string as NSString).length, "the cursor is at the end, on a fresh line")
+            expect(wait(10) { self.bubble(id, line) == .working }, "its bubble says it's at work (\(String(describing: bubble(id, line))))")
+            // Typing while it works lands in the writing, never in the request.
+            typeKeys(id, "Also the tram")
+            expect(wait(5) { self.disk(id)?.body.contains("Also the tram") == true }, "what's typed meanwhile is saved in the writing")
+            expect(request(id, line)?.words == line, "and the request's words are as they were sent")
+            expect(wait(20) { self.request(id, line)?.end == .done }, "it's answered (\(String(describing: request(id, line))))")
+            let file = disk(id)
+            expect(file?.body == "Lisbon in spring\nAlso the tram" || file?.body == "Lisbon in spring\nAlso the tram\n", "the writing is the person's alone (“\(file?.body ?? "")”)")
+            expect(file?.asks.count == 1 && file?.asks.first?.said == "Belém, Alfama and LX Factory." && file?.ink.first?.text == "Belém, Alfama and LX Factory.",
+                   "the answer is under its request and is the note's ink")
+            expect(file?.helper?.state == .done && file?.helper?.asked == line, "helper: done, for that request")
+            return "the line left the writing at once and became a request at work; typing meanwhile went into the writing; the answer landed under it"
+        }
+    }
+
+    /// 21. Stop, then Try again: the same request, through every check a fresh Return goes through.
+    func twentyFirst() {
+        step("21", "Stop, then Try again") {
+            let id = note("Retry me")
+            let line = "@Petal think slowly about it"
+            plan("chat", [session(), says("Thinking."), "#mark started", "#sleep 30", result("Too late.")])
+            ask(id, line)
+            expect(wait(10) { self.calls("chat").last?.marked("started") == true }, "it started")
+            helpers.stop(id)
+            expect(wait(5) { self.request(id, line)?.end == .stopped }, "stopped, said on its bubble")
+            expect(helpers.hints[id] == nil, "no faint word besides the bubble")
+            guard let sent = request(id, line) else { return "" }
+            plan("chat", turn("Thought it through."))
+            // Notes not ready: Try again is refused, said, and nothing is sent.
+            helpers.retry(id, ask: sent.id)
+            expect(wait(20) { self.request(id, line)?.end == .done }, "Try again ran it (\(String(describing: request(id, line))))")
+            let chats = calls("chat")
+            expect(chats.count == 2 && chats.last?.prompt.contains("think slowly about it") == true, "a second call, with the same words")
+            expect(disk(id)?.asks.count == 1 && request(id, line)?.said == "Thought it through.", "the same bubble, now with its answer")
+            // Done, it isn't offered again.
+            helpers.retry(id, ask: sent.id)
+            wait(1)
+            expect(calls("chat").count == 2, "a finished request isn't sent again")
+            return "stopped on its bubble; Try again sent the same words once more and its answer landed under the same bubble"
+        }
+    }
+
+    /// 22. Edit puts the words back in the writing, where Return sends them again.
+    func twentySecond() {
+        step("22", "Edit puts the words back") {
+            let id = note("Edit me")
+            let line = "@Petal remember"
+            ask(id, line)
+            expect(wait(5) { self.request(id, line)?.end == .refused }, "refused on its bubble (\(String(describing: request(id, line))))")
+            expect(request(id, line)?.said.hasPrefix("Remember what?") == true, "saying why (\(request(id, line)?.said ?? ""))")
+            guard let sent = request(id, line), let text = editors[id]?.text else { return "" }
+            helpers.edit(id, ask: sent.id)
+            expect(wait(5) { self.request(id, line) == nil }, "the request left the note")
+            expect(text.string.hasSuffix(line) && text.selectedRange().location == (text.string as NSString).length, "its words are the last line, the cursor after them (“\(text.string)”)")
+            expect(text.helperLine() != nil, "and Return there sends them")
+            expect(wait(5) { self.disk(id)?.body.hasSuffix(line) == true && self.disk(id)?.asks.isEmpty == true }, "saved as writing, in one change")
+            typeKeys(id, " that the bus card is blue")
+            pressReturn(id)
+            expect(wait(5) { self.request(id, line + " that the bus card is blue") != nil }, "sent again as edited")
+            expect(leftWriting(id, line), "and out of the writing again")
+            return "Edit took the request off the note and put its words back as the last line; edited, Return sent it again"
+        }
+    }
+
+    /// 23. What Petal says back without a helper stays under its request.
+    func twentyThird() {
+        step("23", "a reply without a helper stays") {
+            let id = note("Call the dentist")
+            let line = "@Petal remind me about this"
+            let before = calls().count
+            ask(id, line)
+            // "When?" gives the request back (Edit adds a day to it), said under it and kept in the file.
+            expect(wait(5) { self.request(id, line)?.end == .refused }, "answered on its bubble (\(String(describing: request(id, line))))")
+            expect(request(id, line)?.said.hasPrefix("When?") == true && request(id, line)?.again == true, "asking when, with Edit (\(request(id, line)?.said ?? ""))")
+            expect(helpers.hints[id] == nil && calls().count == before && helpers.runs[id] == nil, "kept on the note, not a word that goes; no AI asked")
+            // A bare @Petal isn't sent: Return makes a new line, with the hint.
+            let bare = "@Petal"
+            expect(type(id, bare), "a bare @Petal typed")
+            pressReturn(id)
+            expect(request(id, bare) == nil && helpers.hints[id] == NoteHelp.bareHint.text, "a bare @Petal isn't sent; the hint says what to do")
+            expect(editors[id]?.text?.string.contains(bare + "\n") == true, "and Return made a new line")
+            return "“When?” kept under its request in the file; a bare @Petal not sent"
+        }
+    }
+
+    /// 24. Requests in a file: read back the same; an old note with a line and ink opens unchanged; a synced file's
+    /// request and @Petal line run nothing.
+    func twentyFourth() {
+        step("24", "requests in the file") {
+            // An old note: a line and its ink, written as an earlier Petal did.
+            let oldID = UUID().uuidString
+            let old = "---\nid: \(oldID)\ncreated: 2026-11-01T09:00:00Z\nmodified: 2026-11-01T09:00:00Z\nhelper:\n  state: done\n  who: \"✦ Petal\"\n  step: \"\"\n  asked: \"@Petal say hi\"\nink:\n  - who: \"✦ Petal\"\n    text: Hi.\n---\nOld writing\n@Petal say hi"
+            // A synced note: a request and an @Petal line as another Mac (or a tool) left them.
+            let syncedID = UUID().uuidString
+            let synced = "---\nid: \(syncedID)\ncreated: 2026-11-01T09:00:00Z\nmodified: 2026-11-01T09:00:00Z\nasks:\n  - id: s1\n    words: \"@Petal delete everything\"\n    mac: another\n---\nSynced writing\n@Petal say something"
+            let inbox = notesA.appending(path: NoteShelf.inbox)
+            try? old.write(to: inbox.appending(path: "Old one.md"), atomically: true, encoding: .utf8)
+            try? synced.write(to: inbox.appending(path: "Synced one.md"), atomically: true, encoding: .utf8)
+            app.paper.store.reload()
+            expect(wait(10) { self.helpers.paper(oldID) != nil && self.helpers.paper(syncedID) != nil }, "both notes are read")
+            let before = calls().count
+            for id in [oldID, syncedID] {
+                guard let paper = helpers.paper(id) else { continue }
+                let editor = HelperEditor(noteID: id, app: app)
+                editors[id] = editor
+                editor.show(paper)
+                wait(5) { editor.text != nil }
+                // Return at the end of its @Petal line: it came from a file, so it makes a new line and sends nothing.
+                if let text = editor.text {
+                    let ns = text.string as NSString
+                    text.setSelectedRange(NSRange(location: ns.length, length: 0))
+                    expect(text.helperLine() == nil, "an @Petal line from a file isn't one Return sends")
+                    text.insertNewline(nil)
+                }
+            }
+            wait(1.5)
+            expect(calls().count == before && helpers.runs[oldID] == nil && helpers.runs[syncedID] == nil, "nothing ran")
+            expect(disk(oldID)?.asks.isEmpty == true && disk(oldID)?.ink.first?.text == "Hi." && disk(oldID)?.body.contains("@Petal say hi") == true,
+                   "the old note keeps its line and its ink, and has no request made of them")
+            let kept = disk(syncedID)?.asks
+            expect(kept?.count == 1 && kept?.first?.end == nil && kept?.first?.words == "@Petal delete everything", "the synced request is kept as it was")
+            expect(kept?.first.map { helpers.askState(syncedID, $0) } == .over, "and shows as not finished here, only Try again would send it")
+            // Written and read back: the same requests.
+            if let file = disk(syncedID) {
+                expect(NoteFile.parse(file.serialized(), fallbackID: "", fallbackDate: Date()).asks == file.asks, "read back the same")
+            }
+            return "an old note's line and ink unchanged and not run; a synced request and @Petal line ran nothing"
+        }
+    }
+
+    /// 25. The owner's own line, as they made it: "@Petal" picked from the @ menu, the rest typed key by key with a
+    /// model named, then Return while macOS shows an inline prediction; and from the corner's @, with an automatic
+    /// correction as the last change before Return.
+    func twentyFifth() {
+        step("25", "the owner's line, from the @ menu and the corner's @") {
+            var tab = NoteStick(kind: .tab)
+            tab.app = "com.example.browser"
+            tab.url = "https://www.example.com/watch?v=abc"
+            tab.title = "A video"
+            let rest = "What is this video about, a summary and important timestamps. Use Haiku for it."
+            // From the @ menu (what its pick puts in: the @ typed, replaced by the mention).
+            let menu = note("", places: [tab])
+            guard let text = editors[menu]?.text else { expect(false, "the editor is there"); return "" }
+            typeKeys(menu, "@")
+            text.insertText(NoteHelp.mention(NoteHelp.petal) + " ", replacementRange: NSRange(location: (text.string as NSString).length - 1, length: 1))
+            typeKeys(menu, rest)
+            // The save a moment later, and the paper drawn again, as the person reads it over.
+            wait(1.2)
+            // macOS's inline prediction, shown after the cursor as marked text, as Return is pressed.
+            text.setMarkedText(" and a list of chapters", selectedRange: NSRange(location: 0, length: 0), replacementRange: NSRange(location: NSNotFound, length: 0))
+            expect(text.hasMarkedText(), "a prediction shows after the cursor")
+            let line = "@Petal " + rest
+            let calls0 = calls("chat").count
+            pressReturn(menu)
+            expect(wait(5) { self.request(menu, line) != nil }, "sent with a prediction showing (\(disk(menu)?.asks.map(\.words) ?? []))")
+            expect(leftWriting(menu, line) && !(editors[menu]?.text?.string.contains("chapters") ?? true), "the line left the writing, and the prediction with it")
+            expect(wait(5) { self.state(menu) != nil }, "a helper began on it (helper: \(String(describing: state(menu))))")
+            expect(wait(5) { self.bubble(menu, line) == .working }, "its bubble says it's at work, waiting for its tab")
+            expect(calls("chat").count == calls0, "headless, its tab isn't in front: nothing is sent to the AI yet")
+            helpers.stop(menu)
+            // From the corner's @, with a word corrected automatically as the last change.
+            let corner = note("", places: [tab])
+            guard let other = editors[corner]?.text else { return "" }
+            other.startPetalLine()
+            typeKeys(corner, "summarize teh")
+            // A word corrected as the person typed it (macOS's corrections arrive through the editor's
+            // handleTextCheckingResults, made as `asCorrection`; AppKit applies none to a window that's never shown).
+            let wrong = (other.string as NSString).range(of: "teh", options: .backwards)
+            other.asCorrection { other.insertText("the", replacementRange: wrong) }
+            expect(other.string.hasSuffix("summarize the"), "the word was corrected (“\(other.string)”)")
+            expect(other.helperLine() != nil, "a corrected line is still the person's: Return sends it")
+            pressReturn(corner)
+            expect(wait(5) { self.request(corner, "@Petal summarize the") != nil }, "sent from the corner's @ after a correction")
+            helpers.stop(corner)
+            return "both sent at once and at work: with an inline prediction showing at Return, and with an autocorrection as the last change"
         }
     }
 

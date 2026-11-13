@@ -7,6 +7,25 @@ extension Snapshot {
     /// The sketch's desk behind the paper.
     static let desk = Color(.sRGB, red: 0xd9 / 255.0, green: 0xdd / 255.0, blue: 0xe6 / 255.0)
 
+    /// A busy made-up page behind a glass paper: headings, lines of text and coloured pictures.
+    static var busyPage: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(0..<14, id: \.self) { row in
+                HStack(spacing: 12) {
+                    if row % 4 == 1 {
+                        RoundedRectangle(cornerRadius: Radius.control).fill([Color.red, .orange, .green, .purple][row % 4].opacity(0.8)).frame(width: 140, height: 70)
+                    }
+                    Text(row % 3 == 0 ? "Garden talks: the full programme for the weekend" : "Doors open at 8. The Orangery seats forty; the Long Hall has a screen and the Studio has steps at its door.")
+                        .font(.system(size: row % 3 == 0 ? TextSize.subtitle : TextSize.body, weight: row % 3 == 0 ? .semibold : .regular))
+                        .foregroundStyle(Color(white: 0.1))
+                }
+            }
+        }
+        .padding(30)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.white)
+    }
+
     @MainActor static func paperNotes(app: PetalApp, folder: String) {
         let root = FileManager.default.temporaryDirectory.appending(path: "petal-snapshot-notes")
         let blue = "#007aff", orange = "#f7821b", pink = "#e0567a"
@@ -101,8 +120,8 @@ extension Snapshot {
     @MainActor private static func helpers(app: PetalApp, folder: String, root: URL, day: Date, scene: (AnyView) -> AnyView) {
         let now = Date()
         let names: (notes: [String], notebooks: [String], place: String) = (["Slides", "Venue"], ["Work", "Home"], "garden.example")
-        func paper(_ note: PaperNote, _ face: PaperFace, color: String = "#007aff") -> PaperView {
-            PaperView(paper: note, color: NSColor(hex: color) ?? .systemBlue, glass: false, face: face, place: app.paper.letterhead(note).place,
+        func paper(_ note: PaperNote, _ face: PaperFace, color: String = "#007aff", glass: Bool = false) -> PaperView {
+            PaperView(paper: note, color: NSColor(hex: color) ?? .systemBlue, glass: glass, face: face, place: app.paper.letterhead(note).place,
                       notebook: note.notebook, others: app.paper.letterhead(note).others, footer: app.paper.footer(note), names: names)
         }
         var page = NoteStick(kind: .tab)
@@ -114,12 +133,20 @@ extension Snapshot {
             # Garden talk
             Ask about the side room before Thursday. Bring the clicker.
             https://github.com
-            @Petal bring @this back @Friday with @[Slides]
             """)
         plan.places = [page]
         plan.back = friday
-        plan.ink = [NoteHelp.Ink(who: "✦ Petal", text: "This note and Slides will be in front of you Friday 9:00.")]
-        plan.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", asked: "@Petal bring @this back @Friday with @[Slides]", at: now)
+        // Sent: the line left the writing; Petal's own reply is kept under it.
+        var bringBack = NoteHelp.Ask(id: "q1", words: "@Petal bring @this back @Friday with @[Slides]", at: now)
+        bringBack.end = .replied
+        bringBack.said = "This note and Slides will be in front of you Friday 9:00."
+        var summary = NoteHelp.Ask(id: "q2", words: "@Petal what does the side room hold, from this page?", at: now)
+        summary.end = .done
+        summary.said = "Forty seated, with a screen and a clicker at the desk."
+        summary.who = "✦ Petal"
+        plan.asks = [bringBack, summary]
+        plan.ink = [NoteHelp.Ink(who: "✦ Petal", text: "Forty seated, with a screen and a clicker at the desk.")]
+        plan.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", asked: summary.words, at: now)
         let planned = PaperNote(file: plan, url: root.appending(path: "Work/Garden talk.md"), notebook: "Work")
         let menu = MentionMenuView(choices: MentionChoice.choices("", notes: ["Slides", "Venue"], notebooks: ["Work", "Home"]), selected: 0,
                                    accent: NSColor(hex: "#007aff") ?? .systemBlue, pick: { _ in })
@@ -127,6 +154,7 @@ extension Snapshot {
         draft.ink = []
         draft.helper = nil
         draft.back = nil
+        draft.asks = []
         draft.body = "# Garden talk\nAsk about the side room before Thursday. Bring the clicker.\n@Petal bring @this back @Friday with @[Slides]\n@"
         let typing = PaperNote(file: draft, url: planned.url, notebook: "Work")
         app.paper.store.preview([planned], notebooks: [Notebook(name: "Work", folder: root.appending(path: "Work"), color: "#007aff", cover: nil, count: 1)])
@@ -142,8 +170,13 @@ extension Snapshot {
         // A coding helper's result, and the back of that note: steps and stamps.
         var pr = NoteStick(kind: .tab)
         pr.url = "https://github.com/example/garden/pull/42"
-        var fix = NoteFile(id: "H2", created: day, body: "@Petal use Opus 5.5 to fix the date picker and open a PR. Done means the tests pass. Have GPT 6.1 Sol look for holes")
+        var fix = NoteFile(id: "H2", created: day, body: "The date picker loses the time zone.")
         fix.places = [pr]
+        var fixAsk = NoteHelp.Ask(id: "q3", words: "@Petal use Opus 5.5 to fix the date picker and open a PR. Done means the tests pass. Have GPT 6.1 Sol look for holes", at: now)
+        fixAsk.end = .done
+        fixAsk.said = "Opened a PR into #42: the picker now keeps the time zone. The tests pass."
+        fixAsk.who = "Opus 5.5"
+        fix.asks = [fixAsk]
         fix.ink = [NoteHelp.Ink(who: "Opus 5.5", text: "Opened a PR into #42: the picker now keeps the time zone. The tests pass.",
                                 proof: ["tests ✓", "diff +9 −3", "PR #43"], link: "https://github.com/example/garden/pull/43", code: true, finish: "the tests pass"),
                    NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Does the week view use the same picker? It still shows the old time.", objections: 1)]
@@ -154,13 +187,39 @@ extension Snapshot {
         let fixed = PaperNote(file: fix, url: root.appending(path: "Work/Date picker.md"), notebook: "Work")
 
         // A helper at work: its step, Pause and Stop.
-        var busy = NoteFile(id: "H3", created: day, body: "Which of these three venues has step-free access?\n@Petal check this page and the other two")
+        var busy = NoteFile(id: "H3", created: day, body: "Which of these three venues has step-free access?")
         busy.places = [page]
-        busy.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Reading garden.example/access", at: now)
+        busy.asks = [NoteHelp.Ask(id: "q4", words: "@Petal check this page and the other two", at: now)]
+        busy.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Reading garden.example/access", asked: "@Petal check this page and the other two", at: now)
         let working = PaperNote(file: busy, url: root.appending(path: "Work/Venues.md"), notebook: "Work")
 
+        // Two requests: one answered, the next at work; and one that couldn't finish, with Try again and Edit.
+        var talk = NoteFile(id: "H7", created: day, body: "Venues for the garden talk\nNeeds: step-free, 40 seats, a screen.")
+        talk.places = [page]
+        var first = NoteHelp.Ask(id: "q5", words: "@Petal which of these has step-free access?", at: now)
+        first.end = .done
+        first.said = "The Orangery and the Long Hall. The Studio has six steps at its door."
+        first.who = "✦ Petal"
+        let second = NoteHelp.Ask(id: "q6", words: "@Petal and which of those two seats 40, with Haiku", at: now)
+        talk.asks = [first, second]
+        talk.ink = [NoteHelp.Ink(who: "✦ Petal", text: "The Orangery and the Long Hall. The Studio has six steps at its door.")]
+        talk.helper = NoteHelp.Helper(state: .working, who: "✦ Petal · Haiku", step: "Reading garden.example/long-hall", asked: second.words, at: now)
+        let conversation = PaperNote(file: talk, url: root.appending(path: "Work/Venues for the garden talk.md"), notebook: "Work")
+        var trip = NoteFile(id: "H8", created: day, body: "Train to the venue on Friday")
+        trip.places = [page]
+        var broke = NoteHelp.Ask(id: "q7", words: "@Petal find the fastest train that gets there before 9", at: now)
+        broke.end = .failed
+        broke.said = "Petal AI couldn't reach the timetable page. Check the connection, then try again."
+        broke.who = "✦ Petal · couldn't finish"
+        trip.asks = [broke]
+        let failed = PaperNote(file: trip, url: root.appending(path: "Work/Train.md"), notebook: "Work")
+
         // A watcher: its newest number in the corner, the older ones struck.
-        var lamp = NoteFile(id: "H4", created: day, body: "@Petal check this every morning, tell me under $100")
+        var lamp = NoteFile(id: "H4", created: day, body: "Kitchen lamp")
+        var watching = NoteHelp.Ask(id: "q8", words: "@Petal check this every morning, tell me under $100", at: day)
+        watching.end = .replied
+        watching.said = "Watching lamps.example every morning at 9:00 on this Mac."
+        lamp.asks = [watching]
         var shop = NoteStick(kind: .tab)
         shop.url = "https://lamps.example/kitchen"
         lamp.places = [shop]
@@ -178,6 +237,11 @@ extension Snapshot {
                      NoteHelp.TaskItem(kind: .file, title: "Receipt.pdf", target: "/Users/someone/Receipt.pdf"),
                      NoteHelp.TaskItem(kind: .mail, title: "Shop", target: "message://x")]
         task.ink = [NoteHelp.Ink(who: "✦ Petal · put away today", text: "You were comparing delivery dates. Still open: which one fits the old bracket. Next: reply to the shop.")]
+        var putAway = NoteHelp.Ask(id: "q9", words: "@Petal put this away", at: now)
+        putAway.end = .done
+        putAway.said = task.ink[0].text
+        putAway.who = task.ink[0].who
+        task.asks = [putAway]
         let away = PaperNote(file: task, url: root.appending(path: "Inbox/Renew the bike lock.md"), notebook: "Inbox")
 
         // A morning note from Petal.
@@ -188,7 +252,7 @@ extension Snapshot {
         morning.places = [desk]
         let fromPetal = PaperNote(file: morning, url: root.appending(path: "Work/Morning.md"), notebook: "Work")
 
-        app.paper.store.preview([planned, fixed, working, watcher, away, fromPetal],
+        app.paper.store.preview([planned, fixed, working, watcher, away, fromPetal, conversation, failed],
                                 notebooks: [Notebook(name: "Work", folder: root.appending(path: "Work"), color: "#f7821b", cover: nil, count: 4),
                                             Notebook(name: "Home", folder: root.appending(path: "Home"), color: "#e0567a", cover: nil, count: 1),
                                             Notebook(name: "Inbox", folder: root.appending(path: "Inbox"), color: "#8c8c8c", cover: nil, count: 1)])
@@ -207,6 +271,15 @@ extension Snapshot {
                 paper(fromPetal, .folded, color: "#f7821b").rotationEffect(.degrees(1.5))
                 paper(away, .open, color: "#8c8c8c")
             }))),
+            ("helper-bubbles", scene(AnyView(HStack(alignment: .top, spacing: 30) {
+                paper(conversation, .open, color: "#f7821b")
+                paper(failed, .open, color: "#007aff")
+            }))),
+            // On Liquid Glass, over a busy page: the bubble and the writing must still read.
+            ("helper-bubbles-glass", AnyView(HStack(alignment: .top, spacing: 30) {
+                paper(conversation, .open, color: "#f7821b", glass: true)
+                paper(failed, .open, color: "#007aff", glass: true)
+            }.padding(40).background(busyPage).environment(\.colorScheme, .light))),
         ]
         for (name, view) in shots2 { write(render(view, app: app, size: nil), name: name, folder: folder) }
 
