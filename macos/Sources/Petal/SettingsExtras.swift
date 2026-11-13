@@ -27,7 +27,7 @@ struct KeyRow: View {
             KeyCaps(text: keys).frame(width: column, alignment: .leading)
             Text(what).font(.system(size: TextSize.body))
             Spacer(minLength: 8)
-            if taken { Text("In use elsewhere").font(.system(size: TextSize.small)).foregroundStyle(.secondary) }
+            if taken { Text("Another app uses these keys").font(.system(size: TextSize.small)).foregroundStyle(.secondary) }
         }
     }
 }

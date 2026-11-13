@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import UniformTypeIdentifiers
 import SwiftUI
 
 // The settings window's pages: each one's groups and rows, written once (`SettingsList`) for the page and for the
@@ -28,7 +29,7 @@ extension SettingsList {
                               selection: Binding(get: { app.config.position }, set: { app.config.setDock("position", $0) }))
                 }
             },
-            SettingsEntry("autoHide", "Auto-hide", words: "hide") { title in
+            SettingsEntry("autoHide", "Auto-hide", words: "hide autohide hidden") { title in
                 WithApp { app in
                     SwitchRow(title: title, isOn: Binding(get: { app.config.autoHide }, set: { app.config.setDock("autoHide", $0) }))
                 }
@@ -39,33 +40,34 @@ extension SettingsList {
                               isOn: Binding(get: { app.config.keepWindowsClear }, set: { app.config.setDock("keepWindowsClear", $0) }))
                 }
             },
-            SettingsEntry("openAtLogin", "Open Petal at login", words: "start launch") { title in
+            SettingsEntry("openAtLogin", "Open Petal at login", words: "start launch startup boot") { title in
                 WithApp { app in SwitchRow(title: title, isOn: Binding(get: { app.openAtLogin }, set: { app.openAtLogin = $0 })) }
             },
             SettingsEntry(SettingToggle(key: "menuBarIcon", title: "Petal in the menu bar"), words: "icon mark"),
         ]),
         SettingsBlock("Apps", [
-            SettingsEntry(SettingToggle(key: "thisWorkspaceOnly", title: "Only this Desktop’s apps"), words: "space workspace running"),
+            SettingsEntry(SettingToggle(key: "thisWorkspaceOnly", title: "Show open apps from this Desktop only"), words: "space workspace running"),
             SettingsEntry(SettingToggle(key: "previews", title: "Window previews"), words: "hover thumbnails"),
-            SettingsEntry(SettingToggle(key: "minimized", title: "Minimized windows")),
+            SettingsEntry(SettingToggle(key: "minimized", title: "Show minimized windows")),
             SettingsEntry(SettingToggle(key: "badges", title: "Badges"), words: "unread counts notifications"),
             SettingsEntry(SettingToggle(key: "bounce", title: "Bounce"), words: "attention"),
-            SettingsEntry(SettingToggle(key: "progress", title: "Download progress")),
             SettingsEntry(SettingToggle(key: "dropToOpen", title: "Drop files on an app to open them")),
         ]),
         SettingsBlock("Right-click menu", [
-            SettingsEntry(SettingToggle(key: "quickActions", title: "Quick actions")),
+            SettingsEntry(SettingToggle(key: "quickActions", title: "Its windows"), words: "quick actions list"),
             SettingsEntry(SettingToggle(key: "recentFiles", title: "Recent files")),
         ]),
         SettingsBlock("Extras", [
             SettingsEntry(SettingToggle(key: "nowPlaying", title: "Now playing"), words: "music spotify song album"),
             SettingsEntry(SettingToggle(key: "stacks", title: "Folder stacks"), words: "downloads"),
             SettingsEntry("stackFolders", "Add a folder", words: "stacks folders downloads", when: { $0.config.bool("stacks") }) { StackFolders(title: $0) },
+            SettingsEntry(SettingToggle(key: "progress", title: "Download progress on stacks"), words: "downloads ring", when: { $0.config.bool("stacks") }),
+            SettingsEntry(SettingToggle(key: "finderInDock", title: "Finder"), words: "finder button files"),
             SettingsEntry(SettingToggle(key: "trash", title: "Trash")),
         ]),
         windows,
         shortcuts,
-        SettingsBlock("Bring your Dock along", footer: "Replaces Petal’s apps with your Dock’s. macOS’s Dock doesn’t change.", [
+        SettingsBlock("Bring your Dock along", [
             SettingsEntry("importDock", "Import macOS’s Dock", words: "apps folders stacks") { _ in ImportDock() },
         ]),
     ]
@@ -81,7 +83,7 @@ struct DockChoices: View {
             DockChoice(title: "Petal", selected: app.config.whichDock == "petal") {
                 PetalDockSketch()
             } choose: { app.useDock("petal") }
-            DockChoice(title: "macOS Dock", selected: app.config.whichDock == "macos") {
+            DockChoice(title: "macOS’s Dock", selected: app.config.whichDock == "macos") {
                 MacDockSketch()
             } choose: { app.useDock("macos") }
         }
@@ -163,9 +165,11 @@ struct StackFolders: View {
     var body: some View {
         let folders = app.config.strings("stackFolders")
         ForEach(folders, id: \.self) { folder in
+            // The folder the dock really shows for it (Screenshots stands for where macOS saves them), by its name.
+            let shown = Stacks.resolve([folder]).first ?? folder
             HStack(spacing: 8) {
-                Image(nsImage: NSWorkspace.shared.icon(forFile: Stacks.url(folder).path)).resizable().frame(width: 20, height: 20)
-                Text(folder).font(.system(size: TextSize.body)).lineLimit(1).truncationMode(.middle)
+                Image(nsImage: NSWorkspace.shared.icon(forFile: Stacks.url(shown).path)).resizable().frame(width: 20, height: 20)
+                Text(Stacks.name(shown)).font(.system(size: TextSize.body)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 8)
                 RoundButton(symbol: "xmark") { app.config.set("stackFolders", app.config.strings("stackFolders").filter { $0 != folder }) }
             }
@@ -185,7 +189,7 @@ struct StackFolders: View {
     }
 }
 
-/// macOS's Dock's apps, and the button that makes them Petal's.
+/// macOS's Dock's apps, and the button that adds those Petal's dock doesn't have yet.
 struct ImportDock: View {
     @Environment(PetalApp.self) private var app
 
@@ -197,7 +201,7 @@ struct ImportDock: View {
                 }
             }
             Spacer(minLength: 12)
-            AccentButton(title: "Import Dock") { app.config.importSystemDock() }
+            AccentButton(title: "Import macOS’s Dock") { app.config.importSystemDock() }
         }
     }
 }
@@ -208,22 +212,22 @@ extension SettingsList {
     static let look: [SettingsBlock] = [
         SettingsBlock("Icons", [
             SettingsEntry(SettingSlider(key: "iconSize", title: "Size", range: 24...72), words: "icon bigger smaller"),
-            SettingsEntry(SettingSlider(key: "idleOpacity", title: "Apps not running", range: 0.2...1, step: 0.05, percent: true), words: "opacity dim faded"),
+            SettingsEntry(SettingSlider(key: "idleOpacity", title: "Dim apps that aren’t open", range: 0.2...1, step: 0.05, percent: true), words: "opacity dim faded"),
             SettingsEntry(SettingToggle(key: "appGlow", title: "Glow"), words: "running color"),
             SettingsEntry(SettingToggle(key: "separators", title: "Dividers"), words: "separators sections"),
         ]),
         SettingsBlock("Under the pointer", [
-            SettingsEntry(SettingToggle(key: "magnification", title: "Magnification"), words: "grow zoom bigger"),
-            SettingsEntry(SettingSlider(key: "magnificationAmount", title: "Grow", range: 0.1...1, step: 0.05, percent: true),
+            SettingsEntry(SettingToggle(key: "magnification", title: "Magnification"), words: "grow zoom bigger magnify enlarge"),
+            SettingsEntry(SettingSlider(key: "magnificationAmount", title: "How much", range: 0.1...1, step: 0.05, percent: true),
                           words: "magnification", when: { $0.config.bool("magnification") }),
             SettingsEntry(SettingToggle(key: "hoverLift", title: "Lift on hover"), when: { !$0.config.bool("magnification") }),
-            SettingsEntry(SettingSlider(key: "hoverLiftAmount", title: "Lift", range: 0...0.3, step: 0.01, percent: true),
-                          when: { !$0.config.bool("magnification") }),
+            SettingsEntry(SettingSlider(key: "hoverLiftAmount", title: "How much", range: 0...0.3, step: 0.01, percent: true),
+                          words: "lift", when: { !$0.config.bool("magnification") && $0.config.bool("hoverLift") }),
             SettingsEntry(SettingToggle(key: "tooltips", title: "Names on hover"), words: "tooltips labels"),
         ]),
         SettingsBlock("Color", [
-            SettingsEntry(ColorSetting(key: "dockColor", title: "Dock tint"), words: "glass"),
-            SettingsEntry(ColorSetting(key: "accentColor", title: "Accent"), words: "pink dots buttons"),
+            SettingsEntry(ColorSetting(key: "dockColor", title: "Dock tint"), words: "glass color transparent background"),
+            SettingsEntry(ColorSetting(key: "accentColor", title: "Accent color"), words: "pink dots buttons"),
             SettingsEntry(ColorSetting(key: "pointerColor", title: "Petal AI’s pointer"), words: "cursor arrow"),
         ]),
     ]
@@ -337,7 +341,7 @@ struct LiveDock: View {
         let vertical = config.position != "bottom"
         let thickness = slot + 8 + (vertical ? outer.leading + outer.trailing : outer.top + outer.bottom)
         // What the dock holds besides its apps, as DockView counts it: Petal's buttons, "+", the extras, the dividers.
-        let buttons = [!app.providers.isEmpty && (config.bool("ai") || config.bool("claudeUsage")), config.bool("finderInDock"),
+        let buttons = [!app.providers.isEmpty, config.bool("finderInDock"),
                        config.bool("notes") && config.bool("notesPad")].filter { $0 }.count
         let extras = (config.bool("stacks") ? stackCount(config.strings("stackFolders")) : 0) + (config.bool("trash") ? 1 : 0)
             + (config.bool("nowPlaying") && app.signals.nowPlaying != nil ? 1 : 0)
@@ -476,7 +480,8 @@ extension SettingsList {
     static let usingApps = SettingsBlock("Using your apps", when: hasAI, [
         SettingsEntry(SettingToggle(key: "computerUse", title: "Let Petal AI use your apps", detail: "It asks before each app, and Stop or Esc ends it."),
                       words: "computer use press type click pointer"),
-        SettingsEntry("runDisplays", "Give each run a display of its own", words: "hidden display background screen") { RunDisplaysRow(title: $0) },
+        SettingsEntry(SettingToggle(key: "selectionAsk", title: "“Ask Petal AI” by selected text"), words: "selection select highlight note popup button"),
+        SettingsEntry("runDisplays", "Let Petal AI work on a hidden screen", words: "hidden display background screen run own") { RunDisplaysRow(title: $0) },
     ])
 
     static let ai: [SettingsBlock] = [
@@ -486,11 +491,11 @@ extension SettingsList {
             },
         ]),
         paying,
-        SettingsBlock("Usage", when: hasAI, [
+        SettingsBlock("Usage", when: { hasAI($0) && ($0.config.bool("claudeUsage") || $0.usage.spentText != nil) }, [
             SettingsEntry("usage", "Usage", words: "limits spent cost plan") { _ in UsageRow() },
         ]),
         SettingsBlock("Chat", when: hasAI, [
-            SettingsEntry("chatWhileWorking", "Writing while it works", words: "steer queue interrupt") { title in
+            SettingsEntry("chatWhileWorking", "If you write while it works", words: "steer queue interrupt writing") { title in
                 WithApp { app in
                     ChoiceRow(title: title, options: [("steer", "Steers it"), ("queue", "Waits its turn")],
                               selection: Binding(get: { app.config.string("chatWhileWorking") }, set: { app.config.set("chatWhileWorking", $0) }))
@@ -532,11 +537,11 @@ extension SettingsList {
         ]),
         usingApps,
         SettingsBlock("In the background", when: hasAI, [
-            SettingsEntry(SettingToggle(key: "ai", title: "Small jobs", detail: "Routines that sort files, and notes’ quick answers."), words: "quick small model"),
-            SettingsEntry(SettingToggle(key: "claudeUsage", title: "Usage ring"), words: "ai button limits"),
+            SettingsEntry(SettingToggle(key: "ai", title: "Quick answers", detail: "Sorting files for routines, and notes that explain what you select."), words: "quick small jobs model"),
+            SettingsEntry(SettingToggle(key: "claudeUsage", title: "Usage ring around the AI button"), words: "ai button limits"),
         ]),
-        SettingsBlock("Your notes for Petal AI", when: hasAI, [
-            SettingsEntry("instructions", "Your notes for Petal AI", words: "instructions prompt remember always") { _ in InstructionsEditor() },
+        SettingsBlock("What Petal AI should always know", when: hasAI, [
+            SettingsEntry("instructions", "What Petal AI should always know", words: "instructions prompt remember always notes") { _ in InstructionsEditor() },
         ]),
         SettingsBlock("Other AI agents", when: hasAI, [
             SettingsEntry(SettingToggle(key: "otherAgents", title: "Let other AI agents change Petal"),
@@ -552,7 +557,7 @@ struct RunDisplaysRow: View {
     let title: String
 
     var body: some View {
-        SwitchRow(title: title, help: RunDisplays.unavailableWords ?? "Its windows open where you don’t see them.",
+        SwitchRow(title: title, help: RunDisplays.unavailableWords,
                   isOn: Binding(get: { app.config.bool("runDisplays") }, set: { app.config.set("runDisplays", $0) }))
             .disabled(RunDisplays.unavailableWords != nil)
     }
@@ -568,7 +573,7 @@ struct UsageRow: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(spent).font(.system(size: TextSize.subtitle, weight: .semibold).monospacedDigit())
                 Text(app.chatProvider == .codex ? "Estimated at list prices. OpenAI’s usage page has the bill."
-                     : "Petal’s own runs on your key. Anthropic’s console has the bill.")
+                     : "What Petal AI spent on your key. Anthropic’s site has the bill.")
                     .font(.system(size: TextSize.small)).foregroundStyle(.secondary)
             }
         } else {
@@ -645,9 +650,27 @@ struct PrivateApps: View {
                     .compactMap { app in app.bundleIdentifier.map { ($0, app.localizedName ?? $0) } }.sorted { $0.1 < $1.1 }, id: \.0) { id, name in
                     Button(name) { app.config.set("aiNeverLook", ids + [id]) }
                 }
+                Divider()
+                Button("Other…") {
+                    if let id = AppChooser.choose(), !ids.contains(id) { app.config.set("aiNeverLook", ids + [id]) }
+                }
             }
             .menuStyle(.button).buttonStyle(.glass).fixedSize()
         }
+    }
+}
+
+/// An app that isn't open, picked from the Applications folder: its bundle id, or nil when none was picked.
+@MainActor
+enum AppChooser {
+    static func choose() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.application]
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return Bundle(url: url)?.bundleIdentifier
     }
 }
 
@@ -756,6 +779,7 @@ struct Permissions: View {
     @Environment(PetalApp.self) private var app
     @State private var trusted = Windows.trusted
     @State private var capture = Capture.allowed
+    @State private var askedCapture = Capture.asked
     @State private var asking = false
     /// What Music and Spotify said, each as last asked without prompting.
     @State private var players: [Browsers.Access] = []
@@ -768,8 +792,9 @@ struct Permissions: View {
         }
         .onReceive(timer) { _ in check() }
         .onAppear { check() }
-        PermissionRow(symbol: "rectangle.dashed.badge.record", title: "Screen Recording", help: "A still of each window in previews, never a recording") {
-            if capture { Allowed() } else { AccentButton(title: "Allow…") { Capture.askForPermission() } }
+        PermissionRow(symbol: "rectangle.dashed.badge.record", title: "Screen Recording",
+                      help: !capture && askedCapture ? "Once it’s allowed, restart Petal to finish." : "A still of each window in previews, never a recording") {
+            if capture { Allowed() } else { AccentButton(title: "Allow…") { Capture.askForPermission(); askedCapture = true } }
         }
         PermissionRow(symbol: "safari", title: "Browsers", help: "Which site a tab is on") {
             BrowserAccessButton(asking: $asking)
@@ -785,7 +810,7 @@ struct Permissions: View {
             } else if players.contains(.allowed) {
                 Allowed()
             } else {
-                Text("Asked when a player is open").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
+                Text("Asks when Music or Spotify is open").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
             }
         }
     }
@@ -872,7 +897,7 @@ extension SettingsList {
         SettingsBlock([
             SettingsEntry("petal", "Petal", words: "version website github open source edgetr") { AboutRow(title: $0) },
         ]),
-        SettingsBlock("Check Petal", footer: "You see a report before it goes anywhere.", [
+        SettingsBlock("Help", footer: "You see a report before it’s sent. Posting it needs a GitHub account.", [
             SettingsEntry("doctor", "Check Petal", words: "doctor fix problem report bug broken") { _ in DoctorRows() },
         ]),
         SettingsBlock("Updates", [
@@ -901,7 +926,8 @@ struct AboutRow: View {
     }
 }
 
-/// A new version waiting (restart, and what's new in it), or what's new in this one and a look for a newer one now.
+/// A new version waiting (restart, and what's new in it), one found while updates are off (install, and what's new in
+/// it), or what's new in this one and a look for a newer one now.
 struct UpdateRow: View {
     @Environment(PetalApp.self) private var app
     let title: String
@@ -911,6 +937,11 @@ struct UpdateRow: View {
             SettingRow(title: "Petal \(ready) is ready") {
                 Button("What’s new") { app.releaseNotes.show(ready) }.buttonStyle(.glass)
                 AccentButton(title: "Restart to update") { app.relaunch() }
+            }
+        } else if let available = app.updater.available {
+            SettingRow(title: "Petal \(available.version) is available", help: app.updater.status.hasSuffix("is available.") ? nil : app.updater.status) {
+                Button("What’s new") { app.releaseNotes.show(available.version) }.buttonStyle(.glass)
+                AccentButton(title: "Install") { app.updater.installAvailable() }
             }
         } else {
             SettingRow(title: title, help: app.updater.status.isEmpty ? nil : app.updater.status) {
@@ -941,8 +972,8 @@ struct DoctorRows: View {
         }
         HStack(spacing: 8) {
             Button(findings.isEmpty ? "Check Petal" : "Check again") { run(fix: false) }.buttonStyle(.glass)
-            if findings.contains(where: { $0.level != "ok" && $0.fixed == nil }) {
-                AccentButton(title: "Fix what can be fixed") { run(fix: true) }
+            if findings.contains(where: { $0.fixable == true && $0.fixed == nil }) {
+                AccentButton(title: "Fix these") { run(fix: true) }
             }
             if working { ProgressView().controlSize(.small) }
             Spacer(minLength: 8)
@@ -992,7 +1023,7 @@ struct ReportSheet: View {
                 .frame(height: 220)
                 .padding(8)
                 .glassEffect(.clear, in: .rect(cornerRadius: Radius.tile))
-                Text("This goes to github.com/edgetr/petal, where anyone can read it. Your username is replaced, and no window titles or file contents are included.")
+                Text("This is posted on Petal’s GitHub page, where anyone can read it, and needs a GitHub account. It leaves out your name, window titles and files.")
                     .font(.system(size: TextSize.small)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if !status.isEmpty { Text(status).font(.system(size: TextSize.callout)).foregroundStyle(.secondary).textSelection(.enabled) }
@@ -1004,7 +1035,7 @@ struct ReportSheet: View {
                     Button("Show the report") { run(["--preview"]) { preview = $0 } }
                         .buttonStyle(.glassProminent).disabled(what.trimmingCharacters(in: .whitespaces).isEmpty || working)
                 } else {
-                    Button("Report it") { run(["--yes"]) { status = $0.split(separator: "\n").last.map(String.init) ?? "" } }
+                    Button("Post it") { run(["--yes"]) { status = $0.split(separator: "\n").last.map(String.init) ?? "" } }
                         .buttonStyle(.glassProminent).disabled(working || !status.isEmpty)
                 }
             }
