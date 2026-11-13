@@ -96,7 +96,7 @@ enum Settings {
         Setting("chatWhileWorking", .string("steer"), "Writing in the AI chat while it works: steer (it stops where it is and carries on from the new message) or queue (sent once it's done)."),
         Setting("ai", .bool(true), "Small jobs for the chat AI's small model (Claude Haiku, Codex's Luna): routines that sort files by what they are, and notes' quick answers."),
         Setting("claudeUsage", .bool(true), "The usage ring around the AI button."),
-        Setting("otherAgents", .bool(true), "Let the user's other AI sessions (T3 Code, Claude Code or Codex in a terminal) change Petal: its MCP server, skill and `petal` command are set up for them."),
+        Setting("otherAgents", .bool(true), "Let the user's other AI agents, in any app or a terminal, change Petal: Petal sets up its MCP server, skill and `petal` command for Claude Code and Codex."),
         Setting("aiMemory", .bool(true), "Petal AI remembers what helps: what the user asks it to, and what it notices (memory.json). petal_remember / petal_forget / petal_memories."),
         Setting("aiAllowed", .list([]), "What Petal AI may do without asking first (the user chose Always on its card): quit, close, trash, tidy, routine (saving or running a routine that opens something or runs a Shortcut), computer:<bundle id> (using that app), browser (a browser of its own, petal_browser)."),
         Setting("aiNeverLook", .list(["com.1password.1password", "com.bitwarden.desktop", "com.apple.Passwords", "com.apple.keychainaccess"]), "Apps Petal AI never looks into (bundle ids): petal_look gives only their name, window lists leave out their titles, and screenshots leave them out."),

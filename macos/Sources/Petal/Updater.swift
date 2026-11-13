@@ -29,7 +29,7 @@ final class Updater {
     func check(manual: Bool) {
         guard manual || PetalApp.shared.config.bool("autoUpdate"), !checking else { return }
         guard !isDevelopmentBuild else {
-            status = "This Petal was built from source; it doesn't update itself."
+            status = "This copy of Petal doesn't update itself."
             return
         }
         checking = true
@@ -116,7 +116,7 @@ final class Updater {
     nonisolated private static func checked<T>(_ file: URL, release: Release, running: String, _ use: (URL) throws -> T) throws -> T {
         let data = try Data(contentsOf: file)
         let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-        guard digest == release.sha256 else { throw UpdateError("the download didn't match its checksum") }
+        guard digest == release.sha256 else { throw UpdateError("the download didn't arrive whole") }
         // A folder of its own, named by nothing the release says.
         let folder = FileManager.default.temporaryDirectory.appending(path: "petal-update-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -128,7 +128,7 @@ final class Updater {
         unzip.waitUntilExit()
         let app = folder.appending(path: "Petal.app")
         guard unzip.terminationStatus == 0, FileManager.default.fileExists(atPath: app.path) else {
-            throw UpdateError("the download had no Petal.app")
+            throw UpdateError("the download had no Petal in it")
         }
         // The checksum came with the download; the signature can't be made by whoever made the download. And it must
         // be the very version its release said, newer than this one: never an older build of the maker's.

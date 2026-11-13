@@ -48,9 +48,9 @@ enum Doctor {
                 let backup = url.path + ".broken-" + Self.stamp()
                 try? FileManager.default.copyItem(atPath: url.path, toPath: backup)
                 try? fallback.write(to: url, options: .atomic)
-                fixed = "backed up as \(URL(fileURLWithPath: backup).lastPathComponent), started fresh"
+                fixed = "kept a copy (\(URL(fileURLWithPath: backup).lastPathComponent)) and started fresh"
             }
-            note("error", "files", "\(name) isn't valid JSON, so Petal ignores it.", fixed: fixed)
+            note("error", "files", "\(name == "dock.json" ? "Your dock’s file" : "Your settings file") (\(name)) can’t be read, so Petal ignores it.", fixed: fixed)
         }
         let settings = Config.parse(folder.appending(path: "settings.json")) ?? [:]
         let unknown = settings.keys.filter { Settings.defaults[$0] == nil }.sorted()
@@ -63,8 +63,8 @@ enum Doctor {
             note("ok", "apps", "\(apps.count) in your dock." + (missing.isEmpty ? "" : " Not installed (skipped in the dock): \(missing.prefix(8).joined(separator: ", "))."))
         } else if FileManager.default.fileExists(atPath: folder.appending(path: "modes.json").path) {
             // Petal for macOS had modes once; opening it moves the default mode's apps into the dock, unless it can't read them.
-            note("warn", "apps", "Your dock from when Petal had modes (modes.json) hasn't been moved over. Open Petal; if the dock stays empty, "
-                 + "modes.json can't be read: choose Import Dock in Petal's settings, or add apps with “+”.")
+            note("warn", "apps", "Your dock from when Petal had modes hasn't been moved over. Open Petal; if the dock stays empty, "
+                 + "it can't be read: choose Import Dock in Petal's settings, or add apps with “+”.")
         }
 
         // macOS's Dock: never left hidden without Petal running.
@@ -79,7 +79,7 @@ enum Doctor {
             note("warn", "dock", "Petal is set to be your dock but isn't running: open Petal.")
         } else if running && !IPC.answering() {
             // Running, but `petal` and the AI's tools can't reach it (another copy took its socket, say).
-            note("error", "dock", "Petal is running but doesn't answer `petal` or its AI tools: quit and open Petal again.")
+            note("error", "dock", "Petal is running but doesn't answer: quit it and open it again.")
         } else {
             note("ok", "dock", (dock["dock"] as? String ?? "petal") == "petal" ? "Petal is your dock." : "macOS's Dock is in use; Petal's is off.")
         }
@@ -94,14 +94,14 @@ enum Doctor {
         if chosen.isEmpty { note("ok", "ai", "No AI chosen: Petal works as a dock without it.") }
         for provider in chosen {
             guard let path = PetalApp.find(provider, setting: settings[provider.pathSetting] as? String ?? "") else {
-                note("error", "ai", "\(provider.name) is chosen but isn't installed: install it from Petal's settings, under AI.")
+                note("error", "ai", "\(provider.name) is chosen but isn't installed: install it from Petal's settings, under Petal AI.")
                 continue
             }
             let status = shell(path, provider.statusArguments)
             if provider.signedIn(status: status.status, output: status.output) != nil {
                 note("ok", "ai", "\(provider.name) is installed and signed in.")
             } else {
-                note("error", "ai", "\(provider.name) isn't signed in: sign in from Petal's settings, under AI.")
+                note("error", "ai", "\(provider.name) isn't signed in: sign in from Petal's settings, under Petal AI.")
             }
             if !Skill.installed(for: provider) {
                 if fix { Skill.install() }

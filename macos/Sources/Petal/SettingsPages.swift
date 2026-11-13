@@ -538,9 +538,9 @@ extension SettingsList {
         SettingsBlock("Your notes for Petal AI", when: hasAI, [
             SettingsEntry("instructions", "Your notes for Petal AI", words: "instructions prompt remember always") { _ in InstructionsEditor() },
         ]),
-        SettingsBlock("Your other AI sessions", when: hasAI, [
-            SettingsEntry(SettingToggle(key: "otherAgents", title: "Let your other AI sessions change Petal", detail: "In T3 Code or a terminal."),
-                          words: "agents claude code codex mcp skill command"),
+        SettingsBlock("Other AI agents", when: hasAI, [
+            SettingsEntry(SettingToggle(key: "otherAgents", title: "Let other AI agents change Petal"),
+                          words: "agents sessions claude code codex opencode t3 terminal mcp skill command"),
         ]),
     ]
 }
