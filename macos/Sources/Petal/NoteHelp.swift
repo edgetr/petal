@@ -905,14 +905,15 @@ enum NoteHelp {
     // MARK: Times said in words
 
     /// A day and time in words: "Friday", "Friday 9:00", "tomorrow at 3pm", "tonight", "in 2 hours", "next week",
-    /// "Monday morning". A day without a time is at 9:00; a weekday that's today and past is next week's.
+    /// "Monday morning", "this evening". A day without a time is at 9:00; a weekday that's today and past is next
+    /// week's. Never a time already past: one said for today that has gone by isn't taken (Petal asks when).
     static func when(_ text: String, now: Date, calendar: Calendar = .current) -> (date: Date, label: String)? {
         timeWords(text, now: now, calendar: calendar).first.map { ($0.date, $0.label) }
     }
 
     static func timeWords(_ text: String, now: Date, calendar: Calendar = .current) -> [(range: NSRange, date: Date, label: String)] {
         let days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
-        let pattern = #"(?i)\b(?:in\s+(\d+|an?|one|two|three)\s+(minutes?|mins?|hours?|days?|weeks?)|(next\s+week)|(today|tonight|tomorrow|(?:next\s+)?(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))(?:\s+(morning|afternoon|evening|night))?(?:\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon))?)\b"#
+        let pattern = #"(?i)\b(?:in\s+(\d+|an?|one|two|three|half\s+an)\s+(minutes?|mins?|hours?|hrs?|days?|weeks?)|(next\s+week)|(today|tonight|tomorrow|this(?=\s+(?:morning|afternoon|evening))|(?:next\s+)?(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))(?:\s+(morning|afternoon|evening|night))?(?:\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midnight))?)\b"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString
         var out: [(NSRange, Date, String)] = []
@@ -923,10 +924,13 @@ enum NoteHelp {
         for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
             let group = { (i: Int) -> String? in match.range(at: i).location == NSNotFound ? nil : ns.substring(with: match.range(at: i)).lowercased() }
             if let count = group(1), let unit = group(2) {
-                let n = ["a": 1, "an": 1, "one": 1, "two": 2, "three": 3][count] ?? Int(count) ?? 1
-                let seconds: Double = unit.hasPrefix("min") ? 60 : unit.hasPrefix("hour") ? 3600 : unit.hasPrefix("day") ? 86400 : 7 * 86400
-                let date = now.addingTimeInterval(Double(n) * seconds)
-                out.append((match.range, date, unit.hasPrefix("min") || unit.hasPrefix("hour") ? clockLabel(date) : dayLabel(date, now: now, calendar: calendar)))
+                let half = count.hasPrefix("half")
+                let n: Double = half ? 0.5 : Double(["a": 1, "an": 1, "one": 1, "two": 2, "three": 3][count] ?? Int(count) ?? 1)
+                // "in 0 minutes" is now: no time to bring anything back at.
+                guard n > 0 else { continue }
+                let seconds: Double = unit.hasPrefix("min") ? 60 : unit.hasPrefix("h") ? 3600 : unit.hasPrefix("day") ? 86400 : 7 * 86400
+                let date = now.addingTimeInterval(n * seconds)
+                out.append((match.range, date, unit.hasPrefix("min") || unit.hasPrefix("h") ? clockLabel(date) : dayLabel(date, now: now, calendar: calendar)))
                 continue
             }
             if group(3) != nil {
@@ -945,8 +949,12 @@ enum NoteHelp {
             default: break
             }
             if word == "tonight" { hour = 20 }
+            // "tonight at 9", "Friday evening at 7": the evening's 9 and 7, never the morning's.
+            let later = word == "tonight" || ["afternoon", "evening", "night"].contains(group(5) ?? "")
+            var bare = false
+            var midnight = false
             if let clock = group(6) {
-                if clock == "noon" { hour = 12; minute = 0 } else {
+                if clock == "noon" { hour = 12; minute = 0 } else if clock == "midnight" { hour = 0; minute = 0; midnight = true } else {
                     let pm = clock.hasSuffix("pm"), am = clock.hasSuffix("am")
                     let digits = clock.replacingOccurrences(of: "am", with: "").replacingOccurrences(of: "pm", with: "").trimmingCharacters(in: .whitespaces)
                     let parts = digits.split(separator: ":")
@@ -955,42 +963,52 @@ enum NoteHelp {
                     minute = parts.count > 1 ? Int(parts[1]) ?? 0 : 0
                     if pm, hour < 12 { hour += 12 }
                     if am, hour == 12 { hour = 0 }
-                    // "Friday 3" means the afternoon; "Friday 9" the morning.
-                    if !pm, !am, parts.count == 1, (1...7).contains(hour) { hour += 12 }
+                    if !pm, !am, hour < 12 {
+                        if later { hour += 12 }
+                        // "Friday 3" means the afternoon; "Friday 9" the morning ("Friday morning at 7" too).
+                        else if group(5) == nil, parts.count == 1, (1...7).contains(hour) { hour += 12 }
+                        else { bare = group(5) == nil }
+                    }
                 }
             }
             var day: Date
             let nextOne = word.hasPrefix("next ")
             let name = nextOne ? String(word.dropFirst(5)) : word
             switch name {
-            case "today", "tonight": day = now
+            case "today", "tonight", "this": day = now
             case "tomorrow": day = calendar.date(byAdding: .day, value: 1, to: now) ?? now
             default:
                 guard let index = days.firstIndex(of: name), let found = next(weekday: index + 1, after: now, calendar: calendar, strictly: nextOne) else { continue }
                 day = found
             }
             guard var date = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: day) else { continue }
+            // Midnight on a day is the end of it.
+            if midnight { date = calendar.date(byAdding: .day, value: 1, to: date) ?? date }
+            // "today at 9" once 9 in the morning has gone by: 9 in the evening.
+            if bare, date <= now, ["today", "this"].contains(name), let evening = calendar.date(byAdding: .hour, value: 12, to: date),
+               calendar.isDate(evening, inSameDayAs: date) { date = evening }
             // A weekday that's today and already past: next week's.
-            if date <= now, !["today", "tonight", "tomorrow"].contains(name) { date = calendar.date(byAdding: .day, value: 7, to: date) ?? date }
+            if date <= now, !["today", "tonight", "tomorrow", "this"].contains(name) { date = calendar.date(byAdding: .day, value: 7, to: date) ?? date }
             let label = group(6) != nil || group(5) != nil || name == "tonight" ? clockLabel(date) : "9:00"
             out.append((match.range, date, label))
         }
         out += moreTimeWords(text, now: now, calendar: calendar, taken: out.map(\.0))
-        return out.sorted { $0.0.location < $1.0.location }
+        // A time already gone by is no time to bring anything back at: Petal asks when instead.
+        return out.filter { $0.1 > now }.sorted { $0.0.location < $1.0.location }
     }
 
     /// The other ways of saying when, where none of `timeWords`' own is: "Dec 1", "1 December", "the 20th" (each
     /// with a time or at 9:00, the next one to come), "next month" (this day next month, at its time or 9:00), and a time alone
     /// ("at 5", "5pm", "17:30": today, or tomorrow once it's past; "at 5" alone is the afternoon, as "Friday 5" is).
     private static func moreTimeWords(_ text: String, now: Date, calendar: Calendar, taken: [NSRange]) -> [(NSRange, Date, String)] {
-        let time = #"(?:\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon))?(?!\w)"#
+        let time = #"(?:\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midnight))?(?!\w)"#
         let month = "(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\\.?"
         let patterns: [(kind: Int, pattern: String)] = [
             (0, "(?i)\\b" + month + "\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b" + time),
             (1, "(?i)\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?" + month + "(?=\\W|$)" + time),
             (2, "(?i)\\b(?:on\\s+)?the\\s+(\\d{1,2})(?:st|nd|rd|th)\\b" + time),
             (3, #"(?i)\bnext\s+month"# + time),
-            (4, #"(?i)\b(?:at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon)|(\d{1,2}(?::\d{2})?\s*(?:am|pm))|(\d{1,2}:\d{2}))\b"#),
+            (4, #"(?i)\b(?:at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midnight)|(\d{1,2}(?::\d{2})?\s*(?:am|pm))|(\d{1,2}:\d{2}))\b"#),
         ]
         let ns = text as NSString
         var taken = taken
@@ -1051,6 +1069,10 @@ enum NoteHelp {
                 default:
                     guard let said = group(1) ?? group(2) ?? group(3), let at = clock(said),
                           var made = calendar.date(bySettingHour: at.hour, minute: at.minute, second: 0, of: now) else { continue }
+                    // "at 8" in the evening, its morning gone by: 8 tonight, not tomorrow morning.
+                    let lower = said.lowercased()
+                    if made <= now, at.hour < 12, !lower.contains("am"), !lower.contains(":"), lower != "midnight",
+                       let evening = calendar.date(byAdding: .hour, value: 12, to: made), evening > now, calendar.isDate(evening, inSameDayAs: made) { made = evening }
                     if made <= now { made = calendar.date(byAdding: .day, value: 1, to: made) ?? made }
                     found = (made, clockLabel(made))
                 }
@@ -1173,7 +1195,12 @@ enum NoteHelp {
     /// What `line` would ask, before the gate.
     private static func candidate(_ line: String, now: Date, calendar: Calendar) -> Request {
         if let chain = chainWords(line) { return .chain(after: chain.after, ask: chain.ask, then: chain.then) }
-        let words = spoken(line)
+        var words = spoken(line)
+        // "remember: …", "forget, …": the same as without the mark.
+        for verb in ["remember", "forget"] where words.lowercased().hasPrefix(verb) {
+            let rest = words.dropFirst(verb.count)
+            if let mark = rest.first, ":,-–—".contains(mark) { words = verb + " " + rest.dropFirst().trimmingCharacters(in: .whitespaces) }
+        }
         let lower = words.lowercased()
         if lower.hasPrefix("remember ") || lower == "remember" {
             var item = String(words.dropFirst(9)).trimmingCharacters(in: .whitespaces)
@@ -1200,8 +1227,11 @@ enum NoteHelp {
             }
             // No time said: asked when, rather than handed to a helper that can't set one. "Remind me what this
             // was" is a question, not a reminder.
+            // "Remind me later", "remind me in 5", a time already gone by: asked when too.
             let after = lower.hasPrefix("remind me") ? lower.dropFirst(9).trimmingCharacters(in: .whitespaces).trimmingCharacters(in: .punctuationCharacters) : ""
-            if !lower.hasPrefix("remind me") || after.isEmpty || after.hasPrefix("to ") || after.hasPrefix("about ") { return .askWhen }
+            let question = ["what", "who", "whom", "whose", "how", "why", "when", "where", "which", "whether", "if"]
+                .contains { after == $0 || after.hasPrefix($0 + " ") || after.hasPrefix($0 + "'") }
+            if !lower.hasPrefix("remind me") || !question { return .askWhen }
         }
         if let against = lower.range(of: "against "), lower.contains("check") || lower.contains("compare") {
             let after = String(words[against.upperBound...])
@@ -1278,6 +1308,7 @@ enum NoteHelp {
     static func clockParts(_ words: String) -> (hour: Int, minute: Int)? {
         let text = words.lowercased().trimmingCharacters(in: .whitespaces)
         if text == "noon" { return (12, 0) }
+        if text == "midnight" { return (0, 0) }
         let pm = text.hasSuffix("pm"), am = text.hasSuffix("am")
         let digits = text.replacingOccurrences(of: "am", with: "").replacingOccurrences(of: "pm", with: "").trimmingCharacters(in: .whitespaces)
         let parts = digits.split(separator: ":")
