@@ -164,14 +164,20 @@ struct StackFolders: View {
 
     var body: some View {
         let folders = app.config.strings("stackFolders")
-        ForEach(folders, id: \.self) { folder in
+        // By place in the list: a folder written in twice (by hand) is two rows, and × takes out only its own.
+        ForEach(Array(folders.enumerated()), id: \.offset) { index, folder in
             // The folder the dock really shows for it (Screenshots stands for where macOS saves them), by its name.
             let shown = Stacks.resolve([folder]).first ?? folder
             HStack(spacing: 8) {
                 Image(nsImage: NSWorkspace.shared.icon(forFile: Stacks.url(shown).path)).resizable().frame(width: 20, height: 20)
                 Text(Stacks.name(shown)).font(.system(size: TextSize.body)).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 8)
-                RoundButton(symbol: "xmark") { app.config.set("stackFolders", app.config.strings("stackFolders").filter { $0 != folder }) }
+                RoundButton(symbol: "xmark") {
+                    var now = app.config.strings("stackFolders")
+                    // The list as it is now: the row's own entry when it's still there, else the first by that name.
+                    if let at = now.indices.contains(index) && now[index] == folder ? index : now.firstIndex(of: folder) { now.remove(at: at) }
+                    app.config.set("stackFolders", now)
+                }
             }
         }
         SettingRow(title: title) {
@@ -182,7 +188,10 @@ struct StackFolders: View {
                 guard panel.runModal() == .OK, let url = panel.url else { return }
                 let home = NSHomeDirectory()
                 let path = url.path.hasPrefix(home) ? "~" + url.path.dropFirst(home.count) : url.path
-                app.config.set("stackFolders", app.config.strings("stackFolders") + [path])
+                // A folder that's a stack already isn't added twice.
+                let stacks = app.config.strings("stackFolders")
+                guard !stacks.contains(where: { Stacks.url(Stacks.resolve([$0]).first ?? $0).standardizedFileURL == url.standardizedFileURL }) else { return }
+                app.config.set("stackFolders", stacks + [path])
             }
             .buttonStyle(.glass)
         }
