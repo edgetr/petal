@@ -43,6 +43,73 @@ struct WhatsNewCheck {
         expect(WhatsNew.keeps(last: "2.3.0", running: "2.2.0"), "going back keeps the older version")
         expect(!WhatsNew.keeps(last: "2.2.0", running: "2.2.0"), "the same version writes nothing")
         expect(!WhatsNew.keeps(last: "2.1.3", running: "dev"), "a version that isn't plain is never kept")
+        expect(WhatsNew.keeps(last: "2.2.0-beta", running: "2.2.0"), "a record that isn't a plain version is replaced, even one that reads as this one")
+
+        // What opens needs the version kept: a start that can't write state.json opens nothing, or it would open again
+        // at every start.
+        expect(WhatsNew.opens(["2.2.0"], kept: true) && !WhatsNew.opens(["2.2.0"], kept: false) && !WhatsNew.opens([], kept: true),
+               "What's New opens only with something to show, once the version is kept")
+
+        // Swept: thousands of Macs, each started many times as random versions (updates, going back, "2.1" beside
+        // "2.1.0", builds that aren't plain numbers), the welcome finished at a random start, state.json sometimes
+        // unwritable, as ReleaseNotes.afterLaunch does it.
+        var random = SystemRandomNumberGenerator()
+        let versionPool = ["2.0.1", "2.1", "2.1.0", "2.1.2", "2.1.3", "2.1.4", "2.2.0", "2.2", "2.3.0", "10.0", "dev", "2.2.0-beta", ""]
+        var opened = 0
+        for _ in 0..<3000 {
+            var last: String? = Bool.random(using: &random) ? nil : versionPool.randomElement(using: &random)!
+            let welcomedAt = Int.random(in: 0...4, using: &random)
+            var shownSince: [String: Bool] = [:]   // a version shown, and whether an older one was kept since
+            var previousKept = last
+            for start in 0..<12 {
+                let running = versionPool.randomElement(using: &random)!
+                let welcomed = start >= welcomedAt
+                let writable = Int.random(in: 0..<5, using: &random) > 0
+                let versions = WhatsNew.versions(last: last, running: running, welcomed: welcomed, carried: carried)
+                let kept = WhatsNew.keeps(last: last, running: running) && writable
+                let opens = WhatsNew.opens(versions, kept: kept)
+                let what = "start \(start): last \(last ?? "none") running \(running) welcomed \(welcomed) writable \(writable) -> \(versions)"
+                if !versions.isEmpty {
+                    expect(WhatsNew.keeps(last: last, running: running), "whatever would show is kept too: \(what)")
+                    expect(welcomed && UpdateTrust.plainVersion(running) && versions[0] == running, "it shows the running version first, after the welcome: \(what)")
+                    expect(versions.allSatisfy { UpdateTrust.plainVersion($0) && !UpdateTrust.newer($0, than: running) }, "never a version after the running one: \(what)")
+                    if let last, UpdateTrust.plainVersion(last) {
+                        expect(versions.allSatisfy { UpdateTrust.newer($0, than: last) }, "only versions after the one Petal ran as: \(what)")
+                    }
+                    expect(zip(versions, versions.dropFirst()).allSatisfy { UpdateTrust.newer($0, than: $1) }, "newest first, each once: \(what)")
+                }
+                if opens {
+                    opened += 1
+                    let key = shownSince.keys.first { WhatsNew.same($0, running) }
+                    expect(key.map { shownSince[$0] == true } ?? true, "a version opens twice only after going back to an older one: \(what)")
+                    if let key { shownSince[key] = nil }
+                    shownSince[running] = false
+                }
+                if kept {
+                    last = running
+                    if let previousKept, UpdateTrust.plainVersion(previousKept), UpdateTrust.newer(previousKept, than: running) {
+                        for (version, _) in shownSince where UpdateTrust.newer(version, than: running) { shownSince[version] = true }
+                    }
+                    previousKept = running
+                }
+                if failures > 20 { break }
+            }
+        }
+        expect(opened > 0, "the sweep opened What's New at all")
+
+        // Versions as UpdateTrust orders them: "2.1" and "2.1.0" one version, never newer than itself, and in one order.
+        let plain = ["0", "1", "2", "2.1", "2.1.0", "2.1.0.0", "2.1.3", "2.1.10", "2.1.9", "2.10", "2.9.9", "10.0", "999999.1"]
+        for a in plain {
+            expect(!UpdateTrust.newer(a, than: a) && WhatsNew.same(a, a), "\(a) isn't newer than itself")
+            for b in plain {
+                expect(!(UpdateTrust.newer(a, than: b) && UpdateTrust.newer(b, than: a)), "\(a) and \(b) aren't each newer than the other")
+                expect(UpdateTrust.newer(a, than: b) || UpdateTrust.newer(b, than: a) || WhatsNew.same(a, b), "\(a) and \(b) are in order")
+                for c in plain where UpdateTrust.newer(a, than: b) && UpdateTrust.newer(b, than: c) {
+                    expect(UpdateTrust.newer(a, than: c), "\(a) after \(b) after \(c)")
+                }
+            }
+        }
+        expect(UpdateTrust.newer("2.1.10", than: "2.1.9") && WhatsNew.same("2.1", "2.1.0.0"), "parts compare as numbers; missing parts are 0")
 
         // The part of a notes file the app shows.
         let file = """
