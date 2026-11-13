@@ -11,7 +11,7 @@ import Foundation
 /// second dock by it, or the installed one quits at its next start.
 enum PetalProcess {
     /// Flags that start Petal as something other than a dock (main.swift handles each before the dock starts).
-    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--display-check", "--browser-check", "--mcp", "--restore-dock"]
+    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--display-check", "--browser-check", "--look-check", "--mcp", "--restore-dock"]
     /// Every benchmark: --bench, --bench-dock, --bench-settings, --bench-windows, --bench-windows-child, -idle, --bench-notes.
     static let benchPrefix = "--bench"
 
@@ -46,6 +46,9 @@ enum PetalProcess {
         /// starts (BrowserCheck.swift). `--live <folder>`: with a real hidden display and a real installed browser: it
         /// changes the screens for a few seconds, so only ever run on purpose, by a person.
         case browserCheck(live: String?)
+        /// `Petal --look-check <bundle id>`: what petal_look's text would answer for that app's front window, read
+        /// only (LookCheck.swift): it never activates, clicks or types.
+        case lookCheck(String)
         /// A tool's flag written wrong (`--snapshot` with no folder, a `--bench…` there isn't): its usage, printed
         /// before anything starts, and a non-zero exit. Never a dock.
         case usage(String)
@@ -57,6 +60,7 @@ enum PetalProcess {
         "--snapshot": "Petal --snapshot <folder>",
         "--display-check": "Petal --display-check <folder> [--full]",
         "--browser-check": "Petal --browser-check [--live <folder>]",
+        "--look-check": "Petal --look-check <bundle id> [--find <word>] [--part <n>]",
         "--bench-windows-idle": "Petal --bench-windows-idle <window>",
         "--bench-windows": "Petal --bench-windows [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
         "--bench-settings": "Petal --bench-settings [--runs <n>] [--only <window>] [--json <file>] [--png <folder>]",
@@ -114,6 +118,10 @@ enum PetalProcess {
             guard words.contains("--live") else { return .browserCheck(live: nil) }
             guard let folder = value(after: "--live") else { return usage("--browser-check") }
             return .browserCheck(live: folder)
+        }
+        if words.contains("--look-check") {
+            guard let app = value(after: "--look-check") else { return usage("--look-check") }
+            return .lookCheck(app)
         }
         if let first, ["-h", "--help", "-help"].contains(first) { return .help }
         // A flag this Petal doesn't know (another version's tool, or one written wrong): it says so and ends before

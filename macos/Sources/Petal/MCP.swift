@@ -43,7 +43,7 @@ enum MCP {
         case "initialize":
             return ["protocolVersion": params["protocolVersion"] as? String ?? "2025-06-18", "capabilities": ["tools": [:]],
                     "serverInfo": ["name": "petal", "version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") ?? ""],
-                    "instructions": "Tools to customize the Petal dock. Call petal_get_state first."]
+                    "instructions": "Petal, the user's dock on this Mac, and Petal AI's tools. To change the dock, call petal_get_state first. For what the user is looking at, petal_look (text: true gives the window's words: read them to answer about or summarize a page, a document or a thread)."]
         case "tools/list":
             return ["tools": tools]
         case "tools/call":

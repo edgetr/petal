@@ -369,6 +369,10 @@ final class Assist {
         addClipboard()
         let pid = front.processIdentifier
         let shot = args["screenshot"] as? String ?? ((args["screenshot"] as? Bool) == true ? "window" : "")
+        // The window's words: asked for with text, or a word to find, or a part of them.
+        let find = (args["find"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let part = (args["part"] as? NSNumber)?.intValue ?? Int(args["part"] as? String ?? "")
+        let wantsText = args["text"] as? Bool == true || !find.isEmpty || part != nil
         // A note stuck to one tab looks only while that tab is the one its window shows: never at another tab.
         // Checked before reading and again once everything is read, right before it's told (`deliver`).
         let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
@@ -410,6 +414,7 @@ final class Assist {
                 : Self.shownText(selected, limit: 8000) ?? Self.tooMuchSelected
             let shownClipboard = clipboard.map { Self.shownText($0, limit: 4000) ?? Self.tooMuchClipboard }
             let looked = window
+            let words = wantsText ? Self.words(pid: pid, window: number, find: find, part: part ?? 1) : nil
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Another run's display is none of this one's: nothing of its window is told.
@@ -417,6 +422,7 @@ final class Assist {
                         return send(["note": "\(front.localizedName ?? "That app")'s window there belongs to another helper's work, on a display of its own: Petal keeps them apart."])
                     }
                     result["window"] = title
+                    if let words { result.merge(words) { _, new in new } }
                     if !shownSelection.isEmpty { result["selectedText"] = shownSelection }
                     if let shownClipboard { result["clipboard"] = shownClipboard }
                     let hidden = self.privatePIDs
@@ -443,6 +449,7 @@ final class Assist {
                             // takes the tab's button from now on).
                             if let tabPlace, let before, let note { self.app.claude.tabSeen(note: note, was: tabPlace, tab: before.tab, window: before.window) }
                             let told = {
+                                if words?["text"] != nil { self.did("Read the words in \(named: front.localizedName ?? "", else: "a window")") }
                                 if picture != nil {
                                     self.did(shot != "screen" ? "Looked at \(named: front.localizedName ?? "", else: "a window")"
                                              : ownDisplay != nil ? "Looked at its own display" : "Looked at your screen")
@@ -522,6 +529,58 @@ final class Assist {
                 }
             }
         }
+    }
+
+    /// What petal_look tells of a window's words (`text`, with `find` and `part`): read through Accessibility within
+    /// three seconds, by petal_ui's rules (`Reader.read` with `words`: a password field never, every text through the
+    /// vault's redaction, a secret shown in pieces hidden in each), then each line and the whole once more; nothing
+    /// while the vault can't be read, and all of it read again if the vault changed meanwhile (`VaultIndex.settled`).
+    /// Never Petal's own windows. Off the main thread.
+    nonisolated static func words(pid: pid_t, window: CGWindowID?, find: String, part: Int) -> [String: Any] {
+        if let own = UIMap.petalsOwn(pid) { return ["textNote": own] }
+        guard Windows.trusted else { return ["textNote": "Petal needs Accessibility to read a window's words (Petal's settings, Permissions)."] }
+        let unreadable: [String: Any] = ["textNote": VaultStore.unreadableText + " Petal can't hide its secrets, so it doesn't read a window's words until it can: try again in a moment."]
+        let made: [String: Any]?? = VaultIndex.settled { index -> [String: Any]? in
+            guard !index.unreadable else { return nil }
+            let reading = Reader.read(pid: pid, window: window, budget: 3, words: true)
+            guard !reading.vaultUnreadable else { return nil }
+            if reading.gone || reading.window == nil { return ["textNote": "Petal couldn't find that window to read its words."] }
+            // Each line once more, then the whole (a secret the pieces of a line make together never goes out), kept
+            // under what the vault's index searches whole.
+            var lines: [String] = []
+            var size = 0
+            var cut = reading.timedOut
+            for line in WindowText.lines(reading.nodes) {
+                if size + line.count > WindowText.most { cut = true; break }
+                lines.append(index.redacted(line))
+                size += line.count + 1
+            }
+            lines = index.redacted(lines.joined(separator: "\n")).components(separatedBy: "\n")
+            var told: [String: Any] = [:]
+            if cut { told["partial"] = "Petal read what it could of this window in time: the rest of it isn't here." }
+            guard lines.contains(where: { !$0.isEmpty }) else {
+                told["textNote"] = "Petal found no words in this window: the app may not show its text to Accessibility (a screenshot shows it)."
+                return told
+            }
+            if !find.isEmpty {
+                let found = WindowText.find(find, in: lines)
+                told["text"] = found.text
+                told["found"] = found.found
+                if found.found == 0 { told["textNote"] = "No “\(index.redacted(find))” in what Petal read of this window." }
+                if found.left > 0 { told["more"] = "\(found.left) more places with it didn't fit: find a longer phrase, or read the parts." }
+                return told
+            }
+            let page = WindowText.page(lines.joined(separator: "\n"), part: part)
+            told["text"] = page.text
+            if page.parts > 1 {
+                told["part"] = page.part
+                told["parts"] = page.parts
+            }
+            if page.left > 0 { told["more"] = "\(page.left) more characters: petal_look with part: \(page.part + 1) gives the next part (find: a word gives only the passages around it)." }
+            return told
+        }
+        guard case .some(.some(let told)) = made else { return unreadable }
+        return told
     }
 
     nonisolated static let tooMuchClipboard = "The clipboard holds too much to check for saved secrets: Petal doesn't read it."

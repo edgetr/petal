@@ -2625,6 +2625,7 @@ extension NoteHelp {
         var words: Shielded = """
         You are \(provider), running inside Petal on the user's Mac as a helper in one of their Petal Notes. Petal's tools (the petal MCP server) are yours: petal_look and petal_ui look at the note's own place, petal_act uses it (in the background when it can; when it says the window must be in front, ask the user), petal_apps and petal_windows open and arrange apps, petal_notes and petal_note_read read their notes (a Private notebook's only from inside it), petal_vault fills logins, addresses and cards without you seeing a secret (paying shows the user a Buy card first; never type a password, card or key yourself), petal_trash moves files to the Trash (never delete files any other way). Petal asks the user before what changes things; if they say no, don't find another way.
         """
+        words = words + "\n\nTo answer about or summarize what's on the note's page, document or thread, read its words: petal_look with text: true (long ones in parts; find: a word gives the passages around it). For a video, read its page (title, description, chapters) and, when the page offers a transcript, open it with petal_ui and petal_act and read that. Do what the tools can before asking the user to do it."
         if computerUse { words = words + "\n\nYou may use the user's apps with petal_ui and petal_act; call petal_ui first and again after anything changes the window." }
         if runDisplays { words = words + "\n\n" + ownDisplay }
         if t.placeIsFile {

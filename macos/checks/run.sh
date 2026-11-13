@@ -52,6 +52,10 @@ swiftc -parse-as-library -O -o "$out/thumbnails" Sources/Petal/ThumbnailCache.sw
 "$out/thumbnails"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
+# A window's words for petal_look's text (WindowText): reading order, a page without its browser's toolbar, the cap
+# and the next part, find, a secret hidden whole or in pieces, a password field left out.
+swiftc -parse-as-library -O -o "$out/windowtext" Sources/Petal/UIMap.swift checks/WindowTextCheck.swift
+"$out/windowtext"
 # What petal_act says of a menu is its app's own text (a Window menu lists every window by its title): the items a
 # menu has, the path walked and the item chosen are told only in UIMap's words, every title through the vault's
 # redaction (Acting.menuWords); the title Petal goes by (menuTitle) is never told.
