@@ -84,8 +84,9 @@ enum CLI {
 
 /// Lets the person's other AI agents (Claude Code or Codex, in any app or a terminal) change Petal too: Petal's MCP
 /// server is registered with Claude Code and Codex through their own `mcp add`, the skill is in their skills
-/// folders, and `petal` is on the PATH. Kept current on every start while `otherAgents` is on; turning it off takes
-/// all three back at once (`disconnect`), and turning it on sets them up at once. Connecting and disconnecting run
+/// folders, and `petal` is on the PATH. Kept current on every start while `otherAgents` is on, and taken back on
+/// every start while it's off (an older Petal left them when the switch went off); turning it off takes all three
+/// back at once (`disconnect`), and turning it on sets them up at once. Connecting and disconnecting run
 /// one after another, in the order they were asked, and each step looks first at what the person chose last
 /// (`wanted`), so a connect still under way when the switch goes off changes nothing more, and the last choice holds.
 /// Taking back removes only what is Petal's own (`AgentSetup`).

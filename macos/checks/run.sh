@@ -850,6 +850,17 @@ grep -q 'cp "$ROOT"/macos/notes/\*.md "$APP/Contents/Resources/notes/"' build.sh
 # the first setup and otherwise adds.
 swiftc -parse-as-library -O -o "$out/agentsetup" Sources/Petal/AgentSetup.swift checks/AgentSetupCheck.swift
 "$out/agentsetup"
+# Every skill a released Petal copied into the agents' folders is known as Petal's own (AgentSetup.earlierSkills), so
+# turning other agents off takes back what an older Petal left; the skill this source carries needn't be listed yet.
+current="$(shasum -a 256 Resources/skill/SKILL.md | cut -d' ' -f1)"
+for tag in $(git tag -l 'macos-v*' 2>/dev/null); do
+    skill="$(git ls-tree -r --full-tree --name-only "$tag" 2>/dev/null | grep -E '(^|/)skill/SKILL\.md$' | head -1)"
+    [ -n "$skill" ] || continue
+    digest="$(git show "$tag:$skill" | shasum -a 256 | cut -d' ' -f1)"
+    [ "$digest" = "$current" ] || grep -q "\"$digest\"" Sources/Petal/AgentSetup.swift \
+        || { echo "agent setup: $tag's skill ($digest) isn't in AgentSetup.earlierSkills"; exit 1; }
+done
+echo "agent setup: every released skill is known as Petal's own"
 swiftc -parse-as-library -O -o "$out/dockimport" Sources/Petal/DockImport.swift checks/DockImportCheck.swift
 "$out/dockimport"
 # An update rebuilt with the person's own changes to Petal's code takes its source from the release Petal checked:
