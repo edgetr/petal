@@ -1095,12 +1095,22 @@ final class NoteDesk {
 
     private var primaryHeight: CGFloat { Screens.all.first?.frame.height ?? 0 }
 
-    /// The visible frame (Accessibility's coordinates) of the screen a window is on.
+    /// The visible frame (Accessibility's coordinates) of the screen a window is on, less Petal's dock (paperArea).
     private func visible(for window: CGRect) -> CGRect? {
         let screens = Screens.all
         guard let screen = NoteRules.screen(for: NoteRules.appKitFrame(window, primaryHeight: primaryHeight), in: screens.map(\.frame)),
-              let visible = screens.first(where: { $0.frame == screen })?.visibleFrame else { return nil }
+              let visible = screens.first(where: { $0.frame == screen }).map(Self.paperArea) else { return nil }
         return CGRect(x: visible.minX, y: primaryHeight - visible.maxY, width: visible.width, height: visible.height)
+    }
+
+    /// Where papers may go on a screen (AppKit's coordinates): its visible area less the strip Petal's own dock takes
+    /// there while it shows (it draws over papers, and macOS keeps room only for its own Dock).
+    static func paperArea(_ screen: NSScreen) -> NSRect {
+        let app = PetalApp.shared
+        guard !Headless.on, let docks = app.docks, app.config.whichDock == "petal" else { return screen.visibleFrame }
+        let panel = docks.panels.values.first { $0.screenRef?.frame == screen.frame }
+        let reach = panel.flatMap { $0.hides ? nil : $0.reach }
+        return NoteRoom.freeOfDock(visible: screen.visibleFrame, screen: screen.frame, reach: reach, position: app.config.position)
     }
 
     /// The tabs on the window in front, and its notes that are showing beside it.
@@ -1526,7 +1536,7 @@ final class NoteDesk {
                 origin = CGPoint(x: point[0], y: point[1])
             } else {
                 // Nobody put it anywhere yet (a tool stuck it there): down the main screen's right side.
-                origin = NoteShelf.screenRest(index: resting, visible: Screens.all.first?.visibleFrame ?? .zero, paper: PaperLook.folded)
+                origin = NoteShelf.screenRest(index: resting, visible: Screens.all.first.map(Self.paperArea) ?? .zero, paper: PaperLook.folded)
                 resting += 1
             }
             panel.place(paperFrame: CGRect(x: origin.x, y: origin.y - size.height, width: size.width, height: size.height))
@@ -3371,7 +3381,7 @@ final class NotePanel: NSPanel {
         let screens = Screens.all
         let area = { (screen: NSScreen) -> CGFloat in let cut = screen.frame.intersection(rect); return cut.isNull ? 0 : cut.width * cut.height }
         guard let screen = screens.max(by: { area($0) < area($1) }).flatMap({ area($0) > 0 ? $0 : nil }) ?? Screens.main else { return rect }
-        return NoteShelf.wholeOnScreen(rect, visible: screen.visibleFrame)
+        return NoteShelf.wholeOnScreen(rect, visible: NoteDesk.paperArea(screen))
     }
 
     /// The keyboard, only for a paper layout already showed (NoteShelf.mayTakeKeyboard): never unveiled here.

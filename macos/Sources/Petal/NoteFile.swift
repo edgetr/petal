@@ -2336,6 +2336,25 @@ enum NoteRoom {
     /// The room right of the window, within the screen's visible area.
     static func room(window: CGRect, visible: CGRect) -> CGFloat { visible.maxX - window.maxX }
 
+    /// A screen's visible area (`visible`, AppKit's coordinates, y up) less the strip Petal's own dock takes along
+    /// `position`'s edge of the screen (`screen`), reaching `reach` in from it: macOS leaves room only for its own
+    /// Dock, and Petal's draws over papers. `reach` nil: no dock there, or it hides.
+    static func freeOfDock(visible: CGRect, screen: CGRect, reach: CGFloat?, position: String) -> CGRect {
+        guard let reach, reach > 0 else { return visible }
+        var free = visible
+        switch position {
+        case "left":
+            let edge = min(max(visible.minX, screen.minX + reach), visible.maxX)
+            free = CGRect(x: edge, y: visible.minY, width: visible.maxX - edge, height: visible.height)
+        case "right":
+            free.size.width = max(0, min(visible.maxX, screen.maxX - reach) - visible.minX)
+        default:
+            let edge = min(max(visible.minY, screen.minY + reach), visible.maxY)
+            free = CGRect(x: visible.minX, y: edge, width: visible.width, height: visible.maxY - edge)
+        }
+        return free
+    }
+
     /// The window's frame with room for a note `width` wide on its right, or nil when it has room already or can't
     /// make it (narrowed below its minimum: the note then sits over the window's edge instead). It keeps its left
     /// edge and shrinks; when that's too narrow it moves left first. `margin`: the room the note's panel keeps inside
