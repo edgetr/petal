@@ -60,8 +60,19 @@ final class MenuBar: NSObject, NSMenuDelegate {
             menu.addItem(Menus.header("Petal \(ready) is ready"))
             menu.addItem(ClosureMenuItem(title: "Restart to Update") { [weak self] in self?.app.relaunch() })
             menu.addItem(ClosureMenuItem(title: "What’s New in \(ready)") { [weak self] in self?.app.releaseNotes.show(ready) })
+        } else if let available = app.updater.available?.version {
+            menu.addItem(Menus.header("Petal \(available) is available"))
+            menu.addItem(ClosureMenuItem(title: "Install Petal \(available)") { [weak self] in
+                self?.app.updater.installAvailable()
+                self?.app.settings.show(.about)
+            })
+            menu.addItem(ClosureMenuItem(title: "What’s New in \(available)") { [weak self] in self?.app.releaseNotes.show(available) })
         } else {
-            let check = ClosureMenuItem(title: "Check for Updates") { [weak self] in self?.app.updater.check(manual: true) }
+            // Its answer shows in Settings › About as it comes: the menu is gone by then.
+            let check = ClosureMenuItem(title: "Check for Updates") { [weak self] in
+                self?.app.updater.check(manual: true)
+                self?.app.settings.show(.about)
+            }
             menu.addItem(check)
             let status = app.updater.status
             if !status.isEmpty {
@@ -230,7 +241,8 @@ final class ReleaseNotes {
 }
 
 /// The What's New window: its title, each version's notes (under its version when there are several, newest first),
-/// and one button at most: Restart to update while that version waits, or the release page when notes couldn't load.
+/// and one button at most: Restart to update while that version waits, Install while it's available with updates off,
+/// or the release page when notes couldn't load.
 struct ReleaseNotesView: View {
     @Environment(PetalApp.self) private var app
     let sections: [ReleaseNotes.Section]
@@ -263,6 +275,11 @@ struct ReleaseNotesView: View {
                     HStack {
                         Spacer()
                         AccentButton(title: "Restart to update") { app.relaunch() }.keyboardShortcut(.defaultAction)
+                    }
+                } else if let available = app.updater.available, available.version == sections.first?.version {
+                    HStack {
+                        Spacer()
+                        AccentButton(title: "Install") { app.updater.installAvailable() }.keyboardShortcut(.defaultAction)
                     }
                 } else if !failed.isEmpty {
                     HStack {

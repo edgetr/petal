@@ -5,12 +5,16 @@ import Observation
 /// Updates from GitHub Releases: 2 minutes after launch, then every 6 hours, while autoUpdate is on. Petal's
 /// releases are the tags macos-vX.Y.Z, and each carries latest-macos.json:
 /// {"version": "X.Y.Z", "url": "<zip>", "sha256": "<hex>"}. The new Petal.app replaces this one in place, and the menu bar
-/// offers to restart. A build run from a source checkout is never updated.
+/// offers to restart. With autoUpdate off, a check the person asks for stops at "available" (`available`), and the
+/// update is installed only when they press Install. A build run from a source checkout is never updated.
 @MainActor @Observable
 final class Updater {
     private(set) var status = ""
     /// A new Petal is installed and waits for a restart: the menu bar icon shows a dot and offers it.
     var ready: String?
+    /// A newer Petal found by a check the person asked for while autoUpdate is off: nothing is downloaded until they
+    /// press Install (`installAvailable`).
+    private(set) var available: Release?
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var checking = false
 
@@ -26,8 +30,9 @@ final class Updater {
         }
     }
 
-    func check(manual: Bool) {
-        guard manual || PetalApp.shared.config.bool("autoUpdate"), !checking else { return }
+    func check(manual: Bool, install wanted: Bool = false) {
+        let automatic = PetalApp.shared.config.bool("autoUpdate")
+        guard manual || automatic, !checking else { return }
         guard !isDevelopmentBuild else {
             status = "This copy of Petal doesn't update itself."
             return
@@ -36,22 +41,35 @@ final class Updater {
         status = "Checking…"
         Task {
             defer { checking = false }
+            let found: Release?
+            do { found = try await Self.latest() } catch { found = nil }
+            guard let latest = found else { status = "Couldn’t check for updates. Try again later."; return }
+            let current = PetalApp.shared.version
+            guard Self.newer(latest.version, than: current) else { available = nil; status = "You have the newest Petal, \(current)."; return }
+            // Already downloaded and in place: asking again never downloads it a second time.
+            guard ready != latest.version else { status = "Petal \(latest.version) is ready. Restart Petal to finish."; return }
+            // Updates off: the person decides, after seeing what's new in it.
+            guard automatic || wanted else {
+                available = latest
+                status = "Petal \(latest.version) is available."
+                return
+            }
             do {
-                guard let latest = try await Self.latest() else { status = "No Mac release yet."; return }
-                let current = PetalApp.shared.version
-                guard Self.newer(latest.version, than: current) else { status = "Petal \(current) is the newest."; return }
-                // Already downloaded and in place: asking again never downloads it a second time.
-                guard ready != latest.version else { status = "Petal \(latest.version) is ready. Restart Petal to finish."; return }
                 status = "Downloading Petal \(latest.version)…"
                 // With the person's own changes to Petal's code, it's rebuilt with them instead (Personal.swift).
                 if try await !Personal.update(to: latest, manual: manual) { try await install(latest) }
                 status = "Petal \(latest.version) is ready. Restart Petal to finish."
+                available = nil
                 ready = latest.version
             } catch {
                 status = "Couldn't update: \(error.localizedDescription)"
             }
         }
     }
+
+    /// Installs the update a check found while autoUpdate was off: the newest release is looked up again and checked as
+    /// every update is.
+    func installAvailable() { check(manual: true, install: true) }
 
     struct Release: Sendable { let version: String; let url: URL; let sha256: String }
 
