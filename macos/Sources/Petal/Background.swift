@@ -350,7 +350,7 @@ enum Background {
             case .didntStick: why = "The text didn't stay in that field in the background."
             case .opens: why = "That opens something (a link, a file, a window, or another app), which would come to the front over what the person is using."
             case .tab:
-                return "This note's tab isn't the one showing in its window, and a browser doesn't let anything use a tab in the background. Nothing was done. Ask the person to show that tab (clicking this note in the AI button's preview does), then petal_ui again."
+                return "Another tab is showing in this note's window, and nothing can use a tab that isn't showing. Nothing was done. Ask the person to switch back to it (clicking this note in the AI button's preview does), then petal_ui again."
             }
             return why + " Nothing was done, and Petal didn't bring it forward, so as not to interrupt the person. Say in one line what you need and ask them to bring the window forward (clicking this note in the AI button's preview does it); once it's in front, petal_ui again and carry on."
         }
@@ -368,7 +368,7 @@ enum Background {
             case .ignored: why = "\(app) ignored the typing in a window that isn't in front."
             case .didntStick: why = "The text didn't stay in that field."
             case .opens: why = "That opens something (a link, a file, a window, or another app), which could come up in front of the person."
-            case .tab: why = "Its tab isn't the one showing in its window."
+            case .tab: why = "Another tab is showing in its window."
             }
             return why + " Nothing was done. This window is on your own display, where nothing comes forward. Try another way (type into the field itself, press a button instead of a key or a menu), or wait until the person isn't using \(app); if it can only be done in front of them, say in one line what you need and ask them to press Show me (on this run in the AI button's preview), which brings the window to their screen, then petal_ui again."
         }

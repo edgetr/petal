@@ -159,6 +159,34 @@ struct NotePlace: Codable, Equatable, Sendable {
     }
 }
 
+/// One of a browser's windows as its AppleScript lists it: the browser's own id for it, its scripted name, its frame
+/// (top-left origin, as Accessibility counts) and its active tab's title.
+struct ScriptedWindow: Equatable, Sendable {
+    var id: String
+    var name: String
+    var frame: CGRect
+    var tabTitle: String
+}
+
+/// Whether a tab note's own tab is the one its window shows (`NoteRules.tabCheck`).
+enum TabCheck: Equatable, Sendable { case same, another, unknown }
+
+/// The same, as a tab note's AI is told it: its tab showing (with that tab as read now and its window's number),
+/// another tab showing, or Petal can't tell which, and why: no answer it could be sure of, or the browser hasn't been
+/// asked yet whether Petal may see its tabs, or said no.
+enum TabShown: Equatable, Sendable {
+    enum Unsure: Equatable, Sendable { case unknown, notAsked, refused }
+
+    case shown(tab: NoteTab, window: UInt32)
+    case another
+    case unsure(Unsure)
+
+    var showing: (tab: NoteTab, window: UInt32)? {
+        if case .shown(let tab, let window) = self { return (tab, window) }
+        return nil
+    }
+}
+
 /// The window a note's AI reads and uses: its app's focused one, one window by its number, or none at all.
 enum NoteTarget: Equatable, Sendable { case focused, window(UInt32), nothing }
 
@@ -339,6 +367,31 @@ enum NoteRules {
     /// Two frames the same, give or take the 2 points browsers and Accessibility round differently.
     static func sameFrame(_ a: CGRect, _ b: CGRect) -> Bool {
         abs(a.minX - b.minX) <= 2 && abs(a.minY - b.minY) <= 2 && abs(a.width - b.width) <= 2 && abs(a.height - b.height) <= 2
+    }
+
+    /// Which of a browser's windows, as its AppleScript lists them (`rows`), is the window Accessibility calls `title`
+    /// at `frame` (Chromium browsers: their script's window id isn't the window server's number). The frame must
+    /// match: one window there is that window; among several, the one whose name or active tab's title `title` starts
+    /// with (a browser adds its own name after it, " - Google Chrome", and may add a mark to its scripted name while a
+    /// tab plays sound, "… 🔊"); anything else, none. Never a guess between two.
+    static func scriptedWindow(title: String, frame: CGRect, rows: [ScriptedWindow]) -> Int? {
+        let there = rows.indices.filter { sameFrame(rows[$0].frame, frame) }
+        if there.count == 1 { return there[0] }
+        let named = there.filter { index in
+            [rows[index].name, rows[index].tabTitle].contains { !$0.isEmpty && title.hasPrefix($0) }
+        }
+        return named.count == 1 ? named[0] : nil
+    }
+
+    /// What a tab note's own window shows, from the browser's answer (`front`: that window, its tab as the browser
+    /// tells it): its own tab (by its id or its strip's button), another tab (the browser told a tab Petal can tell
+    /// apart, and it isn't the note's), or not known (a tab Petal can't tell apart, or no tab at all).
+    static func tabCheck(_ place: NotePlace, _ front: FrontPlace) -> TabCheck {
+        if surely(place, front) { return .same }
+        guard place.kind == .tab, place.pid == front.pid, let tab = place.tab, let now = front.tab else { return .unknown }
+        if let a = tab.id, let b = now.id, a != b { return .another }
+        if tab.id == nil, now.id == nil, let a = tab.element, let b = now.element, a != b { return .another }
+        return .unknown
     }
 
     /// Whether `place`'s window (or, for an app's note, any of its windows) is the one in front, whichever tab shows:

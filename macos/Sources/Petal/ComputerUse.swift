@@ -243,12 +243,16 @@ final class ComputerUse {
         Self.readQueue.async {
             // Its caller went while this waited its turn: nothing is read for nobody.
             if gone?() == true { return }
-            if let tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
-                return DispatchQueue.main.async { MainActor.assumeIsolated { self.waitsFor(caller, .tab) }; fail(ClaudePanel.tabNotShowing) }
+            if let tabPlace, case let state = ClaudePanel.tabState(tabPlace), state.showing == nil {
+                return DispatchQueue.main.async {
+                    MainActor.assumeIsolated { if state == .another { self.waitsFor(caller, .tab) } }
+                    fail(ClaudePanel.tabWords(state, browser: tabPlace.appName))
+                }
             }
             // Read again if the vault (or a secret Petal typed) changed meanwhile: nothing goes out unchecked against it.
             let settled = VaultIndex.settled { _ in Reader.read(pid: pid, window: wanted, budget: 1.5) }
-            let seen = tabPlace.flatMap { ClaudePanel.tabShowing($0) }
+            let after = tabPlace.map { ClaudePanel.tabState($0) }
+            let seen = after?.showing
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Turned off, or the app made private, while it read: nothing it read goes back.
@@ -272,7 +276,10 @@ final class ComputerUse {
                     // Another tab came forward while it read (or Petal can't tell any more): nothing it read goes back.
                     var stuckTab: NotePlace?
                     if let tabPlace {
-                        guard let seen, seen.window == reading.windowID else { self.waitsFor(caller, .tab); return fail(ClaudePanel.tabNotShowing) }
+                        guard let seen, seen.window == reading.windowID else {
+                            if after == .another { self.waitsFor(caller, .tab) }
+                            return fail(ClaudePanel.tabWords(after ?? .unsure(.unknown), browser: tabPlace.appName))
+                        }
                         self.app.claude.tabSeen(note: caller, was: tabPlace, tab: seen.tab, window: seen.window)
                         var now = tabPlace
                         if let tab = now.tab { now.tab = NoteRules.follow(tab, to: seen.tab, keepWords: true) }
@@ -883,8 +890,9 @@ final class ComputerUse {
         Self.actQueue.async {
             let before = display == nil ? [] : Set(RunDisplays.windowNumbers(pid: map.pid).keys)
             var outcome = Acting.Outcome()
-            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
-                outcome.needs = .tab
+            if let tabPlace = map.tabPlace, case let state = ClaudePanel.tabState(tabPlace), state.showing == nil {
+                // Another tab showing: the note waits for its tab. Petal can't tell which: said so, never "switch tabs".
+                if state == .another { outcome.needs = .tab } else { outcome.error = ClaudePanel.tabWords(state, browser: tabPlace.appName) }
             } else if !cancel.stopped {
                 let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options)
                 if let error = checked.error {
@@ -982,9 +990,9 @@ final class ComputerUse {
         cursor.preparing(job.caption, near: Self.screenPoint(near))
         Self.actQueue.async {
             // A tab note's tab must still be the one its window shows.
-            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
+            if let tabPlace = map.tabPlace, case let state = ClaudePanel.tabState(tabPlace), state.showing == nil {
                 return DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self.cursor.rest(); job.fail(ClaudePanel.tabNotShowing); self.finished() }
+                    MainActor.assumeIsolated { self.cursor.rest(); job.fail(ClaudePanel.tabWords(state, browser: tabPlace.appName)); self.finished() }
                 }
             }
             let prepared = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options)
@@ -1000,8 +1008,8 @@ final class ComputerUse {
                             if !cancel.stopped {
                                 // Right before the change: a tab note's tab still showing, then the window (its title
                                 // is the tab's), what's selected in it, what has the keyboard and the control, again.
-                                if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
-                                    outcome.error = ClaudePanel.tabNotShowing
+                                if let tabPlace = map.tabPlace, case let state = ClaudePanel.tabState(tabPlace), state.showing == nil {
+                                    outcome.error = ClaudePanel.tabWords(state, browser: tabPlace.appName)
                                 } else {
                                     let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options, known: prepared)
                                     // A note's act, decided while its window was in front: still so, and the person

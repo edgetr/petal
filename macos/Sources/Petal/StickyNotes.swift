@@ -572,12 +572,23 @@ extension ClaudePanel {
     }
 
     /// For a note stuck to a tab: the tab its window shows now, when that's the note's own tab (with the window's
-    /// number), else nil: another tab shows, or Petal can't tell (no answer, no window, not allowed to ask). A tab
-    /// note's AI reads and acts only on its own tab (`NoteRules.surely`: its id, or its button in the tab strip, in
-    /// the same run of the browser), never on whichever tab its window shows by then, nor one on its address.
-    /// Asks Accessibility and the browser: never on the main thread.
+    /// number), else nil: another tab shows, or Petal can't tell (`tabState` says which). A tab note's AI reads and
+    /// acts only on its own tab (`NoteRules.surely`: its id, or its button in the tab strip, in the same run of the
+    /// browser), never on whichever tab its window shows by then, nor one on its address. Asks Accessibility and the
+    /// browser: never on the main thread.
     nonisolated static func tabShowing(_ place: NotePlace) -> (tab: NoteTab, window: CGWindowID)? {
-        guard place.kind == .tab, place.tab != nil, Windows.trusted else { return nil }
+        tabState(place).showing
+    }
+
+    /// The same, saying which when it isn't: another tab is showing (the browser answered with a tab Petal can tell
+    /// apart, and it isn't the note's), or Petal can't tell (no answer, not allowed to ask the browser, its window not
+    /// found among the browser's). Before it says it can't tell, one more way to be sure: the note's window is its
+    /// browser's focused window, before and after the browser is asked, and the browser's front window's active tab
+    /// is the note's own (by its id or button). Off the main thread.
+    nonisolated static func tabState(_ place: NotePlace) -> TabShown {
+        let access: Browsers.Access = Browsers.kind(place.app) == .gecko ? .allowed : Browsers.access(place.app)
+        let unsure: TabShown = .unsure(access == .notAsked ? .notAsked : access == .denied ? .refused : .unknown)
+        guard place.kind == .tab, place.tab != nil, Windows.trusted else { return unsure }
         let app = AXUIElementCreateApplication(place.pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         let element: AXUIElement?
@@ -587,20 +598,54 @@ extension ClaudePanel {
         } else {
             element = Windows.value(app, kAXFocusedWindowAttribute)
         }
-        guard let element, let number = Windows.id(of: element), let frame = Windows.frame(of: element) else { return nil }
+        guard let element, let number = Windows.id(of: element), let frame = Windows.frame(of: element) else { return unsure }
         let window = Browsers.Window(number: number, title: Windows.value(element, kAXTitleAttribute) ?? "", frame: frame)
-        guard let now = Browsers.shownTab(pid: place.pid, bundleID: place.app, window: window, element: element) else { return nil }
-        let front = FrontPlace(pid: place.pid, app: place.app, window: number, tab: now)
-        return NoteRules.surely(place, front) ? (now, number) : nil
+        if let now = Browsers.shownTab(pid: place.pid, bundleID: place.app, window: window, element: element) {
+            switch NoteRules.tabCheck(place, FrontPlace(pid: place.pid, app: place.app, window: number, tab: now)) {
+            case .same: return .shown(tab: now, window: number)
+            case .another: return .another
+            case .unknown: break
+            }
+        }
+        // Its window is the browser's focused one, and stays so while the browser tells its front window's tab, whose
+        // title starts that window's own (so the front window the browser means is that very one).
+        guard access == .allowed else { return unsure }
+        let focused = { (Windows.value(app, kAXFocusedWindowAttribute) as AXUIElement?).flatMap { Windows.id(of: $0) } }
+        guard focused() == number, let active = Browsers.activeTab(pid: place.pid, bundleID: place.app), focused() == number,
+              !active.title.isEmpty, (Windows.value(element, kAXTitleAttribute) as String? ?? "").hasPrefix(active.title),
+              NoteRules.tabCheck(place, FrontPlace(pid: place.pid, app: place.app, window: number, tab: active)) == .same
+        else { return unsure }
+        return .shown(tab: active, window: number)
     }
+
+    /// What a tab note's AI hears when its tab isn't known to be showing in its window: Petal didn't read or use
+    /// anything there. Another tab showing: the person is asked to show it; Petal can't tell: never that (they may be
+    /// looking at it), but what helps. `browser`: the browser's name.
+    nonisolated static func tabWords(_ state: TabShown, browser: String) -> String {
+        let name = browser.isEmpty ? "the browser" : browser
+        let help: String
+        switch state {
+        case .shown:
+            return "This note's tab changed while Petal read it (another page, or it moved), so nothing of what was read is told: look again."
+        case .another:
+            return "Another tab is showing in this note's window, so Petal didn't read or use it: a tab's note works only on its own tab. Ask the person to switch back to that tab (clicking this note in the AI button's preview does); front: true uses what's in front instead."
+        case .unsure(.notAsked):
+            help = "Petal hasn't been allowed to see \(name)'s tabs yet: the person can allow it from this note's place menu (Let Petal see \(name)’s tabs…), then ask again."
+        case .unsure(.refused):
+            help = "\(name) refused to let Petal see its tabs: the person can allow it in System Settings › Privacy & Security › Automation, then ask again."
+        case .unsure(.unknown):
+            help = "Try once more in a moment."
+        }
+        return "Petal couldn't tell which tab this note's window is showing, so nothing was read or used there (it never works on another tab). \(help) Don't ask the person to switch tabs: they may be looking at it."
+    }
+
+    /// The same where it isn't known which: nothing more was done on the note's tab.
+    nonisolated static let tabNotShowing = "This note's tab isn't known to be the one showing in its window now (another tab is, or Petal can't tell which), so Petal didn't read or use it: it never works on another tab."
 
     /// What a note's AI hears when it was asked where its app showed no window (Finder's desktop): it has none.
     nonisolated static func noWindow(_ app: String) -> String {
         "This note was opened where \(app.isEmpty ? "its app" : app) showed no window, so it has no window to look at or use. front: true uses what's in front now."
     }
-
-    /// What a tab note's AI hears when its tab isn't the one showing in its window.
-    nonisolated static let tabNotShowing = "Your note's tab isn't showing in its window now (another tab is, or Petal can't tell which), so Petal won't read or use it: it never works on another tab. Ask the person to switch back to that tab; front: true uses what's in front instead."
 
     /// A tab note's tab was just seen showing in its window (its AI read or used it there): the note follows it (a new
     /// address, place or window), as when Petal sees it in front. Only while the note is still stuck where it was

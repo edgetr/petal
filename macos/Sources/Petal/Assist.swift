@@ -373,9 +373,10 @@ final class Assist {
         // Checked before reading and again once everything is read, right before it's told (`deliver`).
         let tabPlace = place.flatMap { $0.kind == .tab && $0.tab != nil ? $0 : nil }
         Self.queue.async {
-            let before = tabPlace.flatMap { ClaudePanel.tabShowing($0) }
-            if tabPlace != nil, before == nil {
-                return DispatchQueue.main.async { send(["note": ClaudePanel.tabNotShowing]) }
+            let state = tabPlace.map { ClaudePanel.tabState($0) }
+            let before = state?.showing
+            if let tabPlace, let state, before == nil {
+                return DispatchQueue.main.async { send(["note": ClaudePanel.tabWords(state, browser: tabPlace.appName)]) }
             }
             let element = AXUIElementCreateApplication(pid)
             AXUIElementSetMessagingTimeout(element, 0.3)
@@ -461,15 +462,15 @@ final class Assist {
                         }
                         guard let tabPlace, let before else { return tell() }
                         Self.queue.async {
-                            let after = ClaudePanel.tabShowing(tabPlace)
+                            let state = ClaudePanel.tabState(tabPlace)
                             // The same tab of the same window it read: its id or button, place and address unchanged.
-                            let same = after.map { now in
+                            let same = state.showing.map { now in
                                 now.window == before.window && before.window == number && now.tab.id == before.tab.id
                                     && now.tab.element == before.tab.element && now.tab.index == before.tab.index
                                     && now.tab.count == before.tab.count && now.tab.url == before.tab.url
                             } ?? false
                             DispatchQueue.main.async {
-                                MainActor.assumeIsolated { same ? tell() : refuse(["note": ClaudePanel.tabNotShowing]) }
+                                MainActor.assumeIsolated { same ? tell() : refuse(["note": ClaudePanel.tabWords(state, browser: tabPlace.appName)]) }
                             }
                         }
                     }
