@@ -2125,6 +2125,13 @@ final class NoteHelpers {
         if summoned.remove(old) != nil { summoned.insert(new) }
     }
 
+    /// The document a helper of the note `noteID` means when it names none (`NoteHelp.helperDocument`): its run's
+    /// own file place first.
+    func document(for noteID: String) -> NoteHelp.DocumentChoice {
+        guard let paper = paper(noteID) else { return .none }
+        return NoteHelp.helperDocument(required: runs[noteID]?.requiredPlace, places: paper.file.places, isFile: ViewerFiles.namesFile)
+    }
+
     /// A note picked from the AI button's preview, or a quick question's source chip.
     func show(_ sticky: StickyNote) { if let noteID = sticky.paper { summon(noteID, open: true) } }
 

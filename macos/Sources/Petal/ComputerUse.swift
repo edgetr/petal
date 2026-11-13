@@ -1287,6 +1287,9 @@ enum Reader {
         /// that holds one, with the secret's parts (`UIMap.guardedSecrets`): selecting it a little at a time would
         /// show it whole.
         var guarded: [Int: [String]] = [:]
+        /// For a read of the window's words (`words`): every element as read, before anything of it was hidden (by
+        /// the same index as `nodes`), so what's told can be checked whole for a secret shown in pieces.
+        var raw: [UINode] = []
     }
 
     static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -1444,7 +1447,7 @@ enum Reader {
         }
         for index in reading.joined { UIMap.hideAll(&walked[index]) }
         reading.guarded = UIMap.guardedSecrets(whole, own: own)
-        if words { reading.nodes = walked; return reading }
+        if words { reading.nodes = walked; reading.raw = whole; return reading }
         reading.nodes = told.map { walked[$0] }
         reading.fingerprint = fingerprint(app: app, window: window, lists: reading.lists)
         return reading

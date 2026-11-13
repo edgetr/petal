@@ -980,7 +980,7 @@ enum NoteHelp {
     }
 
     /// The other ways of saying when, where none of `timeWords`' own is: "Dec 1", "1 December", "the 20th" (each
-    /// with a time or at 9:00, the next one to come), "next month" (this day next month, 9:00), and a time alone
+    /// with a time or at 9:00, the next one to come), "next month" (this day next month, at its time or 9:00), and a time alone
     /// ("at 5", "5pm", "17:30": today, or tomorrow once it's past; "at 5" alone is the afternoon, as "Friday 5" is).
     private static func moreTimeWords(_ text: String, now: Date, calendar: Calendar, taken: [NSRange]) -> [(NSRange, Date, String)] {
         let time = #"(?:\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon))?(?!\w)"#
@@ -989,7 +989,7 @@ enum NoteHelp {
             (0, "(?i)\\b" + month + "\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b" + time),
             (1, "(?i)\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?" + month + "(?=\\W|$)" + time),
             (2, "(?i)\\b(?:on\\s+)?the\\s+(\\d{1,2})(?:st|nd|rd|th)\\b" + time),
-            (3, #"(?i)\bnext\s+month\b"#),
+            (3, #"(?i)\bnext\s+month"# + time),
             (4, #"(?i)\b(?:at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon)|(\d{1,2}(?::\d{2})?\s*(?:am|pm))|(\d{1,2}:\d{2}))\b"#),
         ]
         let ns = text as NSString
@@ -1043,9 +1043,10 @@ enum NoteHelp {
                         found = (made, dayLabel(made, now: now, calendar: calendar) + " " + clockLabel(made))
                     }
                 case 3:
+                    let at = group(1).flatMap(clock) ?? (9, 0)
                     if let later = calendar.date(byAdding: .month, value: 1, to: now),
-                       let made = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: later) {
-                        found = (made, dayLabel(made, now: now, calendar: calendar) + " 9:00")
+                       let made = calendar.date(bySettingHour: at.hour, minute: at.minute, second: 0, of: later) {
+                        found = (made, dayLabel(made, now: now, calendar: calendar) + " " + clockLabel(made))
                     }
                 default:
                     guard let said = group(1) ?? group(2) ?? group(3), let at = clock(said),
@@ -1622,16 +1623,32 @@ enum NoteHelp {
 
     /// Whether a line on a repository's note asks for work in it (a coding helper in a worktree), rather than a
     /// question about it: fix, change, add, implement, write, make or build something, a pull request, a commit or a
-    /// push, or a checkout named ("in ~/x"). A question ("what does this do?", "summarize this PR") is answered.
+    /// push, or a checkout named ("in ~/x"), said plainly or politely ("please fix", "can you add a test", "could you
+    /// please rename it"). A question ("what does this change?", "can you explain why this fails?", "summarize this
+    /// PR") is answered.
     static func asksForWork(_ line: String) -> Bool {
         let lower = spoken(line).lowercased()
         if lower.range(of: #"\bin\s+~/"#, options: .regularExpression) != nil { return true }
-        let first = lower.split(whereSeparator: { !$0.isLetter && $0 != "'" }).first.map(String.init) ?? ""
-        if ["what", "why", "how", "who", "when", "where", "which", "is", "are", "does", "do", "can", "could", "should", "summarize",
-            "explain", "describe", "tell", "show", "list", "read", "review", "check", "compare"].contains(first) { return false }
+        var words = lower.split(whereSeparator: { !$0.isLetter && $0 != "'" }).map(String.init)
+        // A request's opener, taken off before its verb: "please", "can you", "could you please", "would you mind".
+        var opened = false
+        while let first = words.first {
+            if ["please", "pls", "kindly", "ok", "okay", "hey"].contains(first) { words.removeFirst(); opened = true; continue }
+            if words.count >= 2, ["can", "could", "would", "will"].contains(first), ["you", "we"].contains(words[1]) {
+                words.removeFirst(2)
+                opened = true
+                if words.first == "mind" { words.removeFirst() }
+                continue
+            }
+            break
+        }
+        let first = words.first ?? ""
         let verbs = ["fix", "change", "implement", "add", "write", "refactor", "rename", "remove", "update", "make", "build",
-                     "port", "migrate", "bump", "upgrade", "commit", "push", "merge", "rebase", "resolve", "address", "finish", "continue"]
+                     "port", "migrate", "bump", "upgrade", "commit", "push", "merge", "rebase", "resolve", "address", "finish", "continue",
+                     "fixing", "changing", "adding", "writing", "updating", "making", "removing", "renaming"]
         if verbs.contains(first) { return true }
+        if !opened, ["what", "why", "how", "who", "when", "where", "which", "is", "are", "does", "do", "can", "could", "should", "summarize",
+                     "explain", "describe", "tell", "show", "list", "read", "review", "check", "compare"].contains(first) { return false }
         return ["open a pr", "open a pull request", "make a pr", "pull request for", "send a pr"].contains { lower.contains($0) }
     }
 
@@ -2682,6 +2699,22 @@ extension NoteHelp {
         }
         if let chat, available.contains(chat) { return .use(chat) }
         return available.first.map(ProviderChoice.use) ?? .none
+    }
+
+    /// Which document a note's helper means when it names none (`petal_view` with no path): the file place its run is
+    /// bound to (`required`), else the note's only file place; on several with none bound, which they are, for the
+    /// helper to name one by its path; none, when the note is on no file.
+    enum DocumentChoice: Equatable { case one(NoteStick), several([NoteStick]), none }
+
+    /// `isFile`: whether a place names a file (`ViewerFiles.namesFile`).
+    static func helperDocument(required: NoteStick?, places: [NoteStick], isFile: (NoteStick) -> Bool) -> DocumentChoice {
+        if let required, isFile(required) { return .one(required) }
+        let files = places.filter(isFile)
+        switch files.count {
+        case 0: return .none
+        case 1: return .one(files[0])
+        default: return .several(files)
+        }
     }
 
     /// A coding helper's ink: its answer, its proof only from its own "Proof:" line, its finish line apart.

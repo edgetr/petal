@@ -26,6 +26,7 @@ struct WindowTextCheck {
             node.label = label
             node.order = nodes.count
             node.parent = parent
+            node.sibling = nodes.filter { $0.parent == parent }.count
             node.web = web ?? (parent >= 0 && (nodes[parent].web || nodes[parent].role == "AXWebArea"))
             nodes.append(node)
             return node.order
@@ -92,21 +93,23 @@ struct WindowTextCheck {
 
         // MARK: The cap and the next part
 
-        let long = (1...3000).map { "Line \($0) of a long page" }.joined(separator: "\n")
-        let parts = WindowText.parts(long, cap: WindowText.cap)
-        expect(parts.count > 1 && parts.allSatisfy { $0.count <= WindowText.cap }, "a long page in parts of at most the cap", "\(parts.map(\.count))")
-        expect(parts.joined(separator: "\n") == long, "the parts are the page, cut only at line ends")
-        let first = WindowText.page(long, part: 1)
-        expect(first.part == 1 && first.parts == parts.count && first.text == parts[0], "part 1 is the first")
-        expect(first.left == parts.dropFirst().reduce(0) { $0 + $1.count }, "and says how much more there is")
-        let second = WindowText.page(long, part: 2)
-        expect(second.text == parts[1] && second.part == 2, "part 2 is the next")
-        let past = WindowText.page(long, part: 99)
-        expect(past.part == parts.count && past.left == 0, "past the end: the last part, nothing left")
-        let short = WindowText.page("one line", part: 1)
-        expect(short.text == "one line" && short.parts == 1 && short.left == 0, "a short page is one part")
-        let oneLine = String(repeating: "x", count: 30_000)
-        expect(WindowText.parts(oneLine, cap: 12_000).map(\.count) == [12_000, 12_000, 6_000], "one line longer than a part is cut")
+        let longLines = (1...3000).map { WindowText.Line(text: "Line \($0) of a long page", nodes: [$0]) }
+        let ranges = WindowText.parts(longLines)
+        let partText = { (range: Range<Int>) in longLines[range].map(\.text).joined(separator: "\n") }
+        expect(ranges.count > 1 && ranges.allSatisfy { partText($0).count <= WindowText.cap }, "a long page in parts of at most the cap",
+               "\(ranges.map { partText($0).count })")
+        expect(ranges.map(partText).joined(separator: "\n") == longLines.map(\.text).joined(separator: "\n"), "the parts are the page, cut only at line ends")
+        let first = WindowText.page(longLines, part: 1)
+        expect(first.part == 1 && first.parts == ranges.count && first.lines == ranges[0], "part 1 is the first")
+        expect(first.left == ranges.dropFirst().reduce(0) { $0 + partText($1).count }, "and says how much more there is")
+        let second = WindowText.page(longLines, part: 2)
+        expect(second.lines == ranges[1] && second.part == 2, "part 2 is the next")
+        let past = WindowText.page(longLines, part: 99)
+        expect(past.part == ranges.count && past.left == 0, "past the end: the last part, nothing left")
+        let short = WindowText.page([WindowText.Line(text: "one line", nodes: [0])], part: 1)
+        expect(short.lines == 0..<1 && short.parts == 1 && short.left == 0, "a short page is one part")
+        let oneLine = WindowText.chunked([WindowText.Line(text: String(repeating: "x", count: 30_000), nodes: [7])], cap: 12_000)
+        expect(oneLine.map(\.text.count) == [12_000, 12_000, 6_000] && oneLine.allSatisfy { $0.nodes == [7] }, "one line longer than a part is cut, each piece its own")
 
         // MARK: find
 
@@ -151,6 +154,51 @@ struct WindowTextCheck {
         let blind = page.nodes.map { UIMap.redactWords($0, secret: unreadable.matches, redacted: unreadable.redacted) }
         expect(WindowText.lines(blind).allSatisfy { $0.replacingOccurrences(of: UIMap.hidden, with: "").allSatisfy { " #".contains($0) } },
                "the vault unreadable: nothing told as checked", "\(WindowText.lines(blind))")
+
+        // MARK: What's told is checked whole, however far the window's own scan got
+
+        // A long page (many parts) with a card number shown in four short pieces near its start and another far on;
+        // `shown` is each piece through the vault's redaction only, as if the window's scan for pieces ran out of time.
+        let cards = UIMap.SecretIndex(["4111111111111111", "5500000000000004"])
+        var long = Tree()
+        let lw = long.add("AXWindow")
+        let lweb = long.add("AXWebArea", parent: lw)
+        func paragraph(_ words: String) { let p = long.add("AXGroup", parent: lweb); long.add("AXStaticText", parent: p, value: words) }
+        func addCard(_ label: String, _ pieces: [String]) {
+            let p = long.add("AXGroup", parent: lweb)
+            long.add("AXStaticText", parent: p, value: label)
+            for piece in pieces { long.add("AXStaticText", parent: p, value: piece) }
+        }
+        for n in 1...2000 {
+            if n == 10 { addCard("Card one", ["4111", "1111", "1111", "1111"]) }
+            if n == 1500 { addCard("Card two", ["5500", "0000", "0000", "0004"]) }
+            paragraph("Paragraph \(n) says something about the page.")
+        }
+        let longShown = long.nodes.map { UIMap.redactWords($0, secret: cards.matches, redacted: cards.redacted) }
+        let unscanned = WindowText.lines(longShown).joined(separator: "\n")
+        expect(unscanned.contains("4111 1111 1111 1111") || unscanned.contains("41111111"), "the made-up page shows the card in pieces before the check",
+               String(unscanned.prefix(400)))
+        func tell(_ part: Int, find: String = "", going: @escaping () -> Bool = { true }) -> WindowText.Told {
+            WindowText.told(shown: longShown, raw: long.nodes, part: part, find: find, redact: cards.redacted, matches: cards.matches,
+                            spans: cards.spans, going: going)
+        }
+        let one = tell(1)
+        expect(one.parts > 3 && one.text?.contains("Card one") == true && one.hid, "the first part, with the first card", "\(one.parts) \(one.hid)")
+        expect(one.text.map { !$0.contains("4111") && !$0.contains("1111") } == true, "its pieces hidden in what's told", one.text.map { String($0.prefix(600)) } ?? "nil")
+        expect(one.text?.contains("Paragraph 5 says something about the page.") == true && one.left > 0, "the rest of the part as it is, and more after it")
+        let all = (1...one.parts).map { tell($0) }
+        expect(all.allSatisfy { !$0.unchecked }, "every part checked")
+        let later = all.first { $0.text?.contains("Card two") == true }
+        expect(later.map { $0.part > 1 && $0.hid && !($0.text ?? "").contains("5500") && !($0.text ?? "").contains("0004") } == true,
+               "a later part's card hidden too", later.map { "\($0.part)" } ?? "no part has it")
+        expect(all.allSatisfy { t in ["4111", "1111 1111", "5500", "0000 0000", "0004"].allSatisfy { !(t.text ?? "").contains($0) } }, "no part shows a card's pieces")
+        let around = tell(1, find: "Card two")
+        expect(around.found == 1 && around.text?.contains("Card two") == true && !(around.text ?? "").contains("5500"), "find's passages are checked the same way",
+               around.text ?? "nil")
+        let tooSlow = tell(1, going: { false })
+        expect(tooSlow.unchecked && tooSlow.text == nil, "a part whose pieces can't be checked in time tells nothing")
+        let plain = WindowText.told(shown: mailLines.isEmpty ? [] : mail.nodes, raw: mail.nodes, part: 1, find: "", redact: { $0 }, matches: { _ in false })
+        expect(plain.text == mailLines.joined(separator: "\n") && !plain.hid && plain.parts == 1, "nothing secret: the words as they are", plain.text ?? "nil")
 
         print(failures == 0 ? "ok: \(passed) checks" : "\(failures) failed, \(passed) passed")
         exit(failures == 0 ? 0 : 1)

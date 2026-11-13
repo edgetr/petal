@@ -109,6 +109,14 @@ struct NoteHelpCheck {
         expect(whenOf("remind me Dec 1") == DateComponents(month: 12, day: 1, hour: 9, minute: 0), "a month and day")
         expect(whenOf("remind me 14 February at 8am") == DateComponents(month: 2, day: 14, hour: 8, minute: 0), "a day and month, next year's")
         expect(whenOf("bring this back next month") == DateComponents(month: 12, day: 9, hour: 9, minute: 0), "next month")
+        expect(whenOf("remind me next month at 17:30") == DateComponents(month: 12, day: 9, hour: 17, minute: 30), "next month at its time",
+               "\(String(describing: whenOf("remind me next month at 17:30")))")
+        expect(whenOf("remind me the 20th at 5") == DateComponents(month: 11, day: 20, hour: 17, minute: 0)
+               && whenOf("remind me Dec 1 at 9am") == DateComponents(month: 12, day: 1, hour: 9, minute: 0)
+               && whenOf("remind me 1 December at 9:15pm") == DateComponents(month: 12, day: 1, hour: 21, minute: 15)
+               && whenOf("bring this back on the 20th 8pm") == DateComponents(month: 11, day: 20, hour: 20, minute: 0),
+               "every new day form takes the time said after it")
+        expect(NoteHelp.timeWords("remind me next month at 17:30", now: now, calendar: calendar).count == 1, "one time, not a day and a time apart")
         expect(whenOf("bring this back Friday 9:00") == DateComponents(month: 11, day: 13, hour: 9, minute: 0), "the old ways still the same")
         expect(whenOf("bring this back in 3 days") != nil && whenOf("what was in 3") == nil && whenOf("page 20 of the report") == nil, "a number alone is no time")
         if case .bringBack = ask("@Petal remind me at 5pm to call the bank") { expect(true, "") } else { expect(false, "remind me at a time alone") }
@@ -291,6 +299,12 @@ struct NoteHelpCheck {
                && NoteHelp.asksForWork("@Petal can you look at this in ~/petal"), "a line asking for work, or naming a checkout")
         expect(!NoteHelp.asksForWork("@Petal what does this project do?") && !NoteHelp.asksForWork("@Petal summarize this PR")
                && !NoteHelp.asksForWork("@Petal is this safe to merge?"), "a question is answered, not a coding job")
+        let polite = ["@Petal Can you fix the failing test?", "@Petal Could you add a test for this", "@Petal Please fix this",
+                      "@Petal could you please rename the helper", "@Petal would you mind updating the README?", "@Petal can we open a PR for this?"]
+        expect(polite.allSatisfy(NoteHelp.asksForWork), "a polite request for work is a coding job", polite.filter { !NoteHelp.asksForWork($0) }.joined(separator: " | "))
+        let questions = ["@Petal can you explain why this fails?", "@Petal what does this change?", "@Petal could you summarize this PR?",
+                         "@Petal how does the build work?", "@Petal please explain the release steps", "@Petal can you tell me what changed?"]
+        expect(!questions.contains(where: NoteHelp.asksForWork), "a question, polite or not, is answered", questions.filter(NoteHelp.asksForWork).joined(separator: " | "))
         expect(NoteHelp.pullNumber(NoteHelp.repository(url: "https://github.com/edgetr/petal/issues/3")!) == nil, "an issue starts from the default branch")
         let config = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:Edgetr/petal.git\n\tfetch = +refs/heads/*\n[branch \"main\"]\n\tremote = origin"
         expect(NoteHelp.remotes(config: config).map { "\($0.name) \($0.url)" } == ["origin git@github.com:Edgetr/petal.git"], "a git config's remotes, by name")
@@ -433,6 +447,25 @@ struct NoteHelpCheck {
         expect(tabPlace.words.text.hasPrefix("The page “A video” at https://www.youtube.com/watch?v=abc123") && !tabPlace.words.text.contains(digits),
                "a tab's page told with its title and whole address, redacted", tabPlace.words.text)
         expect(!privateTab.words.text.contains("youtube") && !privateTab.words.text.contains("A video"), "a private app's tab: neither", privateTab.words.text)
+        // A helper's tile in the AI button's preview: its note's title from its body redacted whole; no index, its app.
+        let tileTitle = NoteShield.previewTitle(body: "# Pay with \(secret) today\nmore", index: index, fallback: "Safari")
+        expect(!tileTitle.contains(digits) && tileTitle.hasPrefix("Pay with"), "a tile's title is redacted before it's derived", tileTitle)
+        // petal_view with no path: the run's own document, else the only one, never one of two by a guess.
+        do {
+        var pdf = NoteStick(kind: .file)
+        pdf.path = "/Users/x/a.pdf"
+        var deck = NoteStick(kind: .file)
+        deck.path = "/Users/x/b.key"
+        var page = NoteStick(kind: .tab)
+        page.url = "https://example.com"
+        expect(NoteHelp.helperDocument(required: deck, places: [pdf, deck], isFile: ViewerFiles.namesFile) == .one(deck), "the document the run is bound to")
+        expect(NoteHelp.helperDocument(required: page, places: [page, pdf], isFile: ViewerFiles.namesFile) == .one(pdf), "the note's only document")
+        expect(NoteHelp.helperDocument(required: page, places: [pdf, deck, page], isFile: ViewerFiles.namesFile) == .several([pdf, deck])
+               && NoteHelp.helperDocument(required: nil, places: [pdf, deck], isFile: ViewerFiles.namesFile) == .several([pdf, deck]), "two documents, none bound: which, never a pick")
+        expect(NoteHelp.helperDocument(required: nil, places: [page], isFile: ViewerFiles.namesFile) == .none, "no document")
+        }
+        expect(NoteShield.previewTitle(body: "# Plain", index: nil, fallback: "Safari") == "Safari"
+               && NoteShield.previewTitle(body: "# Plain", index: .unavailable, fallback: "Safari") == "Safari", "no index, or one that can't be read: the app's name")
         told.place = ""
         expect(NoteHelp.brief(told).text.contains("isn't on a window now"), "a note on no window is told not to look in front")
         let literal: Shielded = "Go on where you stopped."
