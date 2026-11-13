@@ -28,10 +28,15 @@ enum WhatsNew {
 
     /// Whether this start should be kept as the last version Petal ran as: whenever it's a plain version and differs
     /// from the one kept, so What's New opens once for a version, and a first install or going back to an older one
-    /// is kept too (the next update compares with it).
+    /// is kept too (the next update compares with it). A record that isn't a plain version counts as none, as in
+    /// `versions` ("2.2.0-beta" would read as 2.2.0 and never be replaced, so 2.2.0's notes would open every time).
     static func keeps(last: String?, running: String) -> Bool {
-        UpdateTrust.plainVersion(running) && (last.map { !same($0, running) } ?? true)
+        UpdateTrust.plainVersion(running) && (last.map { !UpdateTrust.plainVersion($0) || !same($0, running) } ?? true)
     }
+
+    /// Whether What's New opens with `versions` (from `versions(…)`): only once the running version is kept as the
+    /// last one (`kept`), since a start that couldn't keep it would open it again at the next one.
+    static func opens(_ versions: [String], kept: Bool) -> Bool { !versions.isEmpty && kept }
 
     /// "2.1" and "2.1.0" are the same version.
     static func same(_ a: String, _ b: String) -> Bool { !UpdateTrust.newer(a, than: b) && !UpdateTrust.newer(b, than: a) }

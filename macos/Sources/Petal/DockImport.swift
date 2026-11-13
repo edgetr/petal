@@ -8,12 +8,16 @@ enum DockImport {
     /// - `firstSetup`: the welcome isn't finished yet, so nothing of the person's is in Petal's dock to keep.
     /// - `key`: what makes two folders the same one (where each stack really is).
     ///
-    /// On the first setup macOS's Dock becomes Petal's: its apps in its order, and its folders as the stacks (Petal's
-    /// own stacks stay when macOS's Dock has none). Every other time it only adds: macOS's apps and folders that
-    /// Petal's dock doesn't have, after the ones it has, each once; nothing the person has is moved or removed.
+    /// On the first setup, into a dock with no apps, macOS's Dock becomes Petal's: its apps in its order, and its
+    /// folders as the stacks (Petal's own stacks stay when macOS's Dock has none). Every other time, and on a first
+    /// setup whose dock already has apps (an older Petal used without finishing the welcome, an agent's), it only
+    /// adds: macOS's apps and folders that Petal's dock doesn't have, after the ones it has, each once; nothing the
+    /// person has is moved or removed.
     static func merge(apps: [String], folders: [String], systemApps: [String], systemFolders: [String], firstSetup: Bool,
                       key: (String) -> String = { $0 }) -> (apps: [String], folders: [String]) {
-        if firstSetup { return (adding(systemApps, to: [], key: { $0 }), systemFolders.isEmpty ? folders : adding(systemFolders, to: [], key: key)) }
+        if firstSetup && apps.isEmpty {
+            return (adding(systemApps, to: [], key: { $0 }), systemFolders.isEmpty ? folders : adding(systemFolders, to: [], key: key))
+        }
         return (adding(systemApps, to: apps, key: { $0 }), adding(systemFolders, to: folders, key: key))
     }
 

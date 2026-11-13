@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// What Petal sets up for the person's other AI agents (`OtherAgents`), and how it takes it back, as rules on files
@@ -29,17 +30,31 @@ enum AgentSetup {
         try? ours.write(to: target, options: .atomic)
     }
 
+    /// The SHA-256 of each SKILL.md an earlier release copied into the agents' skills folders (1.0.0, 2.0.1, 2.1.0,
+    /// and 2.1.2 and 2.1.3's, the same): a copy left by an older Petal is Petal's own too, so turning other agents
+    /// off takes it back. `macos/checks/run.sh` checks every released tag's skill is here; a release that changes
+    /// the skill adds the one it replaced.
+    static let earlierSkills: Set<String> = [
+        "fe2fdab59f5d401696922b4c796c7f1f9b0a1c46c7d40905acfe654a92025043",
+        "5d87b4bbcdbc89f2617be9d9dc5ea60d67333eca5266147b48df42b819642ad1",
+        "3c2ff5608f23e1b184cbb5020c41b6bd1d5846554c9f557ae9f1df9fd80cbc59",
+        "99c90f0eee89b6f1e0fd511ae2e991aa130a004823ce1b39ab311e5ad28d9eba",
+    ]
+
+    /// SKILL.md's bytes as `earlierSkills` names them.
+    static func digest(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+
     /// Takes Petal's skill out of `folder`, and the folder with it: only a real folder (not a link) holding nothing
-    /// but a real SKILL.md with exactly the bytes Petal carries (`ours`). Anything else stays as it is. True when it
-    /// was removed.
+    /// but a real SKILL.md with exactly the bytes Petal carries (`ours`), or those of a copy an earlier release left
+    /// (`earlier`, by their SHA-256). Anything else stays as it is. True when it was removed.
     @discardableResult
-    static func removeSkill(_ ours: Data, from folder: URL) -> Bool {
+    static func removeSkill(_ ours: Data, from folder: URL, earlier: Set<String> = earlierSkills) -> Bool {
         let target = folder.appending(path: "SKILL.md")
         var directory: ObjCBool = false
         guard !isLink(folder.path), !isLink(target.path),
               FileManager.default.fileExists(atPath: folder.path, isDirectory: &directory), directory.boolValue,
               (try? FileManager.default.contentsOfDirectory(atPath: folder.path)) == ["SKILL.md"],
-              (try? Data(contentsOf: target)) == ours else { return false }
+              let there = try? Data(contentsOf: target), there == ours || earlier.contains(digest(there)) else { return false }
         return (try? FileManager.default.removeItem(at: folder)) != nil
     }
 

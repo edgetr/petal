@@ -178,15 +178,16 @@ final class ReleaseNotes {
 
     /// Once, a moment after the dock is up: when Petal started as a newer version than it last ran as, What's New
     /// opens by itself with each version missed since (`WhatsNew.versions`). The version is kept whatever shows, so
-    /// it opens once for a version, and a first install (not `welcomed` when Petal started) shows nothing. Never in a
+    /// it opens once for a version, and a first install (not `welcomed` when Petal started) shows nothing. When it
+    /// can't be kept (state.json can't be written), nothing opens: it would open again at every start. Never in a
     /// headless run, and never over the welcome.
     func afterLaunch(running: String, welcomed: Bool) {
         guard !Headless.on else { return }
         Task.detached(priority: .utility) {
             let last = PetalState.read()[Self.lastKey] as? String
             let versions = WhatsNew.versions(last: last, running: running, welcomed: welcomed, carried: Self.carriedVersions())
-            if WhatsNew.keeps(last: last, running: running) { PetalState.set(Self.lastKey, running) }
-            guard !versions.isEmpty else { return }
+            let kept = WhatsNew.keeps(last: last, running: running) && PetalState.set(Self.lastKey, running)
+            guard WhatsNew.opens(versions, kept: kept) else { return }
             await MainActor.run {
                 guard !PetalApp.shared.welcome.isOpen else { return }
                 self.show(versions, forward: false)

@@ -69,6 +69,31 @@ struct AgentSetupCheck {
         try? fm.createDirectory(at: differs, withIntermediateDirectories: true)
         try? edited.write(to: differs.appending(path: "SKILL.md"))
         expect(!AgentSetup.removeSkill(ours, from: differs) && exists(differs.appending(path: "SKILL.md")), "a skill that differs stays")
+        // A copy an earlier release left (known by its SHA-256) is Petal's own too: it goes, and is brought up to date
+        // while the switch is on. Its digest alone isn't enough: in a folder with anything else, or as a link, it stays.
+        let older = Data("---\nname: petal\n---\nPetal's skill, as 2.1.3 had it.\n".utf8)
+        let released: Set<String> = [AgentSetup.digest(older)]
+        let left = root.appending(path: "g/skills/petal")
+        try? fm.createDirectory(at: left, withIntermediateDirectories: true)
+        try? older.write(to: left.appending(path: "SKILL.md"))
+        expect(!AgentSetup.removeSkill(ours, from: left, earlier: []), "an older copy isn't taken for Petal's without its digest")
+        expect(AgentSetup.removeSkill(ours, from: left, earlier: released) && !exists(left), "an earlier release's copy goes, with its folder")
+        try? fm.createDirectory(at: left, withIntermediateDirectories: true)
+        try? older.write(to: left.appending(path: "SKILL.md"))
+        AgentSetup.installSkill(ours, in: left)
+        expect((try? Data(contentsOf: left.appending(path: "SKILL.md"))) == ours, "an earlier release's copy is brought up to date")
+        try? older.write(to: more.appending(path: "SKILL.md"))
+        expect(!AgentSetup.removeSkill(ours, from: more, earlier: released) && exists(more.appending(path: "notes.md")),
+               "an earlier copy beside other files stays")
+        try? older.write(to: target)
+        expect(!AgentSetup.removeSkill(ours, from: fileLink, earlier: released) && exists(target), "an earlier copy behind a link stays")
+        try? fm.removeItem(at: differs.appending(path: "SKILL.md"))
+        try? edited.write(to: differs.appending(path: "SKILL.md"))
+        expect(!AgentSetup.removeSkill(ours, from: differs, earlier: released), "a copy matching no release stays")
+        expect(AgentSetup.digest(Data()) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "the digest is SHA-256 in lowercase hex")
+        expect(AgentSetup.earlierSkills.allSatisfy { $0.count == 64 && $0.allSatisfy(\.isHexDigit) && $0 == $0.lowercased() },
+               "every earlier release's skill is named by a SHA-256 in lowercase hex")
+
         // Someone else's skill by that name is never replaced.
         let other = root.appending(path: "f/skills/petal")
         try? fm.createDirectory(at: other, withIntermediateDirectories: true)

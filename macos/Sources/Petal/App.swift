@@ -79,8 +79,9 @@ final class PetalApp {
             Task {
                 for provider in Provider.allCases { await lookFor(provider) }
                 loadCodexModels()
-                // The person's other AI sessions get Petal's tools, skill and command too.
-                if config.bool("otherAgents") { OtherAgents.connect(paths: paths) }
+                // The person's other AI sessions get Petal's tools, skill and command too; with the switch off, what an
+                // older Petal set up for them (one that left it there when the switch went off) is taken back.
+                if config.bool("otherAgents") { OtherAgents.connect(paths: paths) } else { OtherAgents.disconnect(paths: paths) }
             }
         }
     }
