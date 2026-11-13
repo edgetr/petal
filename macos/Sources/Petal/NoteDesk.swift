@@ -1188,10 +1188,12 @@ final class NoteDesk {
             papers.append(NoteRoom.Paper(id: key, size: size, top: top, moved: moved, was: was[key]?.was, held: held))
         }
         var record: [String: (was: NoteRoom.Was, open: Bool)] = [:]
-        for spot in NoteRoom.stack(window: frame, visible: visible, papers: papers) {
+        // Each panel keeps its shadow's margin around its paper on the screen: placed where the panel really goes.
+        for spot in NoteRoom.stack(window: frame, visible: visible, papers: papers, margin: PaperLook.margin) {
             guard let panel = panels[spot.id] else { continue }
             if spot.column >= 0 {
-                record[spot.id] = (NoteRoom.Was(top: spot.frame.minY - frame.minY, column: spot.column), faces[spot.id] == .open)
+                let was = NoteRoom.Was(top: spot.frame.minY - frame.minY, column: spot.column, x: spot.frame.minX - frame.maxX, size: spot.frame.size)
+                record[spot.id] = (was, faces[spot.id] == .open)
             }
             panel.place(paperFrame: NoteRules.appKitFrame(spot.frame, primaryHeight: primaryHeight))
         }
