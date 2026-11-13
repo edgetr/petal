@@ -1191,10 +1191,7 @@ final class NoteDesk {
         // Each panel keeps its shadow's margin around its paper on the screen: placed where the panel really goes.
         for spot in NoteRoom.stack(window: frame, visible: visible, papers: papers, margin: PaperLook.margin) {
             guard let panel = panels[spot.id] else { continue }
-            if spot.column >= 0 {
-                let was = NoteRoom.Was(top: spot.frame.minY - frame.minY, column: spot.column, x: spot.frame.minX - frame.maxX, size: spot.frame.size)
-                record[spot.id] = (was, faces[spot.id] == .open)
-            }
+            if let was = spot.was { record[spot.id] = (was, faces[spot.id] == .open) }
             panel.place(paperFrame: NoteRules.appKitFrame(spot.frame, primaryHeight: primaryHeight))
         }
         if besides[number] == nil, besides.count >= 24 { besides = [:] }
@@ -1915,7 +1912,7 @@ final class NoteDesk {
             let opening = NoteRoom.wanted(notes.map { ($0.placement, $0.face == .open, $0.moved) })
             let showing = NoteRoom.wanted(notes.map { ($0.placement, $0.face != nil, $0.moved) })
             if opening || showing {
-                let target = visible(for: frame).flatMap { NoteRoom.narrowed(window: frame, visible: $0, note: PaperLook.openWidth) }
+                let target = visible(for: frame).flatMap { NoteRoom.narrowed(window: frame, visible: $0, note: PaperLook.openWidth, margin: PaperLook.margin) }
                 wanted = (number, scene.pid, frame, target, opening)
             }
         }
