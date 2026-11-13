@@ -141,10 +141,76 @@ struct DockRulesCheck {
         let rest = (0..<3).flatMap { _ in stubborn.look([(number: 3, frame: out[0].to)], alive: [3], docks: docks, on: true, position: "bottom") }
         expect(rest.isEmpty, "and then left alone, never asked again look after look", "\(rest)")
 
+        ruleSweeps()
         clearSequences()
 
         print("dock rules: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }
+    }
+
+    // MARK: Generated sets
+
+    /// The rules for which apps show, letting go of a drag and drops, over generated inputs: a running app is listed
+    /// once and only while it's running, every one with only every Desktop asked for, each keeps its slot for the
+    /// session; letting go never removes an app that isn't the dock's own or one let go in the dock, never moves one
+    /// off the dock's ends, and a press that never became a drag is a click; a drop never adds a document or opens
+    /// an app with another.
+    static func ruleSweeps() {
+        var dice = Dice(state: 7)
+        var problems: [String] = []
+        for _ in 0..<5000 {
+            let ids = (0..<dice.int(0...12)).map { "app\($0)" }
+            let running = ids.map { id in
+                DockRules.Running(id: id, windows: dice.int(0...3), here: dice.chance(0.5), minimized: dice.int(0...2), hidden: dice.chance(0.2))
+            }.map { app -> DockRules.Running in
+                var app = app
+                if app.windows == 0 { app.here = false; app.minimized = 0 }   // (as the window list counts them)
+                app.minimized = min(app.minimized, app.windows)
+                return app
+            }
+            let kept = (0..<dice.int(0...8)).map { _ in "app\(dice.int(0...15))" }.reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+            for only in [false, true] {
+                let shown = DockRules.others(running, kept: kept, thisDesktopOnly: only)
+                if Set(shown).count != shown.count { problems.append("listed twice: \(shown)") }
+                if !shown.allSatisfy(ids.contains) { problems.append("not running, listed: \(shown)") }
+                if !only && shown.count != ids.count { problems.append("every Desktop, yet \(shown.count) of \(ids.count)") }
+                let elsewhereOnly = running.filter { $0.windows > 0 && !$0.here && !$0.hidden && $0.minimized == 0 }.map(\.id)
+                if only && (shown.contains { elsewhereOnly.contains($0) } || ids.count - elsewhereOnly.count != shown.count) {
+                    problems.append("this Desktop only: \(shown) with \(elsewhereOnly) elsewhere")
+                }
+                let stayed = kept.filter(shown.contains)
+                if Array(shown.prefix(stayed.count)) != stayed { problems.append("slots not kept: \(kept) → \(shown)") }
+            }
+            let count = dice.int(1...20), from = dice.int(0...(count - 1)), slot = dice.real(16, 128)
+            let offset = dice.real(-30, 30) * slot / 10, inward = dice.real(-20, 3) * slot / 2, began = dice.chance(0.8), isKept = dice.chance(0.5)
+            let end = DockRules.dragEnd(began: began, from: from, offset: offset, slot: slot, count: count, kept: isKept, inward: inward)
+            switch end {
+            case .click: break
+            case .remove: if !isKept || inward <= slot || !began { problems.append("removed: kept \(isKept), inward \(inward), slot \(slot)") }
+            case .nothing: if isKept || inward <= slot { problems.append("left alone: kept \(isKept), inward \(inward)") }
+            case .move(let to): if to == from || to < 0 || to >= count || !began || inward > slot { problems.append("moved \(from) → \(to) of \(count)") }
+            }
+            if !began && end != .click { problems.append("a press that never became a drag: \(end)") }
+            if DockRules.fades(inward: inward, slot: slot, kept: isKept) != (began && end == .remove) && began {
+                problems.append("looks out (\(DockRules.fades(inward: inward, slot: slot, kept: isKept))) but lets go as \(end)")
+            }
+            let items: [DockRules.Dropped] = (0..<dice.int(0...4)).map { index in
+                switch dice.int(0...3) {
+                case 0: .app("/A\(index).app")
+                case 1: .folder("/F\(index)")
+                case 2: .site("https://s\(index).example")
+                default: .document("/d\(index).pdf")
+                }
+            }
+            let onApp = dice.chance(0.5)
+            switch DockRules.drop(items, onApp: onApp) {
+            case .add(let added): if added.contains(where: { if case .document = $0 { true } else { false } }) || added.isEmpty { problems.append("added \(added)") }
+                if onApp && items.contains(where: { if case .document = $0 { true } else { false } }) { problems.append("added on an app with documents: \(items)") }
+            case .open(let paths): if !onApp || paths.isEmpty { problems.append("opened \(paths) on the glass") }
+            case nil: if !items.isEmpty && !(items.allSatisfy { if case .document = $0 { true } else { false } } && !onApp) { problems.append("nothing for \(items)") }
+            }
+        }
+        expect(problems.isEmpty, "which apps show, letting go of a drag and drops hold over 5000 generated sets", problems.prefix(5).joined(separator: "\n  "))
     }
 
     // MARK: Windows kept clear of the dock, look after look

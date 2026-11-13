@@ -1453,6 +1453,7 @@ struct AppSlot: View {
         .zIndex(dragged ? 10 : 0)
         .slotFrame(dock, item.id)
         .slotMouse(SlotMouse(
+            id: item.id,
             left: { app.popups.closeAll(); app.docks.activate(item) },
             right: { Menus.app(item) },
             middle: { app.docks.newWindow(item.id) },
@@ -1859,6 +1860,8 @@ struct TrashSlot: View {
 /// A slot's mouse: left, right and middle clicks, hover, dragging along the dock, and files dropped on it. AppKit
 /// does this directly, since the dock never becomes the key window.
 struct SlotMouse: NSViewRepresentable {
+    /// Whose mouse it is (an app's bundle identifier), for `Petal --bench-dock` to tell which slot a click reaches.
+    var id: String?
     var left: () -> Void = {}
     var right: () -> Void = {}
     var middle: () -> Void = {}
