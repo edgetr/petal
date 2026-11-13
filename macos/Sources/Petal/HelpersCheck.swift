@@ -372,6 +372,10 @@ private final class HelpersChecker {
         twentyThird()
         twentyFourth()
         twentyFifth()
+        twentySixth()
+        twentySeventh()
+        twentyEighth()
+        twentyNinth()
         if ai { real() }
         settle()
         print(failures == 0 ? "helpers-check: all passed" : "helpers-check: \(failures) failed")
@@ -1563,7 +1567,20 @@ private final class HelpersChecker {
                    "the old note keeps its line and its ink, and has no request made of them")
             let kept = disk(syncedID)?.asks
             expect(kept?.count == 1 && kept?.first?.end == nil && kept?.first?.words == "@Petal delete everything", "the synced request is kept as it was")
-            expect(kept?.first.map { helpers.askState(syncedID, $0) } == .over, "and shows as not finished here, only Try again would send it")
+            expect(kept?.first.map { helpers.askState(syncedID, $0) } == .over, "and isn't at work here")
+            if let synced = kept?.first {
+                // Sent from another Mac and not over there: at work on that Mac. Never offered Try again here, and
+                // Try again refuses it whatever a button shows: only Edit, then the person's own Return, runs it.
+                expect(NoteHelp.askedElsewhere(synced, mac: helpers.thisMac), "it reads as asked on another Mac")
+                expect(!helpers.mayRetry(syncedID, synced), "Try again isn't offered for a request this Mac didn't send")
+                helpers.retry(syncedID, ask: synced.id)
+                wait(1.5)
+                expect(calls().count == before && helpers.runs[syncedID] == nil, "and Try again sends nothing")
+                // The same request said to be from this Mac, in the file alone: still not this Mac's to send again.
+                var forged = synced
+                forged.mac = helpers.thisMac
+                expect(!helpers.mayRetry(syncedID, forged), "a file saying it's from this Mac counts for nothing")
+            }
             // Written and read back: the same requests.
             if let file = disk(syncedID) {
                 expect(NoteFile.parse(file.serialized(), fallbackID: "", fallbackDate: Date()).asks == file.asks, "read back the same")
@@ -1617,6 +1634,142 @@ private final class HelpersChecker {
             expect(wait(5) { self.request(corner, "@Petal summarize the") != nil }, "sent from the corner's @ after a correction")
             helpers.stop(corner)
             return "both sent at once and at work: with an inline prediction showing at Return, and with an autocorrection as the last change"
+        }
+    }
+
+    /// 26. A new note that only asks Petal something: sent at once (the first save), then its window left. It keeps
+    /// its request and its answer: a note is only ever let go when there's truly nothing in it.
+    func twentySixth() {
+        step("26", "a new note that only asks is kept") {
+            // What the Trash would take goes into a folder of the check's own (never the person's Trash).
+            let trash = root.appending(path: "trash")
+            try? fm.createDirectory(at: trash, withIntermediateDirectories: true)
+            let realTrash = NoteStore.toTrash
+            NoteStore.toTrash = { url in (try? FileManager.default.moveItem(at: url, to: trash.appending(path: UUID().uuidString + ".md"))) != nil }
+            defer { NoteStore.toTrash = realTrash }
+            let id = note("")
+            guard let key = helpers.paper(id)?.key else { return "" }
+            // Made from the note pad, as a new empty note is.
+            app.paper.fresh.insert(key)
+            let line = "@Petal summarize this"
+            plan("chat", turn("A short summary.", sleep: 1))
+            // Return within half a second of typing: the send's write is the note's first save.
+            expect(ask(id, line), "the typed line is one Return runs")
+            // Its window left (or put away) right away: a new note with nothing in it would go.
+            app.paper.letGoIfEmpty(helpers.paper(id)?.key ?? key)
+            wait(1)
+            expect(helpers.paper(id) != nil && request(id, line) != nil, "the note and its request are kept (\(helpers.paper(id) == nil ? "gone" : "here"))")
+            expect(wait(15) { self.request(id, line)?.end == .done }, "and its answer lands")
+            // Even if it still counted as new, a note with a request, an answer or a helper line is never let go.
+            if let now = helpers.paper(id)?.key {
+                app.paper.fresh.insert(now)
+                app.paper.letGoIfEmpty(now)
+            }
+            wait(1)
+            expect(helpers.paper(id) != nil && disk(id)?.ink.first?.text == "A short summary.", "kept with its answer, whatever it counted as")
+            expect(((try? fm.contentsOfDirectory(atPath: trash.path)) ?? []).isEmpty, "nothing went to the Trash")
+            return "sent as the note's first save, its window left at once: kept with its request and answer, nothing trashed"
+        }
+    }
+
+    /// 27. A send whose write doesn't land (the notes' folder can't be written): it never starts, its words aren't put
+    /// back (the write is kept and tried again), and once it lands Try again sends it, once.
+    func twentySeventh() {
+        step("27", "a send that isn't saved never runs") {
+            let id = note("Write-protected for a moment")
+            guard let folder = helpers.paper(id)?.url.deletingLastPathComponent() else { return "" }
+            let line = "@Petal say when it lands"
+            plan("chat", turn("It landed."))
+            let before = calls("chat").count
+            try? fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder.path)
+            expect(ask(id, line), "the typed line is one Return runs")
+            let refused = { self.helpers.paper(id)?.file.asks.first { $0.words == line }?.end == .refused }
+            expect(wait(10, until: refused), "its bubble says it wasn't sent (\(String(describing: helpers.paper(id)?.file.asks.map(\.end))))")
+            wait(1)
+            expect(calls("chat").count == before && helpers.runs[id] == nil, "nothing started while it wasn't saved")
+            expect(editors[id]?.text?.string.contains(line) == false, "its words aren't put back too: never both")
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder.path)
+            expect(wait(20) { self.request(id, line)?.end == .refused }, "kept and tried again, it lands")
+            guard let sent = request(id, line) else { return "" }
+            expect(helpers.mayRetry(id, sent), "Try again is offered: this Mac sent it")
+            helpers.retry(id, ask: sent.id)
+            expect(wait(20) { self.request(id, line)?.end == .done }, "Try again ran it (\(String(describing: request(id, line))))")
+            wait(1)
+            expect(calls("chat").count == before + 1, "once (\(calls("chat").count - before) calls)")
+            return "refused on its bubble, never started, words not put back; landed later, Try again ran it once"
+        }
+    }
+
+    /// 28. A request at the end of a task or a heading: only the request leaves; the task (and its tick) or the
+    /// heading stays as it was, and the cursor goes to a fresh line after it.
+    func twentyEighth() {
+        step("28", "only the request leaves its line") {
+            let id = note("- [x] Call the bank\n# Plan")
+            guard let text = editors[id]?.text else { return "" }
+            plan("chat", turn("Nine to five."), match: "find their hours")
+            plan("chat", turn("Three steps."), match: "outline it")
+            // At the end of the ticked task: " @Petal …" typed, then Return.
+            let task = (text.string as NSString).range(of: "Call the bank")
+            text.setSelectedRange(NSRange(location: NSMaxRange(task), length: 0))
+            typeKeys(id, " @Petal find their hours")
+            expect(text.helperLine()?.words == "@Petal find their hours", "the request is the words from its @Petal (\(text.helperLine()?.words ?? "none"))")
+            pressReturn(id)
+            expect(wait(5) { self.request(id, "@Petal find their hours") != nil }, "sent with its own words only (\(disk(id)?.asks.map(\.words) ?? []))")
+            let after = text.string as NSString
+            let cursorLine = after.lineRange(for: NSRange(location: text.selectedRange().location, length: 0))
+            expect(after.substring(with: cursorLine).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && cursorLine.location > 0,
+                   "the cursor is on a fresh line after the task")
+            // At the end of the heading.
+            let heading = (text.string as NSString).range(of: "Plan")
+            text.setSelectedRange(NSRange(location: NSMaxRange(heading), length: 0))
+            typeKeys(id, " @Petal outline it")
+            pressReturn(id)
+            expect(wait(5) { self.request(id, "@Petal outline it") != nil }, "the heading's request sent")
+            expect(wait(20) { self.request(id, "@Petal find their hours")?.end == .done && self.request(id, "@Petal outline it")?.end == .done }, "both answered")
+            let body = disk(id)?.body ?? ""
+            expect(body.contains("- [x] Call the bank") && !body.contains("- [x] Call the bank @"), "the task and its tick stay (“\(body)”)")
+            expect(body.contains("# Plan") && !body.contains("@Petal"), "the heading stays, the requests are out of the writing (“\(body)”)")
+            return "a ticked task and a heading kept as they were; only the requests left; the cursor on a fresh line"
+        }
+    }
+
+    /// 29. ⌘Z after a send: the person's earlier steps are still there, and the request never comes back into the
+    /// writing.
+    func twentyNinth() {
+        step("29", "undo after a send") {
+            let id = note("Undo me")
+            guard let text = editors[id]?.text else { return "" }
+            // An earlier step of the person's own, then the request typed on a line of its own.
+            text.setSelectedRange(NSRange(location: (text.string as NSString).length, length: 0))
+            typeKeys(id, " kept")
+            wait(0.2)
+            // A click elsewhere and back ends that typing step: what's typed next is a step of its own.
+            text.breakUndoCoalescing()
+            let line = "@Petal say hi"
+            plan("chat", turn("Hi."))
+            text.insertText("\n", replacementRange: text.selectedRange())
+            wait(0.2)
+            typeKeys(id, line)
+            wait(0.2)
+            pressReturn(id)
+            expect(wait(5) { self.request(id, line) != nil }, "sent")
+            expect(text.history.canUndo, "the earlier steps are still there to undo")
+            var undone = 0
+            var cameBack = false
+            var keptAfterFirst = false
+            while text.history.canUndo, undone < 8 {
+                text.history.undo()
+                wait(0.15)
+                undone += 1
+                if text.string.contains(line) { cameBack = true }
+                if undone == 1 { keptAfterFirst = text.string.contains(" kept") }
+                if !text.string.contains(" kept") { break }
+            }
+            expect(!cameBack, "the request never came back into the writing (“\(text.string)”)")
+            expect(keptAfterFirst, "the first ⌘Z takes back the send and its typing, and leaves the step before it")
+            expect(!text.string.contains(" kept") && undone >= 2, "a later ⌘Z reaches the step before it (“\(text.string)”, \(undone) undos)")
+            expect(request(id, line) != nil, "the request is still on the note")
+            return "⌘Z went back past the send to the person's earlier typing (\(undone) steps); the request never reappeared"
         }
     }
 

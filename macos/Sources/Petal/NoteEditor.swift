@@ -1012,9 +1012,13 @@ final class NoteTextView: NSTextView {
     /// Ran: the line as it is now won't run again until the person edits it.
     func ran(_ mark: String) { runnable.remove(mark) }
 
-    /// A line sent (Return on the person's own @Petal line): its words leave the writing (the line stays, empty, with
-    /// the cursor on it, so the person goes on writing there). Petal's change, not the person's: it marks nothing,
-    /// and it's saved with the request in one write (`NoteHelpers.returned`).
+    /// A line sent (Return on the person's own @Petal line): its request leaves the writing, from its @Petal to the end
+    /// of the line (NoteHelp.request). With nothing but blanks before it, the line stays, empty, with the cursor on it;
+    /// with something before it (a task's checkbox and its tick, a heading, words, a picture), that stays exactly as
+    /// it was and the cursor goes to a fresh line after it. Petal's change, not the person's: it marks nothing, and
+    /// it's saved with the request in one write (`NoteHelpers.returned`). It's one undo step of its own, which ⌘Z
+    /// takes back together with the typing that wrote the request (`sendUndone`): the request never comes back into
+    /// the writing, and every step before it is kept.
     func sendLine(_ mark: String) {
         guard let storage = textStorage else { return }
         var found: NSRange?
@@ -1022,23 +1026,63 @@ final class NoteTextView: NSTextView {
             if value as? String == mark { found = range; stop.pointee = true }
         }
         guard let found else { return }
-        // The whole line, without its break (a chip's room and anything else on it go with it).
         let ns = storage.string as NSString
-        var line = ns.lineRange(for: found)
+        let whole = ns.lineRange(for: found)
+        var line = whole
         if line.length > 0, ns.character(at: NSMaxRange(line) - 1) == 10 { line.length -= 1 }
+        let split = NoteHelp.request(in: ns.substring(with: line))
         runnable.remove(mark)
         sending = true
         defer { sending = false }
         if hasMarkedText() { unmarkText() }
-        guard shouldChangeText(in: line, replacementString: "") else { return }
-        storage.replaceCharacters(in: line, with: "")
+        // What leaves, and what takes its place: the whole line's words; or the request, the line kept before it and
+        // a fresh line of words after it (its own break too, so the line after the kept one is plain words).
+        let range: NSRange
+        let replacement: NSAttributedString
+        let cursor: Int
+        if split.keepsBefore {
+            let terminated = NSMaxRange(whole) > NSMaxRange(line)
+            range = NSRange(location: line.location + split.cut, length: NSMaxRange(whole) - line.location - split.cut)
+            replacement = NSAttributedString(string: terminated ? "\n\n" : "\n", attributes: NoteRich.attributes("text", style))
+            cursor = range.location + 1
+        } else {
+            range = line
+            replacement = NSAttributedString(string: "")
+            cursor = line.location
+        }
+        let request = ns.substring(with: range)
+        breakUndoCoalescing()
+        guard shouldChangeText(in: range, replacementString: replacement.string) else { return }
+        storage.replaceCharacters(in: range, with: replacement)
         didChangeText()
-        // Sent, like a message: ⌘Z doesn't put its words back as writing (Edit on its bubble does), and nothing typed
-        // before it can be undone over text that moved.
-        history.removeAllActions()
-        setSelectedRange(NSRange(location: line.location, length: 0))
+        history.registerUndo(withTarget: self) { view in MainActor.assumeIsolated { view.sendUndone(request, at: range.location, length: replacement.length) } }
+        setSelectedRange(NSRange(location: cursor, length: 0))
         typingAttributes = NoteRich.attributes("text", style)
         changed()
+    }
+
+    /// ⌘Z on a send: AppKit puts the request's words back (its own step, undone with this one), and right after, the
+    /// steps that typed them are undone too, until the words are no longer there: the request never comes back into
+    /// the writing. (A step registered for it again on redo, so the next ⌘Z after a redo does the same.)
+    func sendUndone(_ request: String, at location: Int, length: Int) {
+        history.registerUndo(withTarget: self) { view in MainActor.assumeIsolated { view.sendRedone(request, at: location, length: length) } }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let size = (request as NSString).length
+                for _ in 0..<12 {
+                    let ns = self.string as NSString
+                    guard size > 0, location + size <= ns.length, ns.substring(with: NSRange(location: location, length: size)) == request,
+                          self.history.canUndo, !self.history.isUndoing, !self.history.isRedoing, self.history.groupingLevel == 0 else { return }
+                    self.history.undo()
+                }
+            }
+        }
+    }
+
+    /// ⌘⇧Z on a send: AppKit takes the words out again; the next ⌘Z is a send's again.
+    func sendRedone(_ request: String, at location: Int, length: Int) {
+        history.registerUndo(withTarget: self) { view in MainActor.assumeIsolated { view.sendUndone(request, at: location, length: length) } }
     }
 
     /// Edit on a request's bubble: its words back in the writing, as a line of the person's own at the end with the

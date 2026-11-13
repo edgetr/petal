@@ -210,13 +210,19 @@ struct AskBubble: View {
             }
         case .over:
             if ask.again {
-                Text(AskBubble.why(ask)).font(.system(size: TextSize.small)).foregroundStyle(faint).lineLimit(4)
+                // Sent from another Mac and not over there: at work (or waiting) on that Mac.
+                let elsewhere = NoteHelp.askedElsewhere(ask, mac: app.paper.helpers.thisMac)
+                // Try again only for a request this Mac sent itself; anything else needs the person's own Return (Edit).
+                let retry = app.paper.helpers.mayRetry(noteID, ask)
+                Text(elsewhere ? "Asked on another Mac" : AskBubble.why(ask)).font(.system(size: TextSize.small)).foregroundStyle(faint).lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 6) {
                     if ask.settings { NoteButton(title: "Open Settings") { PetalApp.shared.settings.show(.claude) } }
                     Spacer(minLength: 0)
-                    NoteButton(title: "Edit") { desk?.helpers.edit(noteID, ask: ask.id) }
-                    NoteButton(title: "Try again", primary: true) { desk?.helpers.retry(noteID, ask: ask.id) }
+                    NoteButton(title: "Edit", primary: !retry && !elsewhere) { desk?.helpers.edit(noteID, ask: ask.id) }
+                    if retry && !elsewhere {
+                        NoteButton(title: "Try again", primary: true) { desk?.helpers.retry(noteID, ask: ask.id) }
+                    }
                 }
             }
         }

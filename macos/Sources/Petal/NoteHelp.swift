@@ -370,6 +370,39 @@ enum NoteHelp {
         }
     }
 
+    /// Where a line's request is: from its first @Petal to the end of the line (a chain's words, with no @Petal, are
+    /// the whole line). `cut` is where the writing ends before it (the blanks just before the @Petal go with the
+    /// request); `keepsBefore`: something other than blanks is before it (a task's checkbox, words, a picture), which
+    /// stays in the writing as it was. In UTF-16 offsets, as the editor counts.
+    static func request(in line: String) -> (start: Int, cut: Int, keepsBefore: Bool) {
+        let ns = line as NSString
+        guard let at = mentions(line).first(where: { $0.name.caseInsensitiveCompare(petal) == .orderedSame })?.range.location else {
+            return (0, 0, false)
+        }
+        var cut = at
+        while cut > 0, let blank = Unicode.Scalar(ns.character(at: cut - 1)), blank == " " || blank == "\t" { cut -= 1 }
+        let before = ns.substring(to: cut).trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+        return (at, cut, !before.isEmpty)
+    }
+
+    /// Try again is offered, and done, only for a request this Mac sent itself: the request says it was sent from
+    /// this Mac, and this Mac's own record (`NoteLocal.sent`, never synced) holds it with the very same words. What a
+    /// file says alone (synced, imported, written by hand or by a tool) never runs anything: Edit, then Return.
+    static func mayRetry(_ ask: Ask, mac: String, sent: [String: String]?) -> Bool {
+        ask.again && !mac.isEmpty && ask.mac == mac && sent?[ask.id] == ask.words
+    }
+
+    /// Sent from another Mac and not over there yet: it's at work (or waiting) on that Mac, not "didn't finish" here.
+    static func askedElsewhere(_ ask: Ask, mac: String) -> Bool { ask.end == nil && !ask.mac.isEmpty && ask.mac != mac }
+
+    /// A note with nothing in it at all: no writing of the person's (`untouched`), and nothing of a helper's (no
+    /// request, answer, helper line, steps, stamps, task, sum, watcher, chain or time to come back). Only such a note
+    /// is ever let go by itself.
+    static func holdsNothing(_ file: NoteFile, untouched: Bool) -> Bool {
+        untouched && file.asks.isEmpty && file.ink.isEmpty && file.helper == nil && file.steps.isEmpty && file.stamps.isEmpty
+            && file.task.isEmpty && file.calc == nil && file.watch == nil && file.chain == nil && file.back == nil
+    }
+
     /// What a paper shows under each request, in order: whether its answer is the note's ink as it is now (the last
     /// one answered, which shows the whole ink: its proof, a second opinion), and whether the note's ink comes
     /// before every request (ink from before requests were bubbles, or with none answered yet).

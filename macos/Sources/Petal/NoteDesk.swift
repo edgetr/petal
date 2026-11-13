@@ -1803,9 +1803,11 @@ final class NoteDesk {
 
     /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
     func letGoIfEmpty(_ key: String) {
+        // Only a note with truly nothing in it: a request sent from it, an answer or a helper at work keep it, whatever
+        // `fresh` says.
         guard fresh.contains(key), let paper = store.paper(key), faces[key] != .open,
-              NoteShelf.mayTrash(bodyEmpty: NoteShelf.untouched(paper.file.body, madeWith: madeWith[key]), picturesPending: store.picturesPending(key),
-                                 importing: store.importing(key))
+              NoteShelf.mayTrash(bodyEmpty: NoteHelp.holdsNothing(paper.file, untouched: NoteShelf.untouched(paper.file.body, madeWith: madeWith[key])),
+                                 picturesPending: store.picturesPending(key), importing: store.importing(key))
         else { return }
         fresh.remove(key)
         placedOnce.remove(key)
@@ -1814,6 +1816,12 @@ final class NoteDesk {
         panels[key]?.conceal()
         panels[key] = nil
         store.trash(key, asked: true)
+    }
+
+    /// Something was asked from this note (a request sent): it's no longer a new empty note to let go.
+    func asked(_ key: String) {
+        fresh.remove(key)
+        madeWith[key] = nil
     }
 
     /// The person said to throw this note away (its tab's menu, its letterhead's, the Petal Notes window's): what's
