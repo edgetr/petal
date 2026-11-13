@@ -995,6 +995,8 @@ final class NoteTextView: NSTextView {
             decorateMentions()
             updateMentionMenu()
         }
+        // The placeholder comes and goes with the first character.
+        if (textStorage?.length ?? 0) <= 1 { needsDisplay = true }
     }
 
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
@@ -1010,8 +1012,36 @@ final class NoteTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        MainActor.assumeIsolated { drawMentionChips() }
+        MainActor.assumeIsolated {
+            drawMentionChips()
+            drawPlaceholder()
+        }
     }
+
+    /// An empty note says what it's for, faintly, where the words will go.
+    static let placeholder = "Write, or type @ to ask Petal AI"
+
+    private func drawPlaceholder() {
+        guard string.isEmpty, !hasMarkedText() else { return }
+        let words = NSAttributedString(string: Self.placeholder, attributes: [.font: NoteRich.Style.body, .foregroundColor: style.ink.withAlphaComponent(0.35)])
+        words.draw(at: NSPoint(x: textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0), y: textContainerOrigin.y))
+    }
+
+    /// "@Petal " on a line of its own at the end of the note, the cursor after it, as if typed (the corner's @). The
+    /// line break is put in as words, never as Return, so a helper line above it never runs.
+    func startPetalLine() {
+        guard let storage = textStorage else { return }
+        window?.makeFirstResponder(self)
+        let end = storage.length
+        setSelectedRange(NSRange(location: end, length: 0))
+        if end > 0, !storage.string.hasSuffix("\n") { insertText("\n", replacementRange: selectedRange()) }
+        typingAttributes = NoteRich.attributes("text", style)
+        insertText(NoteHelp.mention(NoteHelp.petal) + " ", replacementRange: selectedRange())
+        petalPicked()
+    }
+
+    /// "@Petal " was put in (picked from the @ menu, or the corner's @): the paper says what to do next.
+    var petalPicked: () -> Void = {}
 
     /// Remove on the paper, while this editor is open: those pictures' attachments deleted here, as an edit saved
     /// like any typing (so nothing typed and not saved yet brings them back): only the attachment, and its line's
@@ -1470,6 +1500,8 @@ final class NoteEditorHandle {
     var take: () -> (body: String, base: String?)? = { nil }
     /// That one write was made: its text is what the editor's next save is made on.
     var landed: (String?) -> Void = { _ in }
+    /// "@Petal " on a line of its own at the end, the cursor after it (the corner's @).
+    var startPetal: () -> Void = {}
 }
 
 /// One @ line in an open editor, known by its identity there (a mark on its characters), never by its words: what
@@ -1523,6 +1555,8 @@ struct NoteEditorView: NSViewRepresentable {
     var helperReturn: (String, NoteLine) -> Void = { _, _ in }
     /// What the @ menu offers and the chips bind to.
     var names: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
+    /// "@Petal " was put in: the paper says what to do next.
+    var petalPicked: () -> Void = {}
     var accent: NSColor = .controlAccentColor
     var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
 
@@ -1727,6 +1761,8 @@ struct NoteEditorView: NSViewRepresentable {
             MainActor.assumeIsolated { _ = text.removePictures(named: names, restore: restore, retire: retire) }
         }
         text.say = say
+        text.petalPicked = petalPicked
+        handle.startPetal = { [weak text] in MainActor.assumeIsolated { text?.startPetalLine() } }
         text.helperReturn = helperReturn
         text.mentionNames = names
         text.tint = tint
@@ -1758,6 +1794,7 @@ struct NoteEditorView: NSViewRepresentable {
         text.escape = escape
         text.noteID = paper.noteID
         text.noteFolder = paper.url.deletingLastPathComponent()
+        text.petalPicked = petalPicked
         text.helperReturn = helperReturn
         text.mentionNames = names
         text.tint = tint

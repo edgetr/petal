@@ -963,6 +963,9 @@ struct NotesCheck {
         expect(crowded.reduce(0) { $0 + $1.count } == 30 && crowded.last.map { $0.y + $0.height <= 300 } == true, "too many: the last tab holds the rest")
         expect(NoteShelf.faded(modified: when, now: when.addingTimeInterval(31 * 86400)) && !NoteShelf.faded(modified: when, now: when.addingTimeInterval(29 * 86400)),
                "untouched for 30 days, a note fades")
+        expect(!NoteShelf.faded(modified: when, opened: when.addingTimeInterval(20 * 86400), now: when.addingTimeInterval(31 * 86400))
+               && NoteShelf.faded(modified: when, opened: when.addingTimeInterval(-86400), now: when.addingTimeInterval(31 * 86400)),
+               "opened in the last 30 days, it doesn't")
 
         // MARK: Room
 
@@ -984,6 +987,66 @@ struct NotesCheck {
         expect(spot.minX == roomy.maxX + NoteRoom.gap && spot.minY == roomy.minY + 118, "an open note beside its line")
         let low = NoteRoom.beside(window: roomy, visible: visible, size: CGSize(width: 340, height: 300), top: 690)
         expect(low.maxY <= visible.maxY, "and kept on the screen")
+
+        // MARK: Papers beside a window, never over one another
+
+        let foldedSize = CGSize(width: 170, height: 170), openSize = CGSize(width: 360, height: 420)
+        func apart(_ placed: [NoteRoom.Placed]) -> Bool {
+            for (i, a) in placed.enumerated() { for b in placed.dropFirst(i + 1) where a.frame.intersects(b.frame) { return false } }
+            return true
+        }
+        func onScreen(_ placed: [NoteRoom.Placed]) -> Bool { placed.allSatisfy { visible.contains($0.frame) } }
+        func frame(_ placed: [NoteRoom.Placed], _ id: String) -> CGRect { placed.first { $0.id == id }?.frame ?? .null }
+        // Two notes with no line: their tabs stacked from the top (52 and 92 down the window).
+        let two = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52), NoteRoom.Paper(id: "b", size: foldedSize, top: 92)])
+        expect(apart(two) && onScreen(two), "two papers at the stacked tabs' heights never cover one another", "\(two)")
+        expect(frame(two, "a").minY == roomy.minY + 52 && frame(two, "b").minY == frame(two, "a").maxY + NoteRoom.spacing,
+               "the first at its line, the second right under it", "\(two)")
+        expect(two.allSatisfy { $0.frame.minX == roomy.maxX + NoteRoom.gap }, "both beside the window")
+        // One the person moved into the default place: it stays, the other goes around it.
+        let spotted = CGRect(x: roomy.maxX + NoteRoom.gap + 20, y: roomy.minY + 60, width: 170, height: 170)
+        let movedOne = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52, moved: spotted), NoteRoom.Paper(id: "b", size: foldedSize, top: 52)])
+        expect(frame(movedOne, "a") == spotted, "a moved paper stays where it was left")
+        expect(apart(movedOne), "a paper placed by default never lands on a moved one", "\(movedOne)")
+        // A new paper takes free room: those already there don't move.
+        let earlier = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52), NoteRoom.Paper(id: "b", size: foldedSize, top: 300)])
+        func was(_ placed: [NoteRoom.Placed], _ id: String) -> NoteRoom.Was? {
+            placed.first { $0.id == id }.map { NoteRoom.Was(top: $0.frame.minY - roomy.minY, column: $0.column) }
+        }
+        let added = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52, was: was(earlier, "a")), NoteRoom.Paper(id: "b", size: foldedSize, top: 300, was: was(earlier, "b")),
+            NoteRoom.Paper(id: "new", size: openSize, top: 52)])
+        expect(frame(added, "a") == frame(earlier, "a") && frame(added, "b") == frame(earlier, "b"), "a new paper moves nobody", "\(added)")
+        expect(apart(added) && onScreen(added), "and covers nobody", "\(added)")
+        // One that grows pushes the ones below it down, and they come back when it folds.
+        let grown = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: openSize, top: 52, was: was(two, "a"), held: true), NoteRoom.Paper(id: "b", size: foldedSize, top: 92, was: was(two, "b"))])
+        expect(frame(grown, "a").minY == frame(two, "a").minY, "the paper written in stays where it was")
+        expect(apart(grown) && frame(grown, "b").minY > frame(two, "b").minY, "the one below it moves down", "\(grown)")
+        let foldedBack = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52, was: was(grown, "a")), NoteRoom.Paper(id: "b", size: foldedSize, top: 92, was: was(grown, "b"))])
+        expect(foldedBack == two, "folded again, it comes back up", "\(foldedBack)")
+        // A paper held still keeps its place even when one above it grows: the one above goes around it.
+        let still = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: openSize, top: 52, was: was(two, "a")), NoteRoom.Paper(id: "b", size: foldedSize, top: 92, was: was(two, "b"), held: true)])
+        expect(frame(still, "b") == frame(two, "b") && apart(still), "a paper being written in never jumps", "\(still)")
+        // More than fit below: a second column, never a pile.
+        let many = (0..<9).map { NoteRoom.Paper(id: "p\($0)", size: foldedSize, top: 52 + CGFloat($0) * 40) }
+        let crowdedBeside = NoteRoom.stack(window: roomy, visible: visible, papers: many)
+        expect(crowdedBeside.count == 9 && apart(crowdedBeside) && onScreen(crowdedBeside), "more papers than fit: none covers another", "\(crowdedBeside)")
+        expect(Set(crowdedBeside.map(\.column)).count >= 2, "they go on in another column")
+        // A window with no room beside it: the first column on the screen's edge, the next to its left.
+        let full = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        let packed = NoteRoom.stack(window: full, visible: visible, papers: (0..<7).map { NoteRoom.Paper(id: "q\($0)", size: foldedSize, top: 52) })
+        expect(apart(packed) && onScreen(packed), "no room beside the window: still none covers another", "\(packed)")
+        expect(packed.first { $0.column == 0 }?.frame.maxX == visible.maxX - NoteRoom.gap, "the first column on the screen's edge")
+        expect(packed.contains { $0.column == 1 && $0.frame.maxX <= visible.maxX - NoteRoom.gap - 170 }, "the next to its left")
+        // A paper whose line is low on the screen is kept on it, not sent to another column.
+        let lowOne = NoteRoom.stack(window: roomy, visible: visible, papers: [NoteRoom.Paper(id: "a", size: openSize, top: 690)])
+        expect(lowOne.first.map { $0.column == 0 && visible.contains($0.frame) } == true, "a low paper moves up onto the screen", "\(lowOne)")
 
         // A Chromium tab after its browser restarted: found by address, decided over every note it could be.
         var oldTab = NoteStick(kind: .tab)

@@ -211,7 +211,7 @@ final class NotesModel {
     // MARK: Notebooks
 
     func newNotebook() {
-        words(about: nil, "New notebook", "What's it for? Its name:", value: "") { name, _ in
+        words(about: nil, "New notebook", "Name it", value: "") { name, _ in
             let colors = ["#a550a7", "#f74f9e", "#f7821b", "#ffc600", "#62ba46", "#8c8c8c", "#007aff"]
             let made = self.store.ensureNotebook(name, color: colors[self.store.notebooks.count % colors.count])
             self.shelf = .notebook(made)
@@ -580,8 +580,7 @@ struct NotesWindowView: View {
             return Shown(title: book.name, subtitle: subtitle(book), book: book, papers: listed, cover: book.cover.flatMap { store.paper($0) }, across: false)
         }
         let listed = NoteLibrary.listed(model.shelf, all.items, now: now).map { all.papers[$0] }
-        let (title, empty) = shelfWords
-        return Shown(title: title, subtitle: listed.isEmpty ? empty : listed.count == 1 ? "1 note" : "\(listed.count) notes", book: nil, papers: listed, cover: nil, across: true)
+        return Shown(title: shelfWords.0, subtitle: listed.isEmpty ? "" : listed.count == 1 ? "1 note" : "\(listed.count) notes", book: nil, papers: listed, cover: nil, across: true)
     }
 
     /// One page for a search, a notebook and a view alike: typing in the search or picking another notebook puts new
@@ -599,32 +598,31 @@ struct NotesWindowView: View {
 
     private var shelfWords: (String, String) {
         switch model.shelf {
-        case .comingBack: ("Coming back", "Nothing is coming back. Ask @Petal in a note to bring it back at a time.")
-        case .watching: ("Watching", "Nothing is being watched.")
-        case .helpers: ("Helpers at work", "No helper is at work.")
-        case .notebook(let name): (name, "")
+        case .comingBack: ("Coming back", "Nothing is coming back")
+        case .watching: ("Watching", "Nothing is being watched")
+        case .helpers: ("Helpers at work", "No helper is at work")
+        case .notebook(let name): (name, "No notes here yet")
         }
     }
 
-    private func subtitle(_ book: Notebook) -> String {
-        var parts = [book.count == 1 ? "1 note" : "\(book.count) notes",
-                     NoteLibrary.whereWords(root: rootPath ?? store.root.path, notebook: book.name, home: NSHomeDirectory())]
-        if model.inDock(book) { parts.append("in the dock as a stack") }
-        if book.isPrivate { parts.append("private: kept from Petal AI, previews, other notebooks and Petal's pictures") }
-        return parts.joined(separator: " · ")
-    }
+    /// Under a notebook's title, its count only (what else it is: labels by its buttons).
+    private func subtitle(_ book: Notebook) -> String { book.count == 1 ? "1 note" : "\(book.count) notes" }
 
     private func page(title: String, subtitle: String, book: Notebook?, papers: [PaperNote], cover: PaperNote?, across: Bool) -> some View {
-        let fresh = papers.filter { !NoteShelf.faded(modified: $0.file.modified, now: now) }
-        let faded = papers.filter { NoteShelf.faded(modified: $0.file.modified, now: now) }
+        let opened = app.paper.local.opened ?? [:]
+        let fresh = papers.filter { !NoteShelf.faded(modified: $0.file.modified, opened: opened[$0.noteID], now: now) }
+        let faded = papers.filter { NoteShelf.faded(modified: $0.file.modified, opened: opened[$0.noteID], now: now) }
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(title).font(.system(size: TextSize.large, weight: .bold)).tracking(-0.26).foregroundStyle(look.dark ? Color.white : Color(white: 0.11))
-                    Text(subtitle).font(.system(size: TextSize.body)).foregroundStyle(look.dim).lineLimit(1)
+                    if !subtitle.isEmpty { Text(subtitle).font(.system(size: TextSize.body)).foregroundStyle(look.dim).lineLimit(1) }
                 }
                 Spacer()
-                if let book { viewToggle(book) }
+                if let book {
+                    NotebookBar(model: model, book: book, look: look, layout: nil)
+                    viewToggle(book)
+                }
             }
             .padding(.top, 38).padding(.horizontal, 36).padding(.trailing, -16)
             ScrollDown {
@@ -636,7 +634,7 @@ struct NotesWindowView: View {
                         }
                     }
                     if papers.isEmpty && cover == nil {
-                        Text("No notes here yet.").font(.system(size: TextSize.body)).foregroundStyle(look.dim).padding(.top, 20)
+                        Text(model.query.isEmpty ? shelfWords.1 : "No notes found").font(.system(size: TextSize.body)).foregroundStyle(look.dim).padding(.top, 20)
                     }
                 }
                 .padding(.horizontal, 36).padding(.top, 20).padding(.bottom, 30)
@@ -649,6 +647,70 @@ struct NotesWindowView: View {
 
     private func viewToggle(_ book: Notebook) -> some View {
         NotesViewToggle(view: book.view, look: look) { model.setView(book, $0) }.padding(.top, 4)
+    }
+}
+
+/// What a notebook's menu holds: on its row in the sidebar (a right-click) and behind the "…" by its title.
+struct NotebookMenuItems: View {
+    @Environment(PetalApp.self) private var app
+    let book: Notebook
+    let model: NotesModel
+    let isDefault: Bool
+    let inDock: Bool
+
+    var body: some View {
+        Button("Rename…") { model.rename(book) }.disabled(NoteLibrary.same(book.name, NoteShelf.inbox))
+        Menu("Color") {
+            ForEach(NotesColors.choices, id: \.value) { choice in
+                Button(choice.name) { app.paper.recolor(book.name, choice.value) }
+            }
+        }
+        Button(book.view == .canvas ? "Show as a grid" : "Show as a canvas") { model.setView(book, book.view == .canvas ? .grid : .canvas) }
+        Divider()
+        Button("Put new notes here") { model.makeDefault(book) }.disabled(isDefault)
+        Toggle("Private", isOn: Binding(get: { book.isPrivate }, set: { model.setPrivate(book, $0) }))
+        Toggle("In the dock as a stack", isOn: Binding(get: { inDock }, set: { _ in model.toggleDock(book) }))
+        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([book.folder]) }
+        Divider()
+        Button("Move to Trash…") { model.trash(book) }.disabled(isDefault || NoteLibrary.same(book.name, NoteShelf.inbox))
+    }
+}
+
+/// By a notebook's title: what it is in two words (Private, In the dock), "+ Note", and "…" with its menu (on a
+/// canvas, adding an area or words too).
+struct NotebookBar: View {
+    @Environment(PetalApp.self) private var app
+    @Environment(\.snapshotting) private var snapshotting
+    let model: NotesModel
+    let book: Notebook
+    let look: NotesLook
+    /// On a canvas: its layout, for what can be added to it.
+    let layout: NoteCanvas?
+
+    private var more: some View { Image(systemName: "ellipsis").font(.system(size: TextSize.body)).foregroundStyle(look.text) }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            if book.isPrivate { Text("Private").font(.system(size: TextSize.small)).foregroundStyle(look.dim) }
+            if model.inDock(book) { Text("In the dock").font(.system(size: TextSize.small)).foregroundStyle(look.dim) }
+            Button { app.paper.newOnDesktop(in: book.name, fromLibrary: true) } label: {
+                Label("Note", systemImage: "plus").font(.system(size: TextSize.callout)).foregroundStyle(look.text)
+            }
+            .buttonStyle(.plain)
+            .help("A new note in \(book.name)")
+            // (A menu draws as a placeholder in a snapshot: its mark stands in for it there.)
+            if snapshotting { more } else {
+            Menu {
+                NotebookMenuItems(book: book, model: model, isDefault: NoteLibrary.same(app.paper.defaultNotebook, book.name), inDock: model.inDock(book))
+                if let layout {
+                    Divider()
+                    CanvasMenuItems(model: model, book: book, layout: layout)
+                }
+            } label: { more }
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            }
+        }
+        .padding(.top, 4)
     }
 }
 
@@ -676,7 +738,7 @@ struct NotebookRow: View, Equatable {
             HStack(spacing: 9) {
                 RoundedRectangle(cornerRadius: Radius.chip).fill(Color(nsColor: color)).frame(width: 10, height: 10)
                 Text(book.name).fontWeight(on ? .semibold : .regular).lineLimit(1)
-                if isDefault { Text("default").font(.system(size: TextSize.small)).foregroundStyle(look.dim) }
+                if isDefault { Text("new notes").font(.system(size: TextSize.small)).foregroundStyle(look.dim) }
                 if book.isPrivate { Text("private").font(.system(size: TextSize.small)).foregroundStyle(look.dim) }
                 Spacer(minLength: 4)
                 Text("\(book.count)").foregroundStyle(look.dim)
@@ -691,22 +753,7 @@ struct NotebookRow: View, Equatable {
         .contextMenu { menu }
     }
 
-    @ViewBuilder private var menu: some View {
-        Button("Rename…") { model.rename(book) }.disabled(NoteLibrary.same(book.name, NoteShelf.inbox))
-        Menu("Color") {
-            ForEach(NotesColors.choices, id: \.value) { choice in
-                Button(choice.name) { app.paper.recolor(book.name, choice.value) }
-            }
-        }
-        Button(book.view == .canvas ? "Show as a grid" : "Show as a canvas") { model.setView(book, book.view == .canvas ? .grid : .canvas) }
-        Divider()
-        Button("Make it the default") { model.makeDefault(book) }.disabled(isDefault)
-        Toggle("Private", isOn: Binding(get: { book.isPrivate }, set: { model.setPrivate(book, $0) }))
-        Toggle("In the dock as a stack", isOn: Binding(get: { inDock }, set: { _ in model.toggleDock(book) }))
-        Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([book.folder]) }
-        Divider()
-        Button("Move to Trash…") { model.trash(book) }.disabled(isDefault || NoteLibrary.same(book.name, NoteShelf.inbox))
-    }
+    private var menu: some View { NotebookMenuItems(book: book, model: model, isDefault: isDefault, inDock: inDock) }
 
     /// Notes dropped on a notebook: each moved there (the one move: what's typed goes along).
     private func drop(_ providers: [NSItemProvider], into notebook: String) {
@@ -970,6 +1017,10 @@ struct GridPaper: View, Equatable {
         .onTapGesture { opening(); Self.open(paper, app: app) }
         .contextMenu {
             Button("Open") { opening(); Self.open(paper, app: app) }
+            // A page's note: back to that page.
+            if let page = paper.file.places.first(where: { $0.kind != .file && NoteTasks.web($0.url) != nil }) {
+                Button("Open this page") { NoteTasks.openWeb(page.url) }
+            }
             Divider()
             Button("Move to Trash") { app.paper.throwAway(paper.key) }
         }
@@ -1136,6 +1187,7 @@ struct NotesCanvasView: View {
                             .foregroundStyle(Color(red: 0.7, green: 0.15, blue: 0.12))
                     }
                     Spacer()
+                    NotebookBar(model: model, book: book, look: look, layout: layout).padding(.top, -4).padding(.trailing, 16)
                 }
                 NotesViewToggle(view: .canvas, look: look) { model.setView(book, $0) }
             }
@@ -1212,7 +1264,16 @@ struct CanvasBoard: View {
         return CGSize(width: width, height: height)
     }
 
-    @ViewBuilder private func boardMenu() -> some View {
+    private func boardMenu() -> some View { CanvasMenuItems(model: model, book: book, layout: layout) }
+}
+
+/// What can be added to a canvas: on a right-click on it, and in the "…" by its title.
+struct CanvasMenuItems: View {
+    let model: NotesModel
+    let book: Notebook
+    let layout: NoteCanvas
+
+    var body: some View {
         Button("Add an area") {
             model.words(about: book.name, "A new area", "What does it hold?", value: "") { label, asked in
                 let x = 60 + Double(layout.areas.count % 3) * 40, y = 50 + Double(layout.areas.count % 3) * 40

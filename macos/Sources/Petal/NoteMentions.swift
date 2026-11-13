@@ -166,6 +166,7 @@ extension NoteTextView {
         closeMentionMenu()
         guard end >= start else { return true }
         insertText(NoteHelp.mention(choice.name) + " ", replacementRange: NSRange(location: start, length: end - start))
+        if choice.kind == .petal { petalPicked() }
         return true
     }
 
@@ -245,7 +246,7 @@ struct MentionMenuView: View {
     }
 
     private func hint(_ kind: MentionChoice.Kind) -> String {
-        switch kind { case .petal: "does it here"; case .note: ""; case .notebook: "notebook" }
+        switch kind { case .petal: "ask, then Return"; case .note: ""; case .notebook: "notebook" }
     }
 }
 
