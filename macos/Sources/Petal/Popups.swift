@@ -187,11 +187,27 @@ final class Popups {
                 if !self.panel.frame.contains(NSEvent.mouseLocation) { self.closeAll() }
             }
         }
-        // Escape answers the question Don't (it never takes the keyboard from the app in front).
+        // A click on the dock itself (its glass, another icon) closes an open stack too; one on the stack's own
+        // icon is left to toggle it.
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, self.kind == "stack", event.window is DockPanel, !self.panel.frame.contains(NSEvent.mouseLocation),
+                      let anchor = self.anchor, let dock = self.openDock?.panel else { return }
+                if !(dock.screenFrame(of: anchor)?.contains(NSEvent.mouseLocation) ?? false) { self.closeAll() }
+            }
+            return event
+        }
+        // Escape answers the question Don't, and closes an open stack (it never takes the keyboard from the app in
+        // front).
         keys = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated { if event.keyCode == 53 { self?.closeAsk() } }
+            MainActor.assumeIsolated {
+                guard event.keyCode == 53, let self else { return }
+                self.closeAsk()
+                if self.kind == "stack" { self.closeAll() }
+            }
         }
     }
+    @ObservationIgnored private var localMonitor: Any?
 
     func closeAll() {
         let wasPreview = kind == "preview"
@@ -673,7 +689,9 @@ struct PreviewView: View {
             }
             if !windows.isEmpty {
                 if app.previews.pictures {
-                    HStack(spacing: 12) {
+                    // A row over a dock at the bottom, a column beside one on a side.
+                    let layout = app.config.position == "bottom" ? AnyLayout(HStackLayout(spacing: 12)) : AnyLayout(VStackLayout(spacing: 12))
+                    layout {
                         ForEach(windows) { window in
                             PreviewTile(window: window, image: app.previews.thumbnails[window.id], done: done)
                         }

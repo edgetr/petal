@@ -34,7 +34,9 @@ swiftc -parse-as-library -O -o "$out/look" Sources/Petal/LookSchedule.swift chec
 swiftc -parse-as-library -O -o "$out/signals" Sources/Petal/SignalRules.swift checks/SignalRulesCheck.swift
 "$out/signals"
 # Clicking an app in front again brings its next window forward, through every one of them and back, whatever order
-# the app lists them in as they come forward (DockRules).
+# the app lists them in as they come forward; which running apps the dock lists and their dots; what letting go of a
+# dragged app does (a wobble is a click, out of the dock removes it); what a drop adds or opens; and a window moved
+# into the dock's strip moved back out at its size (DockRules).
 swiftc -parse-as-library -O -o "$out/dockrules" Sources/Petal/DockRules.swift checks/DockRulesCheck.swift
 "$out/dockrules"
 # Magnification: the icon under the pointer grows by the amount set and stays under it, its neighbours ease aside

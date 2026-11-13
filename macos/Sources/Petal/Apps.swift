@@ -67,6 +67,61 @@ enum Apps {
     /// An app's recent files as last looked up; hovering an app looks them up again, off the main thread.
     static func recent(_ id: String) -> [URL] { recents[id] ?? [] }
 
+    // MARK: What ⌘N does
+
+    /// The title of the app's own menu item for ⌘N ("New Window", "New Message"), "" when it has none; nil until
+    /// looked up. Its right-click menu names "New Window" by it.
+    static func newItem(_ id: String) -> String? { newItems[id] }
+    private static var newItems: [String: String] = [:]
+    private static var lookingNew: Set<String> = []
+
+    /// Looks up what ⌘N is in a running app, off the main thread, once per app.
+    static func prefetchNewItem(_ id: String) {
+        guard newItems[id] == nil, !lookingNew.contains(id),
+              let pid = NSRunningApplication.persons(withBundleIdentifier: id).first?.processIdentifier else { return }
+        lookingNew.insert(id)
+        DispatchQueue.global(qos: .utility).async {
+            let title = newItemTitle(pid: pid)
+            DispatchQueue.main.async { MainActor.assumeIsolated { found(title, newItemFor: id) } }
+        }
+    }
+
+    static func found(_ title: String?, newItemFor id: String) {
+        lookingNew.remove(id)
+        if let title { newItems[id] = title }
+    }
+
+    /// The title of the menu item whose shortcut is ⌘N alone (the one "New Window" presses), "" when there's none,
+    /// nil when the app's menus can't be read. Off the main thread.
+    nonisolated static func newItemTitle(pid: pid_t) -> String? {
+        guard Windows.trusted else { return nil }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.3)
+        guard let bar: AXUIElement = Windows.value(app, kAXMenuBarAttribute),
+              let menus: [AXUIElement] = Windows.value(bar, kAXChildrenAttribute) else { return nil }
+        func find(_ element: AXUIElement, depth: Int) -> String? {
+            guard depth < 4, let children: [AXUIElement] = Windows.value(element, kAXChildrenAttribute) else { return nil }
+            for child in children {
+                if let char: String = Windows.value(child, kAXMenuItemCmdCharAttribute), char.uppercased() == "N",
+                   let modifiers: Int = Windows.value(child, kAXMenuItemCmdModifiersAttribute), modifiers == 0 {
+                    return Windows.value(child, kAXTitleAttribute) ?? ""
+                }
+                if let found = find(child, depth: depth + 1) { return found }
+            }
+            return nil
+        }
+        for menu in menus.dropFirst() {   // past the Apple menu, as Windows.pressMenuItem
+            if let title = find(menu, depth: 0) { return title }
+        }
+        return ""
+    }
+
+    /// Recent files looked for already (they may be none).
+    static func knowsRecent(_ id: String) -> Bool { recents[id] != nil }
+
+    /// Recent files found off the main thread (the right-click menu's own look).
+    static func found(_ files: [URL], recentFor id: String) { recents[id] = files }
+
     static func prefetchRecent(_ id: String) {
         guard !fetching.contains(id) else { return }
         fetching.insert(id)
