@@ -105,6 +105,67 @@ struct ConfigRulesCheck {
         answer = taken(same, over: same)
         expect(answer.refused.isEmpty && (answer.settings as NSDictionary).isEqual(same as NSDictionary), "a file that says what Petal has is taken whole")
 
+        // Swept: settings.json read again with every mix of the four, including values of the wrong type, as Config
+        // reads them (a value that isn't the setting's type is its default). Whatever the file says, Petal AI may do
+        // no more than both the file and Petal allow, every other key is taken as it is, and writing the answer back
+        // settles at once: read again, it's taken whole.
+        var random = SystemRandomNumberGenerator()
+        let accessValues: [Any?] = [nil, "full", "auto", "FULL", 3, true]
+        let boolValues: [Any?] = [nil, true, false, "yes", 1, 0]
+        let kinds = ["quit", "close", "trash", "browser", "computer:com.apple.Safari"]
+        let apps = ["com.1password.1password", "com.apple.Passwords", "com.example.bank", "com.example.mail"]
+        func someList(_ from: [String]) -> Any? {
+            switch Int.random(in: 0...5, using: &random) {
+            case 0: return nil
+            case 1: return "quit"
+            case 2: return [from.randomElement(using: &random)!, 3] as [Any]
+            default: return (0..<Int.random(in: 0...4, using: &random)).map { _ in from.randomElement(using: &random)! }
+            }
+        }
+        func file() -> [String: Any] {
+            var out: [String: Any] = ["accentColor": "#\(Int.random(in: 100000...999999, using: &random))"]
+            out["claudeAccess"] = accessValues.randomElement(using: &random)!
+            out["computerUse"] = boolValues.randomElement(using: &random)!
+            out["aiAllowed"] = someList(kinds)
+            out["aiNeverLook"] = someList(apps)
+            return out
+        }
+        func full(_ s: [String: Any]) -> Bool { (s["claudeAccess"] as? String ?? defaults["claudeAccess"] as? String) == "full" }
+        func uses(_ s: [String: Any]) -> Bool { s["computerUse"] as? Bool ?? defaults["computerUse"] as? Bool ?? false }
+        var cases = 0
+        for _ in 0..<20000 {
+            let disk = file(), memory = file()
+            let (read, refused) = taken(disk, over: memory)
+            let what = "disk \(disk) memory \(memory) -> \(read) refused \(refused)"
+            cases += 1
+            expect(full(read) == (full(disk) && full(memory)), "Full access only when both say so", what)
+            expect(uses(read) == (uses(disk) && uses(memory)), "using apps only when both say so", what)
+            expect(Set(strings(read, "aiAllowed")) == Set(strings(disk, "aiAllowed")).intersection(strings(memory, "aiAllowed")),
+                   "allowed without asking: only what both allow", what)
+            expect(Set(strings(read, "aiNeverLook")) == Set(strings(disk, "aiNeverLook")).union(strings(memory, "aiNeverLook")),
+                   "kept private: what either keeps private", what)
+            expect(read["accentColor"] as? String == disk["accentColor"] as? String, "every other key is taken as it is", what)
+            expect(refused.allSatisfy(ConfigRules.personsOwn.contains) && Set(refused).count == refused.count, "only the four are ever refused, each once", what)
+            let again = taken(read, over: memory)
+            expect(again.refused.isEmpty, "the file written back is taken whole when it's read again", "\(what) then \(again)")
+            if failures > 20 { break }
+        }
+        expect(cases > 0, "the sweep ran")
+
+        // Numbers: whatever the file holds, a number Petal can round to a whole one.
+        let wild: [Any?] = [nil, 1e300, -1e300, 9.3e18, -9.3e18, 1e19, 72, 0.5, -1, true, false, "48", [1], NSNull()]
+        for value in wild {
+            for fallback in [36.0, -1.0, 0.45] {
+                let n = ConfigRules.number(value, default: fallback)
+                expect(n.isFinite && abs(n) <= ConfigRules.numberBound && Int(exactly: n.rounded()) != nil,
+                       "a number setting is always one Petal can round", "\(String(describing: value)) -> \(n)")
+            }
+        }
+        expect(ConfigRules.number(72, default: 36) == 72 && ConfigRules.number("48", default: 36) == 36
+               && ConfigRules.number(nil, default: -1) == -1 && ConfigRules.number(true, default: 0) == 1, "a number in range is itself; anything else is the default")
+        expect(ConfigRules.number(1e300, default: 36) == ConfigRules.numberBound && ConfigRules.number(-1e19, default: 36) == -ConfigRules.numberBound,
+               "one past the bound is the bound")
+
         print("config rules: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }
     }

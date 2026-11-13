@@ -75,7 +75,7 @@ final class Config {
     func bool(_ key: String) -> Bool { watch(key); return values[key] as? Bool ?? Settings.defaults[key] as? Bool ?? false }
     func number(_ key: String) -> Double {
         watch(key)
-        return (values[key] as? NSNumber)?.doubleValue ?? (Settings.defaults[key] as? NSNumber)?.doubleValue ?? 0
+        return ConfigRules.number(values[key], default: Settings.defaults[key])
     }
     func string(_ key: String) -> String { watch(key); return values[key] as? String ?? Settings.defaults[key] as? String ?? "" }
     func strings(_ key: String) -> [String] { watch(key); return values[key] as? [String] ?? Settings.defaults[key] as? [String] ?? [] }
