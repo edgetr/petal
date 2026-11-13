@@ -1173,11 +1173,12 @@ final class NoteDesk {
                 record[spot.id] = (NoteRoom.Was(top: spot.frame.minY - frame.minY, column: spot.column), faces[spot.id] == .open)
             }
             panel.place(paperFrame: NoteRules.appKitFrame(spot.frame, primaryHeight: primaryHeight))
-            shown(spot.id, panel)
         }
         if besides[number] == nil, besides.count >= 24 { besides = [:] }
         besides[number] = record
         placedBeside = Set(showing)
+        // Each placed first, then the keyboard for one that waited for it (taking it fits that paper again).
+        for key in showing { if let panel = panels[key] { shown(key, panel) } }
         return showing
     }
 
