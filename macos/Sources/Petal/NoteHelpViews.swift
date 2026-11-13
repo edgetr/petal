@@ -236,9 +236,9 @@ struct HelperBar: View {
         let working = run != nil || helper.map { $0.state == .working || $0.state == .waiting } == true
         let denials = run?.sticky?.agent.pendingAsk ?? []
         VStack(alignment: .leading, spacing: 8) {
-            // A faint word (a bare @Petal asks nothing).
+            // What Petal did here without a run, or why it didn't.
             if let hint = desk?.helpers.hints[noteID] {
-                Text(hint).font(.system(size: TextSize.small)).foregroundStyle(glass ? Color.secondary.opacity(0.7) : PaperLook.footer.opacity(0.7))
+                Text(hint).font(.system(size: TextSize.small)).foregroundStyle(glass ? Color.secondary : PaperLook.footer)
             }
             if working {
                 HStack(spacing: 7) {
@@ -257,8 +257,11 @@ struct HelperBar: View {
             }
             if !denials.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("\(run?.who ?? "Petal") wants to run:").font(.system(size: TextSize.small, weight: .semibold))
-                    Text(denials.map(\.label).joined(separator: "\n")).font(.system(size: TextSize.small, design: .monospaced)).lineLimit(4)
+                    Text(Agent.Denial.heading(denials)).font(.system(size: TextSize.small, weight: .semibold)).lineLimit(3)
+                    let details = Agent.Denial.details(denials)
+                    if !details.isEmpty {
+                        Text(details).font(.system(size: TextSize.small, design: .monospaced)).foregroundStyle(PaperLook.footer).lineLimit(4)
+                    }
                     HStack(spacing: 6) {
                         Spacer()
                         NoteButton(title: "Don't", primary: true) { desk?.helpers.denyDenials(noteID) }

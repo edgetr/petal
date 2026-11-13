@@ -1239,6 +1239,7 @@ struct ClaudeButton: View {
                 .frame(width: size * 0.56, height: size * 0.56)
                 .scaleEffect(fileOver ? 1.22 : hovering ? 1.08 : 1)
                 .rotationEffect(.degrees(fileOver ? -10 : 0))
+                .phaseAnimator(app.claude.looseWorking ? [1.0, 0.4] : [1.0]) { mark, phase in mark.opacity(phase) } animation: { _ in .easeInOut(duration: 0.8) }
             if app.config.bool("claudeUsage") { UsageRing(usage: app.usage, size: size, line: 2.5, track: false) }
             if let dropped {
                 Image(nsImage: dropped).resizable().frame(width: size * 0.5, height: size * 0.5)

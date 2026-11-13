@@ -186,6 +186,11 @@ extension NoteShield {
     static func place(_ stick: NoteStick, appPrivate: Bool, index: UIMap.SecretIndex) -> (words: Shielded, quote: Shielded)? {
         guard !index.unreadable else { return nil }
         let place = (appPrivate ? stick.scrubbed : stick).redacted { index.redacted($0) }
+        // A tab's page with its title and whole address (the letterhead's short form drops a video's id).
+        if place.kind == .tab, !place.url.isEmpty {
+            let title = place.title.isEmpty ? "" : " “\(place.title)”"
+            return (Shielded(verified: "The page\(title) at \(place.url)"), Shielded(verified: place.quote))
+        }
         return (Shielded(verified: place.words), Shielded(verified: place.quote))
     }
 }

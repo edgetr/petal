@@ -59,6 +59,10 @@ swiftc -parse-as-library -O -o "$out/thumbnails" Sources/Petal/ThumbnailCache.sw
 "$out/thumbnails"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
+# A window's words for petal_look's text (WindowText): reading order, a page without its browser's toolbar, the cap
+# and the next part, find, a secret hidden whole or in pieces, a password field left out.
+swiftc -parse-as-library -O -o "$out/windowtext" Sources/Petal/UIMap.swift checks/WindowTextCheck.swift
+"$out/windowtext"
 # What petal_act says of a menu is its app's own text (a Window menu lists every window by its title): the items a
 # menu has, the path walked and the item chosen are told only in UIMap's words, every title through the vault's
 # redaction (Acting.menuWords); the title Petal goes by (menuTitle) is never told.
@@ -237,7 +241,7 @@ grep -q 'app.paper.handle(name, args, asker: note.flatMap { app.claude.note(with
 grep -q 'return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false' Sources/Petal/NoteHelpers.swift \
     && grep -q 'if required.map({ place.samePlace($0) }) ?? true { return (model, place) }' Sources/Petal/NoteHelpers.swift \
     && grep -q 'let file = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path' Sources/Petal/NoteHelpers.swift \
-    && grep -q 'if compare == nil, let stick, ViewerFiles.namesFile(stick) {' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'if work, let stick, ViewerFiles.namesFile(stick) {' Sources/Petal/NoteHelpers.swift \
     && grep -q 'if item.kind == "file" { return located(item, mac: mac, follow: follow).map(decide) }' Sources/Petal/NoteTasks.swift \
     && ! grep -n 'documentShowing\|sceneFile\|run\.document' Sources/Petal/NoteHelpers.swift Sources/Petal/NoteHelp.swift \
     || { echo "NoteHelpers: a helper's files go by the one file resolver, never a path comparison"; exit 1; }
@@ -426,12 +430,12 @@ perl -0777 -ne '
     print "brain: each call picks its own AI first\n";
 ' Sources/Petal/Brain.swift
 # Only a run that succeeded writes `done` (what chains and morning notes wait for), inside `end` once its token
-# completed; every other reply is a faint word that leaves the note's ink and helper line as they are.
+# completed; every other reply is a word on the note that leaves its ink and helper line as they are.
 perl -0777 -ne '
     my $done = () = /state: \.done/g;
     unless ($done == 1 && /private func complete\(_ run: Run, made:.*?run\.token\.complete\(\.succeeded\).*?state: \.done/s
-            && /private func reply\(_ noteID: String, giveBack line: NoteLine\?.*?\{\s*line\?\.again\(\)\s*guard !parts\.isEmpty else \{ return hint\(noteID, words\(\[\]\)\) \}/s) {
-        print "NoteHelpers: only a succeeded run writes done; replies stay faint\n"; exit 1 }
+            && /private func reply\(_ noteID: String, giveBack line: NoteLine\?.*?\{\s*line\?\.again\(\)\s*let keep = line != nil\s*guard !parts\.isEmpty else \{ return hint\(noteID, words\(\[\]\), keep: keep\) \}/s) {
+        print "NoteHelpers: only a succeeded run writes done; replies are words on the note\n"; exit 1 }
     print "helpers: only a succeeded run writes done; replies are faint\n";
 ' Sources/Petal/NoteHelpers.swift
 # A second opinion goes through the same checkout choice as a primary request, and one asked while a run works rides
@@ -455,7 +459,7 @@ perl -0777 -ne '
             && !/func say\(|func refuse\(|func succeeded\(|func answer\(|desk\.tell\(/ && $hints == 2
             && /self\.end\(run, \.succeeded\(nil, Made\(calc: calc\)\)\)/ && /self\.end\(run, \.succeeded\(Said\(who: who, text: line \?\? plain, form: \.words\), Made\(task: items\)\)\)/
             && /self\.end\(run, \.succeeded\(said\)\)|end\(run, \.succeeded\(said\)\)/
-            && /run\.kind == \.quick \{\s*return reply\(paper\.noteID, giveBack: taking\) \{ _ in "A quick helper/) {
+            && /run\.kind == \.quick \{\s*return reply\(paper\.noteID, giveBack: taking\) \{ _ in "Wait for this to finish/) {
         print "NoteHelpers: every run kind must end through end, every reply through reply ($direct completes, $nil removals, $hints hints)\n"; exit 1 }
     print "helpers: one end for every run kind, one reply\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -496,7 +500,7 @@ perl -0777 -ne '
 perl -0777 -ne '
     my $titles = () = /file\.title/g;
     unless ($titles == 2 && /private func reply\(_ noteID: String, giveBack line: NoteLine\?, _ parts: \[String\] = \[\], _ words: \@escaping \@MainActor \(\[Shielded\]\) -> Shielded\)/
-            && /private func hint\(_ noteID: String, _ words: Shielded\)/ && !/\.label\(\)/ && !/label\.prefix|prefix\(48\)|prefix\(30\)/) {
+            && /private func hint\(_ noteID: String, _ words: Shielded, keep: Bool = false\)/ && !/\.label\(\)/ && !/label\.prefix|prefix\(48\)|prefix\(30\)/) {
         print "NoteHelpers: what is said of a note comes only from Shielded whole sources ($titles raw titles)\n"; exit 1 }
     print "helpers: replies, steps and chips only from Shielded whole sources\n";
 ' Sources/Petal/NoteHelpers.swift

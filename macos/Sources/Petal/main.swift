@@ -104,6 +104,10 @@ MainActor.assumeIsolated {
         // display with a real browser, for whoever is at the Mac.
         app.setActivationPolicy(.prohibited)
         BrowserCheck.run(live: live)
+    case .lookCheck(let bundle):
+        // Reads one app's front window as petal_look's text would, and nothing else.
+        app.setActivationPolicy(.prohibited)
+        LookCheck.run(bundle: bundle, arguments: CommandLine.arguments)
     case .mcp, .usage:
         exit(0)   // handled above
     case .dock:

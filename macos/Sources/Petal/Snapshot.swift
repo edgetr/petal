@@ -181,7 +181,7 @@ enum Snapshot {
         }
         // Petal AI using an app: its first question, the chip with Stop by its pointer, and the pointer itself.
         app.assist.preview(Assist.Request(kind: "computer:com.apple.Safari", title: "Let Petal AI use Safari?",
-                                          detail: "First, pressing Export. Until this reply is done it can press, type and choose menus in Safari with its own pointer; yours stays where it is. Esc stops it."))
+                                          detail: "First: pressing Export. With its own pointer, for this reply. Esc stops it."))
         write(render(AnyView(AskCard()), app: app, size: nil), name: "card-ask-computer", folder: folder)
         app.assist.preview(nil)
         // The vault's cards: a login it doesn't have yet, the one Buy card of a checkout, an address, and a login on a

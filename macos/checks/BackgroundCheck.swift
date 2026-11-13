@@ -476,7 +476,7 @@ struct BackgroundCheck {
         for reason in Background.Reason.allCases {
             let words = reason.words("T3 Code")
             expect(words.contains("Nothing was done"), "\(reason) says nothing was done")
-            expect(words.contains("preview"), "\(reason) says how the person brings it forward")
+            expect(words.contains("click that window") || reason == .tab && words.contains("switch back"), "\(reason) says how the person brings it forward")
             expect(reason == .tab ? reason.status == "needs its tab showing" : reason.status.hasPrefix("needs the window in front"),
                    "\(reason)'s line", reason.status)
         }
@@ -539,7 +539,7 @@ struct BackgroundCheck {
                    "on its own display, \(reason) says Show me, never bring it forward", told)
             expect(told.contains("Nothing was done"), "\(reason): nothing was done")
         }
-        expect(Background.Reason.keys.words("Safari").contains("bring the window forward"), "a note on the person's screen still asks for the window")
+        expect(Background.Reason.keys.words("Safari").contains("click that window"), "a note on the person's screen still asks for the window")
 
         // MARK: Waiting for a display
 

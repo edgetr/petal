@@ -308,6 +308,52 @@ struct NoteLayoutCheck {
                !NoteRules.sameFrame(CGRect(x: 0, y: 0, width: 800, height: 600), CGRect(x: 0, y: 0, width: 700, height: 600)),
                "frames alike within 2 points")
 
+        // MARK: Which scripted window is the note's (Chromium's script ids aren't the window server's numbers)
+
+        do {
+        let full = CGRect(x: 0, y: 30, width: 1920, height: 992)
+        let playing = ScriptedWindow(id: "1", name: "(12) Stop Picking The Wrong Model - YouTube 🔊", frame: CGRect(x: 0, y: 30, width: 1920, height: 992),
+                                     tabTitle: "(12) Stop Picking The Wrong Model - YouTube")
+        let axPlaying = "(12) Stop Picking The Wrong Model - YouTube - Aside"
+        expect(NoteRules.scriptedWindow(title: axPlaying, frame: full, rows: [playing]) == 0,
+               "a window playing sound (its scripted name ends in 🔊) is still found: the only one at its frame")
+        let other = ScriptedWindow(id: "2", name: "Docs - Notes", frame: CGRect(x: 1, y: 31, width: 1919, height: 991), tabTitle: "Docs - Notes")
+        expect(NoteRules.scriptedWindow(title: axPlaying, frame: full, rows: [other, playing]) == 1,
+               "two maximized windows: the one whose tab's title the window's starts with")
+        expect(NoteRules.scriptedWindow(title: "Docs - Notes - Aside", frame: full, rows: [other, playing]) == 0,
+               "and the other by its own name")
+        expect(NoteRules.scriptedWindow(title: "Mail - Aside", frame: full, rows: [other, playing]) == nil,
+               "two at its frame and neither named like it: none")
+        let twin = ScriptedWindow(id: "3", name: "Docs - Notes", frame: full, tabTitle: "Docs - Notes")
+        expect(NoteRules.scriptedWindow(title: "Docs - Notes - Aside", frame: full, rows: [other, twin]) == nil,
+               "two alike: none rather than a guess")
+        let small = ScriptedWindow(id: "4", name: "Mail", frame: CGRect(x: 100, y: 100, width: 800, height: 600), tabTitle: "Mail")
+        expect(NoteRules.scriptedWindow(title: "Mail - Aside", frame: full, rows: [small]) == nil, "a window elsewhere is never it")
+        expect(NoteRules.scriptedWindow(title: "", frame: full, rows: [other, ScriptedWindow(id: "5", name: "", frame: full, tabTitle: "")]) == nil,
+               "no title to go by among several: none")
+
+        // MARK: Its own tab, another, or can't tell
+
+        let chromeNote = place(.tab, app: "at.studio.AsideBrowser", tab: NoteTab(id: "77", url: "https://example.com/v", title: "Video"))
+        func chromeFront(_ tab: NoteTab?) -> FrontPlace { FrontPlace(pid: 10, app: "at.studio.AsideBrowser", window: 5, tab: tab) }
+        expect(NoteRules.tabCheck(chromeNote, chromeFront(NoteTab(id: "77", url: "https://example.com/v2", title: ""))) == .same,
+               "its own tab by its id, whatever page it shows")
+        expect(NoteRules.tabCheck(chromeNote, chromeFront(NoteTab(id: "78", url: "https://example.com/v", title: "Video"))) == .another,
+               "another tab, even on the same address")
+        expect(NoteRules.tabCheck(chromeNote, chromeFront(nil)) == .unknown, "no tab told: can't tell")
+        expect(NoteRules.tabCheck(chromeNote, chromeFront(NoteTab(url: "https://example.com/v", title: "Video"))) == .unknown,
+               "a tab with no id: can't tell, never matched by its address")
+        let safariNote = place(.tab, tab: NoteTab(element: 3, index: 1, url: "https://example.com", title: ""))
+        expect(NoteRules.tabCheck(safariNote, safariFront(NoteTab(element: 3, url: "", title: ""))) == .same, "Safari's by its button")
+        expect(NoteRules.tabCheck(safariNote, safariFront(NoteTab(element: 4, url: "", title: ""))) == .another, "another button: another tab")
+        expect(NoteRules.tabCheck(safariNote, safariFront(NoteTab(index: 1, url: "https://example.com", title: ""))) == .unknown,
+               "no strip to tell by: can't tell")
+        expect(NoteRules.tabCheck(chromeNote, FrontPlace(pid: 11, app: "at.studio.AsideBrowser", window: 5, tab: NoteTab(id: "78", url: "", title: ""))) == .unknown,
+               "another run of the browser: can't tell")
+        expect(TabShown.shown(tab: NoteTab(id: "77", url: "", title: ""), window: 5).showing?.window == 5 && TabShown.another.showing == nil
+               && TabShown.unsure(.unknown).showing == nil, "only its own tab counts as showing")
+        }
+
         // MARK: Which note shows
 
         struct N { let scope: NoteScope; let showing: Bool; let name: String }

@@ -139,7 +139,7 @@ extension Acting {
         }
 
         /// Typed but not as asked, in the background: never counted as done, never sent.
-        let uncertain = "Petal couldn't confirm \(name) took that in the background (it doesn't read as asked now), so it isn't done and Return wasn't pressed. Call petal_ui to see what \(name) holds; then ask the person to bring the window forward (clicking this note in the AI button's preview does it) and type it there."
+        let uncertain = "Petal couldn't confirm \(name) took that in the background (it doesn't read as asked now), so it isn't done and Return wasn't pressed. Call petal_ui to see what \(name) holds; then ask the person to click that window and type it there."
 
         /// Gives `element` its app's keyboard (the gate right before the focus is set). False when nothing more
         /// should happen (the gate's refusal has set the outcome already).

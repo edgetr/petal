@@ -1431,3 +1431,193 @@ extension UIMap {
         }
     }
 }
+
+// MARK: - A window's words
+
+extension UIMap {
+    /// What petal_look's words may tell of a control (its value, title, description, help and placeholder), as
+    /// `redact` decides, but a text holding a vault secret loses only the secret's part (`redacted`, the vault's
+    /// `SecretIndex.redacted`), so a page with a key in one sentence still reads; a text the vault still finds a
+    /// secret in once that's done is hidden whole.
+    static func redactWords(_ node: UINode, filled: Bool = false, secret: (String) -> Bool, redacted: (String) -> String) -> UINode {
+        var out = node
+        if filled { hideAll(&out) }
+        if isSecure(node) { out.value = "" }
+        else if looksSecret(node), !node.value.isEmpty { out.value = hidden }
+        for path in [\UINode.title, \.label, \.help, \.placeholder, \.value] where !out[keyPath: path].isEmpty && out[keyPath: path] != hidden {
+            let clean = redacted(out[keyPath: path])
+            out[keyPath: path] = secret(clean) ? hidden : clean
+        }
+        return out
+    }
+}
+
+/// The words a window shows, for petal_look's `text`: a page, a document or a thread in reading order, made from what
+/// Accessibility read of it (`UINode`s in reading order, each already through the vault's redaction). In a web page
+/// (a browser's or a web view's), only the page, never the browser's own toolbar. A password field gives nothing.
+/// Pure, so `macos/checks/run.sh` checks it.
+enum WindowText {
+    /// The most one answer tells: about 12,000 characters, the rest in further parts.
+    static let cap = 12_000
+    /// The most of a window's words read at once (under what the vault's index searches whole, `SecretIndex.limit`).
+    static let most = 800_000
+    /// The most of one control's own text that's kept (a document in one text area).
+    static let pieceCap = 200_000
+    /// Fields whose value is the text (what's typed, or a document's body).
+    static let fields: Set<String> = ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"]
+    /// Roles whose own name is told when nothing inside them said anything (a link or button whose words are its
+    /// title, a heading with no text under it).
+    static let named: Set<String> = ["AXLink", "AXButton", "AXHeading", "AXCell", "AXMenuButton", "AXPopUpButton", "AXCheckBox",
+                                     "AXRadioButton", "AXTab", "AXDisclosureTriangle", "AXMenuItem", "AXToolbarButton"]
+    /// Roles that run on inside a line of text (a link in a sentence): a piece in one belongs to the block around it.
+    /// Anything else is a block of its own (a paragraph, a heading, a button, a cell).
+    static let inline: Set<String> = ["AXLink", "AXStaticText"]
+
+    /// The window's lines: each piece of text in reading order, the pieces of one block (a paragraph with links in
+    /// it) on one line, a heading's line starting "# ", a field's text on lines of its own. A line the same as the one
+    /// before it is told once.
+    static func lines(_ nodes: [UINode]) -> [String] {
+        let webOnly = nodes.contains(where: \.web)
+        var index: [Int: Int] = [:]
+        for (at, node) in nodes.enumerated() { index[node.order] = at }
+        func parent(_ at: Int) -> Int? { index[nodes[at].parent] }
+        // Each node's own text (static text, a field's value), before its name is considered.
+        func own(_ node: UINode) -> String {
+            if UIMap.isSecure(node) || (webOnly && !node.web) { return "" }
+            if node.role == "AXStaticText" { return node.value.isEmpty ? node.title : node.value }
+            if fields.contains(node.role) { return node.value }
+            return ""
+        }
+        var texts = nodes.map { String(own($0).prefix(pieceCap)) }
+        // Whether anything inside a node says something: bottom up, children come after their parent.
+        var inside = [Bool](repeating: false, count: nodes.count)
+        for at in nodes.indices.reversed() {
+            if !UIMap.tidy(texts[at]).isEmpty || inside[at], let up = parent(at) { inside[up] = true }
+        }
+        // Children first, so a cell holding a button that says its name doesn't say its own too.
+        for at in nodes.indices.reversed() where texts[at].isEmpty && !inside[at] && named.contains(nodes[at].role) && !(webOnly && !nodes[at].web) {
+            texts[at] = UIMap.name(nodes[at])
+            // Its name says it for whatever holds it too.
+            if !texts[at].isEmpty {
+                var up = parent(at)
+                while let u = up, !inside[u] { inside[u] = true; up = parent(u) }
+            }
+        }
+        // In a heading, and which block each node's line belongs to (itself, or for an inline one its holder's).
+        var heading = [Bool](repeating: false, count: nodes.count)
+        var block = [Int](repeating: -1, count: nodes.count)
+        for at in nodes.indices {
+            let up = parent(at)
+            heading[at] = nodes[at].role == "AXHeading" || (up.map { heading[$0] } ?? false)
+            block[at] = inline.contains(nodes[at].role) ? (up.map { block[$0] } ?? -1) : at
+        }
+        var lines: [String] = []
+        var line = ""
+        var lineBlock: Int?
+        var lineHeading = false
+        func flush() {
+            let clean = tidyLine(line)
+            line = ""
+            lineBlock = nil
+            guard !clean.isEmpty else { return }
+            let said = lineHeading ? "# " + clean : clean
+            if lines.last != said { lines.append(said) }
+        }
+        for at in nodes.indices {
+            let text = texts[at]
+            guard !UIMap.tidy(text).isEmpty else { continue }
+            if fields.contains(nodes[at].role) {
+                // A field's text stands alone, its own line breaks kept.
+                flush()
+                lineHeading = false
+                for part in text.components(separatedBy: .newlines) {
+                    line = part
+                    flush()
+                }
+                continue
+            }
+            if lineBlock != block[at] || lineHeading != heading[at] { flush() }
+            lineBlock = block[at]
+            lineHeading = heading[at]
+            // A line break in a piece starts a new line.
+            let parts = text.components(separatedBy: .newlines)
+            for (n, part) in parts.enumerated() {
+                if n > 0 { let keep = lineBlock; flush(); lineBlock = keep }
+                line = join(line, part)
+            }
+        }
+        flush()
+        return lines
+    }
+
+    /// Two pieces of one line, as a page spaces them: none added where one already ends or the next starts with a
+    /// space, or the next is punctuation.
+    static func join(_ a: String, _ b: String) -> String {
+        guard let last = a.last, let first = b.first else { return a + b }
+        if last.isWhitespace || first.isWhitespace || ".,;:!?)]}%".contains(first) || "([{".contains(last) { return a + b }
+        return a + " " + b
+    }
+
+    /// A line with its runs of spaces made one and its ends trimmed.
+    static func tidyLine(_ text: String) -> String {
+        text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    /// `text` cut into parts of at most `cap` characters, each ending at a line's end where one is near enough (a
+    /// line longer than a part is cut where the part ends).
+    static func parts(_ text: String, cap: Int = cap) -> [String] {
+        guard cap > 0, text.count > cap else { return text.isEmpty ? [] : [text] }
+        var out: [String] = []
+        var rest = Substring(text)
+        while rest.count > cap {
+            let window = rest.prefix(cap)
+            // At the last line break in the part's second half, else where it ends.
+            var cut = window.endIndex
+            if let lineEnd = window.lastIndex(of: "\n"), window.distance(from: window.startIndex, to: lineEnd) >= cap / 2 {
+                cut = window.index(after: lineEnd)
+            }
+            out.append(String(rest[..<cut]).trimmingCharacters(in: .newlines))
+            rest = rest[cut...]
+        }
+        let last = String(rest).trimmingCharacters(in: .newlines)
+        if !last.isEmpty { out.append(last) }
+        return out
+    }
+
+    /// Part `part` (1 is the first) of `text`, how many parts there are, and how many characters come after it.
+    static func page(_ text: String, part: Int, cap: Int = cap) -> (text: String, part: Int, parts: Int, left: Int) {
+        let all = parts(text, cap: cap)
+        guard !all.isEmpty else { return ("", 1, 0, 0) }
+        let at = min(max(part, 1), all.count)
+        let left = all[at...].reduce(0) { $0 + $1.count }
+        return (all[at - 1], at, all.count, left)
+    }
+
+    /// The passages around `word` (case and accents aside): each line that has it with `around` lines before and after,
+    /// passages that touch made one, apart by "…"; at most `cap` characters, and how many passages there were and
+    /// how many didn't fit.
+    static func find(_ word: String, in lines: [String], around: Int = 1, cap: Int = cap) -> (text: String, found: Int, left: Int) {
+        let wanted = UIMap.tidy(word)
+        guard !wanted.isEmpty else { return ("", 0, 0) }
+        let hits = lines.indices.filter { lines[$0].range(of: wanted, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+        var spans: [ClosedRange<Int>] = []
+        for hit in hits {
+            let span = max(0, hit - around)...min(lines.count - 1, hit + around)
+            if let last = spans.last, span.lowerBound <= last.upperBound + 1 {
+                spans[spans.count - 1] = last.lowerBound...max(last.upperBound, span.upperBound)
+            } else {
+                spans.append(span)
+            }
+        }
+        var told: [String] = []
+        var size = 0
+        for span in spans {
+            let passage = lines[span].joined(separator: "\n")
+            if size + passage.count > cap, !told.isEmpty { break }
+            let shown = passage.count > cap ? String(passage.prefix(cap)) : passage
+            told.append(shown)
+            size += shown.count + 3
+        }
+        return (told.joined(separator: "\n…\n"), spans.count, spans.count - told.count)
+    }
+}

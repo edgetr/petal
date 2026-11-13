@@ -48,8 +48,30 @@ extension Viewers {
         // for the notes to be ready, as the note tools do: never a count or comments from notes not read yet.
         if ["petal_view", "petal_note_pdf_comments"].contains(name), !app.paper.acceptsChanges { return fail(NoteStore.gettingReady) }
         let path = args["path"] as? String ?? ""
+        // A note's helper naming no file means its note's own document: found by the one resolver the margin uses
+        // (off the main thread), then asked again with that path.
+        if path.isEmpty, ["petal_view", "petal_view_versions", "petal_note_pdf_comments"].contains(name),
+           let paperID = app.claude.note(withID: caller)?.paper, let paper = app.paper.helpers.paper(paperID),
+           let stick = paper.file.places.first(where: ViewerFiles.namesFile) {
+            let mac = app.paper.local.mac
+            nonisolated(unsafe) let args = args
+            DispatchQueue.global(qos: .userInitiated).async {
+                let found = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let found else { return fail("Petal can't find this note's document now (moved or deleted?): pass its path.") }
+                        var named = args
+                        named["path"] = found
+                        self.handle(name, named, caller: caller, live: live, answer, refuse)
+                    }
+                }
+            }
+            return
+        }
         switch name {
         case "petal_view":
+            // Every page's words at once (pages: "all"), up to `allLimit`.
+            if args["pages"] as? String == "all" { return viewAll(path: path, caller: caller, live: live, told: told, fail: fail) }
             // A page counts from 1; a number that isn't one is refused before anything is worked out from it.
             let page = ViewerPages.requested(args["page"])
             if args["page"] != nil, page == nil { return fail("page counts from 1 (a whole number).") }
@@ -213,6 +235,53 @@ extension Viewers {
 
     /// A page's words in `petal_view`'s answer, made to fit once the whole answer is redacted (never cut before).
     static let textLimit = 12_000
+    /// The most of every page's words `pages: "all"` tells at once.
+    nonisolated static let allLimit = 40_000
+
+    /// Every page's words, in order, each under its number, read one page at a time off the main thread; told with
+    /// the rest, redacted whole with the answer, then cut to `allLimit` (saying which page it reached).
+    private func viewAll(path: String, caller: String, live: @escaping @Sendable () -> Bool,
+                         told: @escaping (@escaping @MainActor () -> Told, Int, @escaping @MainActor (Any) -> Any) -> Void,
+                         fail: @escaping (String) -> Void) {
+        open(path: path, page: nil, live: live) { result in
+            guard live() else { return }
+            switch result {
+            case .failure(let refusal): fail(refusal.description)
+            case .success(let model):
+                model.whenLoaded(within: Self.loadLimit) { _ in
+                    guard let source = model.text, !model.loading, !model.live, model.pageCount > 0 else {
+                        return told({ model.isClosed ? Told(refusal: Self.closedText) : Told(self.told(model, caller: caller), state: model.shownState) }, 0, { $0 })
+                    }
+                    let count = model.pageCount, word = model.unit.word
+                    var pages: [String] = []
+                    func next(_ index: Int) {
+                        guard live() else { return }
+                        guard index < count, pages.reduce(0, { $0 + $1.count }) < Self.allLimit else {
+                            let reached = index
+                            return told({
+                                guard !model.isClosed else { return Told(refusal: Self.closedText) }
+                                var answer = self.told(model, caller: caller)
+                                guard !model.loading, model.text === source else { return Told(answer, state: model.shownState) }
+                                answer["text"] = pages.joined(separator: "\n\n")
+                                if reached < count { answer["textCut"] = "This goes to \(word) \(reached); ask with page for the rest." }
+                                return Told(answer, state: model.shownState)
+                            }, 0, { out in
+                                guard var all = out as? [String: Any], let text = all["text"] as? String, text.count > Self.allLimit else { return out }
+                                all["text"] = String(text.prefix(Self.allLimit)) + "…"
+                                all["textCut"] = "This is the start of the document's words; ask with page for the rest."
+                                return all
+                            })
+                        }
+                        source.read(page: index, selected: NSRange(location: NSNotFound, length: 0), paragraph: { _ in nil }) { text, _, _ in
+                            if let text, !text.isEmpty { pages.append("— \(word) \(index + 1) —\n" + text) }
+                            next(index + 1)
+                        }
+                    }
+                    next(0)
+                }
+            }
+        }
+    }
     static func fitText(_ answer: Any) -> Any {
         guard var told = answer as? [String: Any], let text = told["text"] as? String, text.count > textLimit else { return answer }
         told["text"] = String(text.prefix(textLimit)) + "…"

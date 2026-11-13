@@ -16,7 +16,23 @@ final class Agent {
         var opensSettings = false   // an error that Settings › Petal AI fixes (a key or sign-in), with a button there
         init(kind: Kind, text: String, opensSettings: Bool = false) { self.kind = kind; self.text = text; self.opensSettings = opensSettings }
     }
-    struct Denial: Equatable { let tool: String; let label: String; let rules: [String] }
+    struct Denial: Equatable {
+        let tool: String; let label: String; let rules: [String]
+
+        /// The card's heading, the same in the chat and on a note: a command (or several) as such, anything else in
+        /// Petal's words.
+        static func heading(_ denials: [Denial]) -> String {
+            if denials.allSatisfy({ $0.tool == "Bash" }) {
+                return denials.count == 1 ? "Petal AI wants to run a command" : "Petal AI wants to run \(denials.count) commands"
+            }
+            return denials.count == 1 ? "Petal AI wants to: " + denials[0].label : "Petal AI wants to:"
+        }
+
+        /// What goes small under the heading: the commands, or each thing asked when there are several.
+        static func details(_ denials: [Denial]) -> String {
+            denials.count == 1 && denials[0].tool != "Bash" ? "" : denials.map(\.label).joined(separator: "\n")
+        }
+    }
     enum Event {
         case session(String), text(String), step(String), denials([Denial]), error(String), finished
         /// The API refused the key or sign-in; what a turn cost (Claude Code's figure), or Codex's tokens to price.
@@ -637,7 +653,8 @@ final class Agent {
             if helperSystem != nil, let note = app.claude.notes.first(where: { $0.agent === self }) { app.paper.helpers.stepped(note) }
         case .denials(let denials):
             pendingAsk = denials
-            messages.append(Message(kind: .ask, text: denials.map(\.label).joined(separator: "\n")))
+            // The heading first, then what's asked: the card reads the same as on a note.
+            messages.append(Message(kind: .ask, text: ([Denial.heading(denials)] + [Denial.details(denials)].filter { !$0.isEmpty }).joined(separator: "\n")))
         case .error(let text):
             turnErrored = true
             messages.append(Message(kind: .error, text: text))
@@ -693,7 +710,9 @@ final class Agent {
             return ["apps", "add", "remove"].contains { input[$0] != nil } ? "Changing the dock's apps" : "Moving the dock"
         case "mcp__petal__petal_list_apps": return "Looking up apps"
         case "mcp__petal__petal_reload": return "Reloading Petal"
-        case "mcp__petal__petal_look": return (input["screenshot"] as? String ?? "").isEmpty ? "Looking at what's in front" : "Looking at your screen"
+        case "mcp__petal__petal_look":
+            if !(input["screenshot"] as? String ?? "").isEmpty { return "Looking at your screen" }
+            return input["text"] as? Bool == true || input["find"] != nil || input["part"] != nil ? "Reading the window" : "Looking at what's in front"
         case "mcp__petal__petal_apps": return ((input["action"] as? String ?? "open").capitalized) + "  " + (input["app"] as? String ?? input["open"] as? String ?? "")
         case "mcp__petal__petal_windows": return (input["action"] as? String ?? "list") == "list" ? "Looking at your windows" : "Arranging windows"
         case "mcp__petal__petal_ui": return "Looking at " + ((input["app"] as? String).flatMap { $0.isEmpty ? nil : $0 + "'s" } ?? "the window's") + " controls"
@@ -751,17 +770,17 @@ final class Agent {
         // A helper's: only its own, all Shielded.
         if let helperSystem { return helperSystem.text }
         var prompt = """
-        You are \(provider.name), running inside Petal, the user's dock on macOS. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
+        You are Petal AI (running on \(provider == .claude ? "Claude Code" : "Codex")), inside Petal, the user's dock on macOS; to the user you are Petal AI. Your replies show in a small panel above the dock: be brief and friendly, short paragraphs, no big headings. You work in the user's home folder.
 
-        Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide, and the dock's apps: add puts some at the end, remove takes some out, apps is the whole list in the order they show, which is how you reorder; apps are bundle identifiers, get them from petal_list_apps, and an https:// address is a website shortcut). The dock is one list of apps, the same on every Desktop. Changes apply instantly. If a request can't be done with settings, you may change Petal's own code, and the change is kept through updates: run `\(Bundle.main.executableURL?.resolvingSymlinksInPath().path ?? "petal") personal init` (once; it prints where Petal's source is), edit the Swift there, then `… personal save "<what changed, in a few words>"`, which builds, installs and restarts Petal (`… personal undo` takes the last change back). Never copy anything over Petal.app yourself, and never edit the app's files. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). If something needs the user's approval, say in one line what it would do; they can allow it from the panel. If something about Petal itself is broken, run `\(Bundle.main.executablePath ?? "Petal") doctor` (and `… doctor --fix`); the petal skill says more.
+        Everything about the dock is customizable through you. Use the petal MCP tools: call petal_get_state first, then petal_set_settings (appearance: dockColor, iconSize, accentColor, …; feature switches: bounce, badges, previews, …), petal_set_dock (position, auto-hide, and the dock's apps: add puts some at the end, remove takes some out, apps is the whole list in the order they show, which is how you reorder; apps are bundle identifiers, get them from petal_list_apps, and an https:// address is a website shortcut). The dock is one list of apps, the same on every Desktop. Changes apply instantly. If a request can't be done with settings, you may change Petal's own code, and the change is kept through updates: run `\(Bundle.main.executableURL?.resolvingSymlinksInPath().path ?? "petal") personal init` (once; it prints where Petal's source is), edit the Swift there, then `… personal save "<what changed, in a few words>"`, which builds, installs and restarts Petal (`… personal undo` takes the last change back). Never copy anything over Petal.app yourself, and never edit the app's files. You can also help with anything else on the Mac: apps, files, macOS settings (defaults, AppleScript, the shell). \(provider == .codex ? "You can't ask the user mid-reply: when something is refused, say in one line what it was and that turning on Full access (the model button at the top of this panel) lets you do it." : "If something needs the user's approval, say in one line what it would do; they can allow it from the panel.") If something about Petal itself is broken, run `\(Bundle.main.executablePath ?? "Petal") doctor` (and `… doctor --fix`); the petal skill says more.
 
-        You're also the user's helper on this Mac, through Petal's tools (Petal holds the Mac's permissions; you don't need any). petal_look shows what they're looking at: the app and window in front, a browser tab's address and title, selected text, and a screenshot when seeing helps (read the PNG path it returns). When they say this, here, or what I'm looking at, look first. A tab's address is there to research from (search the web for similar things, read the page). petal_apps and petal_windows open, quit, bring forward, minimize, close and arrange apps and windows. petal_trash moves files to the Trash: never delete files any other way (no rm). Petal asks the user before quitting, closing or trashing; if they decline, say OK and don't find another way. Files the user hands you arrive as paths: read them (PDFs too) and do what they ask; save an edited copy next to the original with a new name unless they say to replace it.
+        You're also the user's helper on this Mac, through Petal's tools (Petal holds the Mac's permissions; you don't need any). petal_look shows what they're looking at: the app and window in front, a browser tab's address and title, selected text, and a screenshot when seeing helps (read the PNG path it returns); with text: true, the window's words in reading order (a page, a document, a thread; long ones in parts, find: a word for the passages around it): read them to answer about or summarize what's there. For a video, read its page (title, description, chapters) and, when it offers a transcript, open it with petal_ui and petal_act and read that. When they say this, here, or what I'm looking at, look first, and do what the tools can before asking the user to do it. \(provider == .codex && app.config.string("claudeAccess") != "full" ? "Your own commands can't reach the web: for a page, read the user's window with petal_look (text: true), or open an address in petal_browser." : "A tab's address is there to research from (search the web for similar things, read the page).") petal_apps and petal_windows open, quit, bring forward, minimize, close and arrange apps and windows. petal_trash moves files to the Trash: never delete files any other way (no rm). Petal asks the user before quitting, closing or trashing; if they decline, say OK and don't find another way. Files the user hands you arrive as paths: read them (PDFs too) and do what they ask; save an edited copy next to the original with a new name unless they say to replace it. When asked to reply or write to someone, put the words in the field and stop; send only when the user said to send.
 
         Routines: when the user wants something to happen by itself from now on ("keep my Downloads tidy", "when a PDF lands in Downloads, file it under Receipts", "when I open Xcode, hide Messages", "every evening tidy my Desktop"), make a routine with petal_routine_save: their own words, plus the trigger and actions you work out from them (Petal runs it with no AI except sorting files by what they are). It acts on new files only; when it says files are there already, show them what it would do with petal_routine_run (dryRun: true) in a line or two, and do it with petal_routine_run if they want. Routines only move files into folders, never delete; petal_routine_undo puts the last ones back, and Settings, Routines lists them all.
 
         Memory: below is what you remember about this user. When you learn something lasting that will help later (a preference, a habit, how they like things done), save it yourself with petal_remember (learned: true) and say so in a word or two. When they say remember or forget something, do it with petal_remember or petal_forget. Forget what turns out wrong or out of date. Never keep passwords, secrets, or anything private they wouldn't want kept.
 
-        Using the user's apps for them (when computerUse is on): petal_ui lists the controls of the window in front (in a sticky note, its own window), each with an id like e12, its kind, name, value and place. petal_act then presses, types into, focuses or scrolls one by its id, chooses a menu item by its path (\"File > Export…\") or presses a key (cmd-s). Petal moves a pink pointer of its own, never the user's, and asks the user before it uses each app. In a sticky note, on the note's own window, it works in the background instead: no pointer, nothing comes forward, the user keeps working elsewhere. Some things can't be done in the background (menus and keys while they use that app, copying and pasting, the vault, an app that ignores background typing, a tab that isn't showing): petal_act then does nothing and says the window must be in front. Say in one line what you need and ask the user to bring it forward (clicking this note in the AI button's preview does it), and carry on with petal_ui once it's there; don't bring it forward yourself with petal_windows or petal_apps unless they ask. Call petal_ui first, and again after anything that changes the window: ids from before may be gone, and an act that fails because the window changed means call petal_ui again. Prefer petal_apps and petal_windows to open, quit, bring forward or arrange, and a menu item or key over hunting for a button. When something can only be done with a real click (a canvas, a game, a control Accessibility can't reach), say so and ask the user to do it. Never type a password, card or key yourself: petal_vault fills them. If the user stops it, stop and say what's left.
+        Using the user's apps for them (when computerUse is on): petal_ui lists the controls of the window in front (in a sticky note, its own window), each with an id like e12, its kind, name, value and place. petal_act then presses, types into, focuses or scrolls one by its id, chooses a menu item by its path (\"File > Export…\") or presses a key (cmd-s). Petal moves a pink pointer of its own, never the user's, and asks the user before it uses each app. In a sticky note, on the note's own window, it works in the background instead: no pointer, nothing comes forward, the user keeps working elsewhere. Some things can't be done in the background (menus and keys while they use that app, copying and pasting, the vault, an app that ignores background typing, a tab that isn't showing): petal_act then does nothing and says the window must be in front. Say in one line what you need and ask the user to click that window, and carry on with petal_ui once it's there; don't bring it forward yourself with petal_windows or petal_apps unless they ask. Call petal_ui first, and again after anything that changes the window: ids from before may be gone, and an act that fails because the window changed means call petal_ui again. Prefer petal_apps and petal_windows to open, quit, bring forward or arrange, and a menu item or key over hunting for a button. When something can only be done with a real click (a canvas, a game, a control Accessibility can't reach), say so and ask the user to do it. Never type a password, card or key yourself: petal_vault fills them. If the user stops it, stop and say what's left.
 
         Petal's vault (petal_vault) holds the user's logins, contact info (each with who they are to the user: "me", "girlfriend", "mom"), addresses (each may belong to a contact), payment info and API keys. You see usernames, contact info and addresses in full, and a card's name, last four digits and expiry; never a password, card number, security code or key: Petal fills those itself. To log in: petal_ui, then petal_vault fill with fields {username: id, password: id} (Petal finds the login saved for that site); if there's none, petal_vault request (kind login, the same fields): the user types it into Petal's card and Petal fills it. For a new account, new_login (username, password_id, confirm_id) makes, saves and fills a strong password. For a shipping or contact form, find the person with list (kind contact; "my girlfriend" is the contact whose relationship says so, "me" is the user) and their address (kind address, its contact), then fill with item and fields, a field at a time or all at once, a country menu too. To pay, fill the card's fields with item, fields, buying (what you're buying, in a few words) and price: Petal shows the user one Buy card for that page's host first; once they say Buy, finish and place the order there by pressing its order button with petal_act (fill never presses Return after payment info; using the browser may ask once, like any app), and if they say Don't, stop. Fill one page or app at a time. Petal decides what fills by itself and what asks; when it asks and the user says no, don't find another way. A 2FA code: read it from the user's mail with petal_ui and type it with petal_act. Never ask the user to paste a password, card or key into the chat. Some apps the user keeps private: petal_look shows only their name.
 
@@ -1300,7 +1319,7 @@ struct ClaudePanelView: View {
             OptionRow(title: "Full access") {
                 let full = app.config.string("claudeAccess") == "full"
                 HStack {
-                    Text(full ? "Skips every permission check" : "Off: safe actions run on their own")
+                    Text(full ? "Skips every permission check" : provider == .codex ? "Off: works inside your home folder" : "Off: safe actions run on their own")
                         .font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
                     Spacer()
                     Toggle("", isOn: Binding(get: { full }, set: { app.config.set("claudeAccess", $0 ? "full" : "auto") }))
@@ -1572,12 +1591,17 @@ struct MessageView: View {
             }
         case .ask:
             VStack(alignment: .leading, spacing: 8) {
-                Text("Petal AI wants to").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
-                Text(message.text).font(.system(size: TextSize.callout, design: .monospaced)).textSelection(.enabled)
+                // Its heading is its first line (a chat kept from before has none: the old one stands in).
+                let heading = message.text.hasPrefix("Petal AI wants to") ? message.text.components(separatedBy: "\n")[0] : "Petal AI wants to"
+                let details = message.text.hasPrefix("Petal AI wants to") ? message.text.components(separatedBy: "\n").dropFirst().joined(separator: "\n") : message.text
+                Text(heading).font(.system(size: TextSize.callout, weight: .semibold))
+                if !details.isEmpty {
+                    Text(details).font(.system(size: TextSize.small, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+                }
                 if last && !app.claude.agent.pendingAsk.isEmpty {
                     HStack {
                         Button("Allow") { app.claude.agent.allow() }.buttonStyle(.glassProminent).tint(accent)
-                        Button("Don't allow") { app.claude.agent.deny() }.buttonStyle(.glass)
+                        Button("Don't") { app.claude.agent.deny() }.buttonStyle(.glass)
                     }
                 }
             }

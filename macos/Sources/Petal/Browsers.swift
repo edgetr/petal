@@ -153,13 +153,13 @@ final class Browsers {
                 DispatchQueue.main.async { done(url) }
             }
         case .chromium, .safari:
-            let tab = kind == .safari ? "current tab" : "active tab"
-            let source = window == nil ? "tell application id \"\(id)\" to return URL of \(tab) of front window"
-                : Self.windowsScript(id, tab: tab)
+            let safari = kind == .safari
+            let source = window == nil ? "tell application id \"\(id)\" to return URL of \(safari ? "current tab" : "active tab") of front window"
+                : Self.windowsScript(id, safari: safari)
             queue.async {
                 // Never a surprise prompt: only a browser that already said yes is asked.
                 let answer = Self.access(id) == .allowed ? Self.run(source) : nil
-                let url = window.map { Self.url(in: answer ?? "", for: $0) } ?? answer
+                let url = window.map { Self.row(in: answer ?? "", for: $0, byNumber: safari)?.url } ?? answer
                 DispatchQueue.main.async { done(url) }
             }
         }
@@ -170,84 +170,93 @@ final class Browsers {
     func tab(of app: NSRunningApplication, window: Window, done: @escaping (_ url: String?, _ id: String?) -> Void) {
         guard let id = app.bundleIdentifier, let kind = Self.kind(id) else { return done(nil, nil) }
         guard kind != .gecko else { return frontURL(of: app, window: window) { done($0, nil) } }
-        let source = Self.tabsScript(id, tab: kind == .safari ? "current tab" : "active tab",
-                                     tabID: kind == .safari ? "index of current tab of w" : "id of active tab of w")
+        let source = Self.windowsScript(id, safari: kind == .safari)
         queue.async {
             let answer = Self.access(id) == .allowed ? Self.run(source) : nil
-            // The tab's id comes first, then its address (which may hold a tab character).
-            let row = Self.url(in: answer ?? "", for: window).map { $0.split(separator: "\t", maxSplits: 1, omittingEmptySubsequences: false).map(String.init) }
-            let url = row.flatMap { $0.count == 2 && !$0[1].isEmpty ? $0[1] : nil }
-            let tabID = row.flatMap { $0.first.flatMap { $0.isEmpty ? nil : $0 } }
+            let row = Self.row(in: answer ?? "", for: window, byNumber: kind == .safari)
+            let url = row.flatMap { $0.url.isEmpty ? nil : $0.url }
+            let tabID = row.flatMap { $0.tabID.isEmpty ? nil : $0.tabID }
             DispatchQueue.main.async { done(url, url == nil ? nil : tabID) }
         }
     }
 
-    /// As windowsScript, with the browser's id for each window's tab (`tabID`, "" when it doesn't say) before the
-    /// address.
-    private static func tabsScript(_ id: String, tab: String, tabID: String) -> String {
-        """
-        set out to ""
-        set sep to tab
-        set nl to linefeed
-        tell application id "\(id)"
-        repeat with w in windows
-        try
-        set b to bounds of w
-        set t to ""
-        try
-        set t to (\(tabID)) as text
-        end try
-        set out to out & (id of w) & sep & (name of w) & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & sep & t & sep & (URL of \(tab) of w) & nl
-        end try
-        end repeat
-        end tell
-        return out
-        """
+    /// Every window's id, name, bounds, active tab's id (Chromium's tab id, Safari's tab index), title and address,
+    /// fields apart by character 31 and windows by character 30 (titles and addresses may hold tabs and line breaks).
+    nonisolated private static func windowsScript(_ id: String, safari: Bool) -> String {
+        let tab = safari ? "current tab" : "active tab"
+        return """
+            set out to ""
+            set sep to character id 31
+            set nl to character id 30
+            tell application id "\(id)"
+            repeat with w in windows
+            try
+            set b to bounds of w
+            set t to \(tab) of w
+            set i to ""
+            set n to ""
+            set u to ""
+            try
+            set i to (\(safari ? "index of t" : "id of t")) as text
+            end try
+            try
+            set n to \(safari ? "name" : "title") of t
+            end try
+            if n is missing value then set n to ""
+            try
+            set u to URL of t
+            end try
+            if u is missing value then set u to ""
+            set out to out & (id of w) & sep & (name of w) & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & sep & i & sep & n & sep & u & nl
+            end try
+            end repeat
+            end tell
+            return out
+            """
     }
 
-    /// Every window's id, name, bounds and tab address, one per line (the separators set outside the browser's
-    /// own words, where Safari's `tab` is a tab, not the character).
-    private static func windowsScript(_ id: String, tab: String) -> String {
-        """
-        set out to ""
-        set sep to tab
-        set nl to linefeed
-        tell application id "\(id)"
-        repeat with w in windows
-        try
-        set b to bounds of w
-        set out to out & (id of w) & sep & (name of w) & sep & (item 1 of b) & "," & (item 2 of b) & "," & (item 3 of b) & "," & (item 4 of b) & sep & (URL of \(tab) of w) & nl
-        end try
-        end repeat
-        end tell
-        return out
-        """
+    /// Every window of a running Chromium browser or Safari as its script lists it, or nil (not allowed to ask it
+    /// yet, or no answer): for `Petal --look-check`. Off the main thread.
+    nonisolated static func windowRows(_ bundleID: String) -> [Row]? {
+        guard let kind = kind(bundleID), kind != .gecko, access(bundleID) == .allowed,
+              let answer = run(windowsScript(bundleID, safari: kind == .safari)) else { return nil }
+        return rows(in: answer)
     }
 
-    /// The tab address of the one window that is `window`: by the window server's number (Safari's window id is
-    /// it), else by the same frame and title. Two windows alike, or none: no address rather than a wrong one.
-    nonisolated static func url(in listing: String, for window: Window) -> String? {
-        struct Row { let id: UInt32?; let name: String; let frame: CGRect; let url: String }
-        let rows: [Row] = listing.split(separator: "\n").compactMap { line in
-            let parts = line.components(separatedBy: "\t")
-            guard parts.count >= 4 else { return nil }
+    /// One window of `windowsScript`'s listing.
+    struct Row {
+        let window: ScriptedWindow
+        let tabID: String
+        let url: String
+    }
+
+    /// `windowsScript`'s listing as rows.
+    nonisolated static func rows(in listing: String) -> [Row] {
+        listing.components(separatedBy: "\u{1E}").compactMap { line in
+            let parts = line.components(separatedBy: "\u{1F}")
+            guard parts.count >= 6 else { return nil }
             let b = parts[2].split(separator: ",").compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
             guard b.count == 4 else { return nil }
-            return Row(id: UInt32(parts[0]), name: parts[1], frame: CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1]),
-                       url: parts[3...].joined(separator: "\t"))
+            let frame = CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1])
+            return Row(window: ScriptedWindow(id: parts[0].trimmingCharacters(in: .whitespacesAndNewlines), name: parts[1], frame: frame, tabTitle: parts[4]),
+                       tabID: parts[3], url: parts[5...].joined(separator: "\u{1F}"))
         }
-        if let number = window.number {
-            let same = rows.filter { $0.id == number }
-            if same.count == 1 { return same[0].url }
+    }
+
+    /// The row of the one window that is `window`: Safari's by the window server's number (its window id is it),
+    /// a Chromium browser's by its frame and title (`NoteRules.scriptedWindow`). None, or two alike: nil rather than
+    /// another window's.
+    nonisolated static func row(in listing: String, for window: Window, byNumber: Bool) -> Row? {
+        row(in: rows(in: listing), for: window, byNumber: byNumber)
+    }
+
+    nonisolated static func row(in rows: [Row], for window: Window, byNumber: Bool) -> Row? {
+        if byNumber {
+            guard let number = window.number else { return nil }
+            let same = rows.filter { UInt32($0.window.id) == number }
+            return same.count == 1 ? same[0] : nil
         }
-        func near(_ a: CGRect, _ b: CGRect) -> Bool {
-            abs(a.minX - b.minX) <= 2 && abs(a.minY - b.minY) <= 2 && abs(a.width - b.width) <= 2 && abs(a.height - b.height) <= 2
-        }
-        let title = window.title
-        let matches = rows.filter { row in
-            near(row.frame, window.frame) && !row.name.isEmpty && (row.name == title || title.hasPrefix(row.name))
-        }
-        return matches.count == 1 ? matches[0].url : nil
+        return NoteRules.scriptedWindow(title: window.title, frame: window.frame, rows: rows.map(\.window)).map { rows[$0] }
     }
 
     // MARK: Tabs, for sticky notes
@@ -333,8 +342,8 @@ final class Browsers {
 
     /// The tab one of the browser's windows (`window`, a sticky note's; `element`, that window's Accessibility element)
     /// shows now, or nil when Petal can't tell: the window found by the window server's number (Safari's window id is
-    /// it), else by the same frame and title; none, or two alike, is no tab rather than another window's. Firefox and
-    /// Zen through Accessibility. Off the main thread.
+    /// it), else by its frame and title (`NoteRules.scriptedWindow`); none, or two alike, is no tab rather than another
+    /// window's. Firefox and Zen through Accessibility. Off the main thread.
     nonisolated static func shownTab(pid: pid_t, bundleID: String, window: Window, element: AXUIElement?) -> NoteTab? {
         let kind = kind(bundleID)
         if kind == .gecko { return geckoTab(pid: pid, window: window.number) }
@@ -368,7 +377,7 @@ final class Browsers {
             end tell
             return out
             """) else { return nil }
-        struct Row { let id: UInt32?; let name: String; let frame: CGRect; let tab: NoteTab }
+        struct Row { let id: UInt32?; let window: ScriptedWindow; let tab: NoteTab }
         let rows: [Row] = listing.components(separatedBy: "\u{1E}").compactMap { line in
             let parts = line.components(separatedBy: "\u{1F}")
             guard parts.count >= 8 else { return nil }
@@ -376,7 +385,8 @@ final class Browsers {
             guard b.count == 4 else { return nil }
             let tab = NoteTab(id: parts[3].isEmpty ? nil : parts[3], index: Int(parts[4]), count: Int(parts[5]),
                               url: parts[6], title: parts[7...].joined(separator: "\u{1F}"))
-            return Row(id: UInt32(parts[0]), name: parts[1], frame: CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1]), tab: tab)
+            let frame = CGRect(x: b[0], y: b[1], width: b[2] - b[0], height: b[3] - b[1])
+            return Row(id: UInt32(parts[0]), window: ScriptedWindow(id: parts[0], name: parts[1], frame: frame, tabTitle: tab.title), tab: tab)
         }
         if kind == .safari {
             guard let number = window.number else { return nil }
@@ -387,11 +397,7 @@ final class Browsers {
             tab.element = tabElement(before, after, index: tab.index, count: tab.count, pid: pid, window: number)
             return tab
         }
-        let title = window.title
-        let matches = rows.filter { row in
-            NoteRules.sameFrame(row.frame, window.frame) && !row.name.isEmpty && (row.name == title || title.hasPrefix(row.name))
-        }
-        return matches.count == 1 ? matches[0].tab : nil
+        return NoteRules.scriptedWindow(title: window.title, frame: window.frame, rows: rows.map(\.window)).map { rows[$0].tab }
     }
 
     /// How many tabs of the browser have the address `url`, from `sharedScript`'s list: nil when it couldn't list them.
