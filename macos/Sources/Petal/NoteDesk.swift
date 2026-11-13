@@ -3434,10 +3434,12 @@ struct NotePanelContent: View {
     let key: String
     weak var panel: NotePanel?
 
-    /// What changes a paper's height from a helper: its file as written, a run, a question waiting on it.
+    /// What changes a paper's height from a helper: its file as written, a run, a question waiting on it, a word Petal
+    /// says on it, a request being sent.
     private func helperShape(_ paper: PaperNote) -> String {
         let run = desk.helpers.runs[paper.noteID]
-        return "\(paper.revision?.count ?? 0)|\(paper.file.ink.count)|\(run != nil)|\(run?.sticky?.agent.pendingAsk.count ?? 0)|\(run?.paused == true)|\(desk.helpers.card(paper.noteID)?.id.uuidString ?? "")"
+        let said = desk.helpers.hints[paper.noteID] ?? ""
+        return "\(paper.revision?.count ?? 0)|\(paper.file.ink.count)|\(paper.file.asks.count)|\(run != nil)|\(run?.sticky?.agent.pendingAsk.count ?? 0)|\(run?.paused == true)|\(desk.helpers.card(paper.noteID)?.id.uuidString ?? "")|\(said)|\(desk.helpers.sending.count)"
     }
 
     var body: some View {

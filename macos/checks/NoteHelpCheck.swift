@@ -60,6 +60,74 @@ struct NoteHelpCheck {
         expect(handFile.serialized().contains("later: kept"), "an unknown key kept")
         expect(NoteFile.parse("---\nid: P\ncover: true\nprivate: true\n---\n", fallbackID: "x", fallbackDate: now).scalarValue("private") == "true", "a private cover, by its key")
 
+        // MARK: Requests sent as bubbles (`asks:`)
+
+        // Generated requests (words with quotes, colons, line-ish punctuation, @ mentions, long and empty answers),
+        // every ending: written, read back and written again exactly; each outcome lands only on its own request.
+        var generator = SystemRandomNumberGenerator()
+        let pieces = ["@Petal", "what is", "\"this\"", "video: about", "a summary", "#1", "Use Haiku for it.", "@[Bus card]", "—", "ü ğ ş", "tab\there", "x: y"]
+        let ends: [NoteHelp.Ask.End?] = [nil, .done, .replied, .refused, .failed, .stopped]
+        var sweeps = 0
+        for round in 0..<300 {
+            var note = NoteFile(id: "R\(round)", created: now, body: round % 3 == 0 ? "" : "Writing above\n\nmore")
+            var asks: [NoteHelp.Ask] = []
+            for index in 0..<Int.random(in: 0...5, using: &generator) {
+                let words = "@Petal " + (0..<Int.random(in: 1...6, using: &generator)).map { _ in pieces.randomElement(using: &generator)! }.joined(separator: " ")
+                var ask = NoteHelp.Ask(id: "a\(round)-\(index)", words: words, at: index % 2 == 0 ? now : nil, mac: index % 3 == 0 ? "" : "mac-1")
+                ask.end = ends.randomElement(using: &generator)!
+                if ask.end != nil, index % 2 == 1 { ask.said = String(repeating: "An answer: \"quoted\" line. ", count: index * 7) }
+                ask.who = index % 2 == 0 ? "" : "✦ Petal · Haiku"
+                ask.settings = ask.end == .failed && index % 2 == 0
+                asks.append(ask)
+            }
+            note.asks = asks
+            let text = note.serialized()
+            let read = NoteFile.parse(text, fallbackID: "x", fallbackDate: now)
+            expect(read.asks == asks, "requests read back as written", text)
+            expect(read.serialized() == text, "requests written again, the same text", text)
+            expect(read.body == note.body, "the writing is left as it was", read.body)
+            guard let target = asks.randomElement(using: &generator) else { continue }
+            // An outcome lands on its own request (by id), through the helpers' journal and back, composed with a later one.
+            let first = NoteHelp.Ask.Outcome(id: target.id, end: .stopped, said: "Stopped.")
+            let ink = NoteHelp.Ink(who: "✦ Petal", text: "The answer.")
+            let second = NoteHelp.Ask.Outcome(id: target.id, end: .done, ink: ink)
+            let missing = NoteHelp.Ask.Outcome(id: "gone", end: .done, said: "Nothing")
+            let composed = NoteHelp.Result(answer: nil, helper: .keep, asks: [first, missing]).then(NoteHelp.Result(answer: ink, helper: .keep, asks: [second]))
+            let held = NoteHelp.Result(held: NoteFile.parse(composed.held(noteID: note.id).serialized(), fallbackID: note.id, fallbackDate: now))
+            var landed = read
+            held.apply(to: &landed)
+            let after = landed.asks
+            expect(after.count == asks.count && after.map(\.id) == asks.map(\.id), "an outcome never adds or reorders requests")
+            expect(after.first { $0.id == target.id }.map { $0.end == .done && $0.said == "The answer." && $0.who == "✦ Petal" } == true, "the later outcome wins, on its own request")
+            expect(zip(asks, after).allSatisfy { $0.id == target.id || $0 == $1 }, "every other request is left as it was")
+            expect(landed.ink.first?.text == "The answer." && landed.body == note.body, "the answer is the ink, and the writing is untouched")
+            sweeps += 1
+        }
+        expect(sweeps > 100, "the sweep covered requests", "\(sweeps)")
+        // Try again clears an ending; nothing of it is left behind.
+        var retried = [NoteHelp.Ask(id: "t", words: "@Petal again")]
+        retried[0].end = .failed
+        retried[0].said = "It broke."
+        retried[0].settings = true
+        NoteHelp.Ask.Outcome(id: "t", end: nil).apply(to: &retried)
+        expect(retried[0].end == nil && retried[0].said.isEmpty && !retried[0].settings && retried[0].again, "Try again clears the ending")
+        // Where the ink shows: before every request when none is answered (ink from before requests were bubbles), else
+        // under the last one answered.
+        var done = NoteHelp.Ask(id: "d1", words: "@Petal one")
+        done.end = .done
+        var replied = NoteHelp.Ask(id: "d2", words: "@Petal two")
+        replied.end = .replied
+        let inked = [NoteHelp.Ink(who: "✦ Petal", text: "One.")]
+        expect(NoteHelp.askLayout([], ink: inked) == (true, nil) && NoteHelp.askLayout([], ink: []) == (false, nil), "an old note's ink shows as it did")
+        expect(NoteHelp.askLayout([replied], ink: inked) == (true, nil), "with none answered, the ink comes first")
+        expect(NoteHelp.askLayout([done, replied], ink: inked) == (false, "d1"), "the ink sits under the last request answered")
+        expect(NoteHelp.Ask(id: "x", words: "@Petal x").again && !done.again && !replied.again, "Try again only where it didn't finish")
+        // A request kept in a file is never a line of the writing: an old note's line and ink read as they were.
+        let old = "---\nid: O\ncreated: 2026-11-09T10:30:00Z\nmodified: 2026-11-09T10:30:00Z\nhelper:\n  state: done\n  who: \"✦ Petal\"\n  step: \"\"\n  asked: \"@Petal say hi\"\nink:\n  - who: \"✦ Petal\"\n    text: Hi.\n---\nWriting\n@Petal say hi"
+        let oldFile = NoteFile.parse(old, fallbackID: "x", fallbackDate: now)
+        expect(oldFile.asks.isEmpty && oldFile.body.hasSuffix("@Petal say hi") && oldFile.ink.first?.text == "Hi." && oldFile.serialized() == old,
+               "an old note with an @Petal line and ink opens unchanged", oldFile.serialized())
+
         // MARK: Mentions
 
         let line = "@Petal bring @this back @Friday with @[Bus card]"

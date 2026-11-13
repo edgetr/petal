@@ -209,7 +209,7 @@ struct PaperView: View {
     /// Something of a helper's under the writing: its answer, a task's chips, a sum, or its bar (a step, a card).
     private var helperShows: Bool {
         let file = paper.file
-        return !file.ink.isEmpty || !file.task.isEmpty || file.calc != nil || controlsHeight > 1
+        return !file.ink.isEmpty || !file.asks.isEmpty || !file.task.isEmpty || file.calc != nil || controlsHeight > 1
     }
 
     /// The helper's ink and its controls, the controls measured (a form's buttons too) so the paper keeps their room.
