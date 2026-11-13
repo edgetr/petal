@@ -40,8 +40,13 @@ enum Menus {
         if Sites.isWeb(item.id) { return site(item) }
         let known = app.previews.knownWindows(item.id)
         let wantWindows = config.bool("quickActions") && item.running && known == nil
+        // What ⌘N is in it, for "New Window"'s name: looked up now if hovering hadn't.
+        let pid = item.running && Apps.newItem(item.id) == nil ? NSRunningApplication.persons(withBundleIdentifier: item.id).first?.processIdentifier : nil
         let recent = config.bool("recentFiles") ? Apps.recent(item.id) : []
-        guard wantWindows || !recent.isEmpty else { return appMenu(item, windows: known ?? [], icons: [:]) }
+        // Not looked for yet (no hover first): looked for now, within the same wait.
+        let wantRecent = config.bool("recentFiles") && !Apps.knowsRecent(item.id)
+        let appURL = wantRecent ? Apps.url(item.id) : nil
+        guard wantWindows || wantRecent || pid != nil || !recent.isEmpty else { return appMenu(item, windows: known ?? [], icons: [:]) }
         let once = Once()
         let open = { (windows: [AppWindow], icons: [URL: NSImage]) in
             guard once.first() else { return }
@@ -49,9 +54,17 @@ enum Menus {
         }
         let id = item.id
         openers.async {
+            let newItem = pid.flatMap { Apps.newItemTitle(pid: $0) }
+            let found = wantRecent ? Apps.recentFiles(appURL: appURL, limit: 6) : recent
             let windows = wantWindows ? Previews.windows(of: id) : (known ?? [])
-            let icons = Dictionary(recent.map { ($0, NSWorkspace.shared.icon(forFile: $0.path)) }, uniquingKeysWith: { a, _ in a })
-            DispatchQueue.main.async { MainActor.assumeIsolated { open(windows, icons) } }
+            let icons = Dictionary(found.map { ($0, NSWorkspace.shared.icon(forFile: $0.path)) }, uniquingKeysWith: { a, _ in a })
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    if wantRecent { Apps.found(found, recentFor: id) }
+                    if pid != nil { Apps.found(newItem, newItemFor: id) }
+                    open(windows, icons)
+                }
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { open(known ?? [], [:]) }
     }
@@ -91,7 +104,13 @@ enum Menus {
             }
         }
         if listed { menu.addItem(header(name)) }
-        if item.running { menu.addItem(ClosureMenuItem(title: "New Window") { app.docks.newWindow(item.id) }) }
+        let finder = item.id == DockController.finder
+        if !item.running { menu.addItem(ClosureMenuItem(title: "Open") { app.docks.launch(item.id) }) }
+        // Named by what ⌘N does in it ("New Message" in Mail), and left out when it has nothing on ⌘N or Petal
+        // can't tell.
+        if item.running, let new = Apps.newItem(item.id), !new.isEmpty {
+            menu.addItem(ClosureMenuItem(title: new) { app.docks.newWindow(item.id) })
+        }
         // Finder is its own button (finderInDock), not one of the dock's apps.
         if item.id != DockController.finder || !config.bool("finderInDock") {
             let kept = config.apps.contains(item.id)
@@ -100,13 +119,23 @@ enum Menus {
             })
         }
         menu.addItem(.separator())
-        menu.addItem(ClosureMenuItem(title: "Show in Finder") {
-            if let url = Apps.url(item.id) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
-        })
+        // Finder itself: not shown in Finder, and never quit from here (its Desktop goes with it).
+        if !finder {
+            menu.addItem(ClosureMenuItem(title: "Show in Finder") {
+                if let url = Apps.url(item.id) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            })
+        }
         if item.running {
-            if item.windows > 0 { menu.addItem(ClosureMenuItem(title: "Minimize") { app.docks.minimizeAll(item.id) }) }
+            if item.windows > 0 { menu.addItem(ClosureMenuItem(title: "Minimize All") { app.docks.minimizeAll(item.id) }) }
             menu.addItem(ClosureMenuItem(title: "Hide") { app.docks.hide(item.id) })
-            menu.addItem(ClosureMenuItem(title: "Quit") { app.docks.quit(item.id) })
+            if !finder {
+                // Option held as the menu opens: Force Quit, for an app that doesn't answer.
+                if NSEvent.modifierFlags.contains(.option) {
+                    menu.addItem(ClosureMenuItem(title: "Force Quit") { app.docks.forceQuit(item.id) })
+                } else {
+                    menu.addItem(ClosureMenuItem(title: "Quit") { app.docks.quit(item.id) })
+                }
+            }
         }
         pop(menu)
     }
@@ -117,6 +146,15 @@ enum Menus {
         menu.addItem(header(Apps.name(item.id)))
         menu.addItem(ClosureMenuItem(title: "Open in Browser") { Sites.open(item.id) })
         menu.addItem(ClosureMenuItem(title: "Remove from Dock") { config.removeApp(item.id) })
+        pop(menu)
+    }
+
+    /// A minimized window: bring it back, or close it.
+    static func minimized(_ window: AppWindow, app id: String) {
+        let menu = NSMenu()
+        menu.addItem(header(window.title.isEmpty ? Apps.name(id) : window.title))
+        menu.addItem(ClosureMenuItem(title: "Show") { Windows.focus(window) })
+        menu.addItem(ClosureMenuItem(title: "Close Window") { Windows.close(window) })
         pop(menu)
     }
 

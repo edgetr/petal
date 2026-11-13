@@ -23,16 +23,25 @@ struct AppStrip: NSViewRepresentable {
     let dock: ScreenDock
     let length: CGFloat
     let slot: CGFloat
+    /// The strip's first app is the dock's first slot: its mouse reaches along to the dock's end.
+    var startsDock = false
 
     func makeNSView(context: Context) -> AppStripView { AppStripView(dock: dock) }
-    func updateNSView(_ view: AppStripView, context: Context) { view.stageSize = stageSize }
+    func updateNSView(_ view: AppStripView, context: Context) {
+        view.stageSize = stageSize
+        view.startsDock = startsDock
+    }
     var stageSize: CGSize { dock.vertical ? CGSize(width: slot, height: length) : CGSize(width: length, height: slot) }
 
     /// The room the strip's view reaches past its stage: inward for lifted, bouncing and magnified icons (and their
-    /// mouse, when magnified), and along the dock for badges and glows. Its clear parts let the mouse through.
-    static func room(icon: CGFloat, slot: CGFloat) -> (inward: CGFloat, along: CGFloat) {
+    /// mouse, when magnified), along the dock for badges and glows (and the first app's mouse, when it's the dock's
+    /// first slot), and outward to the screen's edge (every app's mouse reaches there, `DockView.edgeRoom`). Its clear
+    /// parts let the mouse through to the glass under them.
+    static func room(icon: CGFloat, slot: CGFloat) -> (inward: CGFloat, along: CGFloat, outward: CGFloat) {
+        let config = PetalApp.shared.config
         let reach = Magnifier.enabled ? Magnifier.room(slot: slot, amount: Magnifier.amount) : 0
-        return (max(icon * 0.75, Magnifier.enabled ? slot * Magnifier.amount + 6 : 0), max(slot * 0.5, reach))
+        return (max(icon * 0.75, Magnifier.enabled ? slot * Magnifier.amount + 6 : 0, DockView.inwardReach(config, icon: icon)),
+                max(slot * 0.5, reach, DockView.endRoom(config, icon: icon)), DockView.edgeRoom(config))
     }
 }
 
@@ -40,9 +49,13 @@ extension View {
     /// The strip's view, reaching past the stage it holds (see `AppStrip.room`).
     func stripRoom(_ dock: ScreenDock, icon: CGFloat, slot: CGFloat) -> some View {
         let room = AppStrip.room(icon: icon, slot: slot)
-        let inward: Edge.Set = switch PetalApp.shared.config.position { case "left": .trailing; case "right": .leading; default: .top }
+        let (inward, outward): (Edge.Set, Edge.Set) = switch PetalApp.shared.config.position {
+        case "left": (.trailing, .leading)
+        case "right": (.leading, .trailing)
+        default: (.top, .bottom)
+        }
         let along: Edge.Set = dock.vertical ? .vertical : .horizontal
-        return padding(inward, -room.inward).padding(along, -room.along)
+        return padding(inward, -room.inward).padding(along, -room.along).padding(outward, -room.outward)
     }
 }
 
@@ -71,7 +84,7 @@ final class AppStripView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
-        registerForDraggedTypes([.fileURL, .petalNote])
+        registerForDraggedTypes(DockDrops.types + [.petalNote])
         dock.strip = self
         bounced = PetalApp.shared.signals.bounces
     }
@@ -180,6 +193,7 @@ final class AppStripView: NSView {
         let badges: [String: String]
         let dragging: String?
         let dragOffset: CGFloat
+        let dragOut: Bool
         let idle: CGFloat
         let glowStrength: CGFloat
         let showBadges: Bool
@@ -193,6 +207,7 @@ final class AppStripView: NSView {
             self.badges = badges
             dragging = dock.dragging
             dragOffset = dock.dragOffset
+            dragOut = dock.dragOut
             idle = app.config.number("idleOpacity")
             glowStrength = min(1, max(0, app.config.number("glowStrength")))
             showBadges = app.config.bool("badges") || !app.claude.readyApps.isEmpty
@@ -207,9 +222,9 @@ final class AppStripView: NSView {
         let vertical = look.position != "bottom"
         if vertical { rect = rect.insetBy(dx: 0, dy: room.along) } else { rect = rect.insetBy(dx: room.along, dy: 0) }
         switch look.position {
-        case "left": rect.size.width -= room.inward
-        case "right": rect.origin.x += room.inward; rect.size.width -= room.inward
-        default: rect.size.height -= room.inward
+        case "left": rect.origin.x += room.outward; rect.size.width -= room.inward + room.outward
+        case "right": rect.origin.x += room.inward; rect.size.width -= room.inward + room.outward
+        default: rect.origin.y += room.outward; rect.size.height -= room.inward + room.outward
         }
         return rect
     }
@@ -232,6 +247,23 @@ final class AppStripView: NSView {
         return CGRect(x: rect.minX, y: content.bounds.height - rect.maxY, width: rect.width, height: rect.height)
     }
 
+    /// A tile's slot as it's drawn now (grown and moved by magnification), in the same coordinates as `windowRect`.
+    func drawnRect(of id: String) -> CGRect? {
+        guard let row, let tile = row.tiles[id], let content = window?.contentView, let layer else { return nil }
+        let rect = convert(row.container.convert(tile.slot.frame, to: layer), to: nil)
+        return CGRect(x: rect.minX, y: content.bounds.height - rect.maxY, width: rect.width, height: rect.height)
+    }
+
+    /// A tile's slot as Core Animation draws it this moment (mid-animation too), in the same coordinates as
+    /// `windowRect` (`Petal --dock-check`).
+    func presentedRect(of id: String) -> CGRect? {
+        guard let tile = row?.tiles[id], let content = window?.contentView else { return nil }
+        let layer = tile.slot.presentation() ?? tile.slot
+        guard let own = self.layer else { return nil }
+        let rect = convert(row!.container.convert(layer.frame, to: own), to: nil)
+        return CGRect(x: rect.minX, y: content.bounds.height - rect.maxY, width: rect.width, height: rect.height)
+    }
+
     private var registered: Set<String> = []
 
     func registerFrames() {
@@ -240,10 +272,10 @@ final class AppStripView: NSView {
         for id in row.order {
             guard let rect = windowRect(of: id) else { continue }
             dock.frames[id] = rect
-            if Magnifier.enabled { dock.magnifier.frames[id] = (rect, true) }
+            if Magnifier.enabled { dock.magnifier.register(id, rect, scales: true, owner: nil) }
             now.insert(id)
         }
-        for id in registered.subtracting(now) { dock.magnifier.frames[id] = nil }
+        for id in registered.subtracting(now) { dock.magnifier.unregister(id, owner: nil) }
         registered = now
     }
 
@@ -262,20 +294,35 @@ final class AppStripView: NSView {
 
     // MARK: The mouse
 
-    /// The tile under a point (view coordinates): its slot, reaching inward over its grown icon when magnified.
+    /// The tile under a point (view coordinates): its slot, reaching inward over its grown or lifted icon, outward to
+    /// the screen's edge (the view's edge on that side), and, for the dock's first slot, along to the dock's end.
     private func tile(at point: NSPoint) -> Tile? {
         guard let row, let look else { return nil }
-        let reach = Magnifier.enabled ? look.icon * Magnifier.amount * 1.3 : 0
-        for tile in row.allTiles where !tile.leaving {
-            var area = tile.base
+        let reach = DockView.inwardReach(app.config, icon: look.icon)
+        let tiles = row.allTiles.filter { !$0.leaving }
+        for (index, tile) in tiles.enumerated() {
+            var area = tile.drawnBase   // where it's drawn now: along a move, the click goes to the icon under it
             switch look.position {
-            case "left": area.size.width += reach
-            case "right": area.origin.x -= reach; area.size.width += reach
-            default: area.size.height += reach
+            case "left": area = CGRect(x: bounds.minX, y: area.minY, width: area.maxX + reach - bounds.minX, height: area.height)
+            case "right": area = CGRect(x: area.minX - reach, y: area.minY, width: bounds.maxX - area.minX + reach, height: area.height)
+            default: area = CGRect(x: area.minX, y: bounds.minY, width: area.width, height: area.maxY + reach - bounds.minY)
+            }
+            if index == 0, startsDock {
+                if look.position == "bottom" { area = CGRect(x: bounds.minX, y: area.minY, width: area.maxX - bounds.minX, height: area.height) }
+                else { area = CGRect(x: area.minX, y: area.minY, width: area.width, height: bounds.maxY - area.minY) }   // (y up: the top)
             }
             if area.contains(point) { return tile }
         }
         return nil
+    }
+
+    /// The strip's first app is the dock's first slot (`AppStrip.startsDock`).
+    var startsDock = false
+
+    /// The app a click at `point` (window coordinates, top-left origin, as `windowRect`) goes to (`--bench-dock`).
+    func app(atWindow point: CGPoint) -> String? {
+        guard let content = window?.contentView else { return nil }
+        return tile(at: convert(CGPoint(x: point.x, y: content.bounds.height - point.y), from: nil))?.id
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -314,7 +361,8 @@ final class AppStripView: NSView {
     private func updateHover() {
         guard let window, dragging == false, dock?.dragging == nil else { return }
         let point = convert(window.convertPoint(fromScreen: NSEvent.mouseLocation), from: nil)
-        let inside = window.frame.contains(NSEvent.mouseLocation) && !(window as? DockPanel).map(\.tucked).isTrue
+        // Only where the dock takes the click: a tooltip never shows where a click would go to the desktop.
+        let inside = (window as? DockPanel)?.takesMouse(at: NSEvent.mouseLocation) ?? window.frame.contains(NSEvent.mouseLocation)
         setHover(inside ? tile(at: point)?.id : nil)
     }
 
@@ -344,6 +392,7 @@ final class AppStripView: NSView {
         let name = Perf.span("hover: name") { on ? Apps.name(item.id) : nil }
         Perf.span("hover: tooltip") { app.tooltips.show(name, over: item.id, in: dock) }
         if on && app.config.bool("recentFiles") { Perf.span("hover: recent") { Apps.prefetchRecent(item.id) } }
+        if on && item.running { Perf.span("hover: new item") { Apps.prefetchNewItem(item.id) } }   // what ⌘N is, for its menu
     }
 
     private func applyLift() {
@@ -371,8 +420,11 @@ final class AppStripView: NSView {
             setPressed(nil)
         }
         guard dragging else { return }
+        // Past the glass by more than a slot, one of the dock's own apps is out: let go, it's removed.
+        let slot = Double(look?.slot ?? 44)
+        let inward = Double(dock.panel?.inward(of: point) ?? 0)
         if dock.dragging == nil {
-            guard abs(delta) >= 6 else { return }
+            guard abs(delta) >= 6 || DockRules.isOut(inward: inward, slot: slot) else { return }
             app.popups.closeAll()
             app.previews.hover(nil, in: dock, id: id)
             app.tooltips.hide()
@@ -380,6 +432,8 @@ final class AppStripView: NSView {
             dock.dragging = id
         }
         dock.dragOffset = delta
+        let fades = DockRules.fades(inward: inward, slot: slot, kept: app.config.apps.contains(id))
+        if dock.dragOut != fades { dock.dragOut = fades }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -387,21 +441,31 @@ final class AppStripView: NSView {
         setPressed(nil)
         guard let dock, let id = downOn else { return }
         if dragging {
-            if dock.dragging == id, let look, let from = dock.items.firstIndex(where: { $0.id == id }) {
-                let to = min(max(0, from + Int((dock.dragOffset / look.slot).rounded())), dock.items.count - 1)
-                let item = dock.items[from]
-                if to != from || !item.pinned { app.docks.move(id, to: to, in: dock) }
-            }
+            let from = dock.items.firstIndex { $0.id == id } ?? 0
+            // Where the pointer is as it's let go, not how the icon looks (only one of the dock's own fades out).
+            let inward = Double(dock.panel?.inward(of: NSEvent.mouseLocation) ?? 0)
+            let end = DockRules.dragEnd(began: dock.dragging == id, from: from, offset: dock.dragOffset, slot: Double(look?.slot ?? 44),
+                                        count: dock.items.count, kept: app.config.apps.contains(id), inward: inward)
             dock.dragging = nil
             dock.dragOffset = 0
+            dock.dragOut = false
+            switch end {
+            case .click: click(id)   // a click that slipped is still a click
+            case .move(let to): app.docks.move(id, to: to, in: dock)
+            case .remove: app.config.removeApp(id)
+            case .nothing: break
+            }
             return
         }
         // Released somewhere else: no click.
         guard tile(at: convert(event.locationInWindow, from: nil))?.id == id else { return }
-        if let item = row?.tiles[id]?.item {
-            app.popups.closeAll()
-            app.docks.activate(item)
-        }
+        click(id)
+    }
+
+    private func click(_ id: String) {
+        guard let item = row?.tiles[id]?.item else { return }
+        app.popups.closeAll()
+        app.docks.activate(item)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -431,13 +495,29 @@ final class AppStripView: NSView {
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        // A note (Petal Notes) goes to any app; files only with dropToOpen.
+        // A note (Petal Notes) goes to any app; documents only with dropToOpen, and never to a website shortcut;
+        // an app, a folder or a web address is added to the dock, wherever it's let go.
         let note = sender.draggingPasteboard.types?.contains(.petalNote) == true
-        let target = note || app.config.bool("dropToOpen")
-            ? tile(at: convert(sender.draggingLocation, from: nil)).flatMap { $0.item == nil || (note && Sites.isWeb($0.id)) ? nil : $0.id } : nil
-        setFileOver(target)
-        return target == nil ? [] : .copy
+        let under = tile(at: convert(sender.draggingLocation, from: nil)).flatMap { $0.item == nil || Sites.isWeb($0.id) ? nil : $0.id }
+        if !note {
+            switch DockDrops.action(dropped(sender), onApp: app.config.bool("dropToOpen") ? under : nil) {
+            case .add:
+                setFileOver(nil)
+                return .copy
+            case .open:
+                setFileOver(under)
+                return .copy
+            case nil:
+                setFileOver(nil)
+                return []
+            }
+        }
+        setFileOver(under)
+        return under == nil ? [] : .copy
     }
+
+    /// What the drag under way holds, from its URLs (no disk read: `DockDrops`).
+    private func dropped(_ sender: NSDraggingInfo) -> [DockRules.Dropped] { DockDrops.items(sender) }
 
     override func draggingExited(_ sender: NSDraggingInfo?) { setFileOver(nil) }
 
@@ -448,10 +528,7 @@ final class AppStripView: NSView {
             app.paper.use(id, in: target)
             return true
         }
-        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-        guard let target, !urls.isEmpty else { return false }
-        app.docks.launch(target, files: urls)
-        return true
+        return DockDrops.perform(dropped(sender), onApp: target)
     }
 
     private func setFileOver(_ id: String?) {
@@ -461,10 +538,6 @@ final class AppStripView: NSView {
     }
 
     var fileTarget: String? { fileOver }
-}
-
-private extension Optional where Wrapped == Bool {
-    var isTrue: Bool { self ?? false }
 }
 
 // MARK: - The row of apps
@@ -483,9 +556,13 @@ final class Row {
     func update(_ items: [DockItem], stage: CGRect, state: AppStripView.Shared, live: Bool, strip: AppStripView) {
         let look = state.look
         let scale = look.scale
+        // The container's origin is the view's centre, which stays where it is on the screen while the stage grows or
+        // shrinks around it (the dock is centred, and so is its stage): a tile placed from it never moves with the
+        // view as it resizes, only along its own path to its new place.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        container.frame = strip.bounds
+        container.bounds = CGRect(x: -strip.bounds.width / 2, y: -strip.bounds.height / 2, width: strip.bounds.width, height: strip.bounds.height)
+        container.position = CGPoint(x: strip.bounds.midX, y: strip.bounds.midY)
         container.contentsScale = scale
         CATransaction.commit()
 
@@ -512,6 +589,7 @@ final class Row {
         func dragShift(_ index: Int, _ id: String) -> CGFloat {
             guard let from else { return 0 }
             if id == state.dragging { return state.dragOffset }
+            if state.dragOut { return index > from ? -look.slot : 0 }   // out of the dock: the apps after it close the gap
             let to = from + Int((state.dragOffset / look.slot).rounded())
             if from < index && index <= to { return -look.slot }
             if to <= index && index < from { return look.slot }
@@ -524,7 +602,8 @@ final class Row {
             let rect = base(index)
             let shift = dragShift(index, item.id)
             tile.set(item: item, state: state, fileOver: strip.fileTarget == item.id)
-            tile.place(rect, shift: shift, look: look, animated: live && !isNew, dragged: item.id == state.dragging)
+            tile.place(rect, center: CGPoint(x: strip.bounds.midX, y: strip.bounds.midY), shift: shift, look: look,
+                       animated: live && !isNew, dragged: item.id == state.dragging)
             if isNew && live { tile.appear() }
         }
         order = ids
@@ -741,7 +820,10 @@ final class Tile {
             }
         }
         if animateDot { ease(dot, "bounds", to: NSValue(rect: dotBounds), from: NSValue(rect: fromBounds), duration: 0.15) }
-        setOpacity(dot, item.windows > 0 && !dragged ? (item.here || item.active ? 1 : 0.4) : 0, duration: old == nil ? 0 : 0.15)
+        setOpacity(dot, dragged ? 0 : Float(DockRules.dot(running: item.running, here: item.here, active: item.active)),
+                   duration: old == nil ? 0 : 0.15)
+        // Out of the dock while dragged: faint, since letting go removes it.
+        setOpacity(hop, dragged && state.dragOut ? 0.4 : 1, duration: old == nil ? 0 : 0.12)
         // Dragged, or under a file: it grows.
         let grow = dragged || fileOver
         if grow != grown {
@@ -752,15 +834,29 @@ final class Tile {
 
     // MARK: Where it is
 
-    func place(_ rect: CGRect, shift: CGFloat, look: AppStripView.Look, animated: Bool, dragged: Bool) {
+    /// `rect` in the view; the layer goes there in the container, whose origin is the view's centre `center`.
+    func place(_ rect: CGRect, center: CGPoint, shift: CGFloat, look: AppStripView.Look, animated: Bool, dragged: Bool) {
         base = rect
+        self.center = center
         let vertical = look.position != "bottom"
-        let target = CGPoint(x: rect.midX + (vertical ? 0 : shift), y: rect.midY - (vertical ? shift : 0))
+        let target = CGPoint(x: rect.midX - center.x + (vertical ? 0 : shift), y: rect.midY - center.y - (vertical ? shift : 0))
         guard slot.position != target else { return }
         let from = slot.presentation()?.position ?? slot.position
         slot.position = target
-        if animated && !dragged { ease(slot, "position", to: NSValue(point: target), from: NSValue(point: from), duration: 0.22) }
-        else { slot.removeAnimation(forKey: "position") }
+        if animated && !dragged {
+            ease(slot, "position", to: NSValue(point: target), from: NSValue(point: from), duration: ScreenDock.glassAnimation)
+        } else {
+            slot.removeAnimation(forKey: "position")
+        }
+    }
+
+    /// The view's centre the tile was last placed from.
+    private(set) var center: CGPoint = .zero
+
+    /// Its slot where it's drawn this moment, along a move too (view coordinates; magnification's own growth aside).
+    var drawnBase: CGRect {
+        let position = (slot.presentation() ?? slot).position
+        return CGRect(x: position.x + center.x - base.width / 2, y: position.y + center.y - base.height / 2, width: base.width, height: base.height)
     }
 
     /// New in the row: it grows in from 70 %.

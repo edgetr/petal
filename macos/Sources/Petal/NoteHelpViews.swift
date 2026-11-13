@@ -30,22 +30,225 @@ struct HelperFront: View {
 
     var body: some View {
         let file = paper.file
+        let asks = file.asks
+        let layout = NoteHelp.askLayout(asks, ink: file.ink)
+        // The requests still going (working, queued, being sent) and everything after the first of them: pinned
+        // outside the scroll with their Stop and Pause, so they're always on the screen; the ones over scroll above.
+        let live = asks.firstIndex { AskBubble.state(of: $0, paper: paper, desk: desk) != .over } ?? asks.count
+        let names = asks.isEmpty ? (notes: [String](), notebooks: [String](), place: "") : desk?.helpers.names(for: paper.key) ?? ([], [], "")
         VStack(alignment: .leading, spacing: 0) {
             // What a helper wrote: scrolls when it's more than the screen has room for.
             BoundedScroll(maxHeight: inkRoom) {
                 VStack(alignment: .leading, spacing: 0) {
                     if !file.task.isEmpty { PaperTaskChips(paper: paper, tint: tint, desk: desk).padding(.vertical, 6) }
                     if let calc = file.calc { CalcLine(calc: calc, body: file.body, tint: tint, glass: glass) }
-                    ForEach(Array(file.ink.enumerated()), id: \.offset) { index, ink in
-                        // Each block of ink keeps 8 points above and below; two in a row share them (8 between, not 16).
-                        InkView(ink: ink, heading: ink.heading(among: file.ink), tint: !ink.opinion ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass)
-                            .padding(.top, index > 0 ? -8 : 0)
+                    // Ink with no request to sit under (from before requests were bubbles, or none answered yet).
+                    if layout.inkFirst { InkBlocks(inks: file.ink, tint: tint, glass: glass) }
+                    ForEach(asks[..<live], id: \.id) { ask in
+                        AskItem(ask: ask, paper: paper, tint: tint, glass: glass, desk: desk, names: names, inkUnder: layout.inkUnder)
                     }
                 }
+            }
+            ForEach(asks[live...], id: \.id) { ask in
+                AskItem(ask: ask, paper: paper, tint: tint, glass: glass, desk: desk, names: names, inkUnder: layout.inkUnder)
             }
             // Allow, Don't, Buy, Stop and Pause: pinned outside the scroll, always on the screen.
             HelperBar(paper: paper, tint: tint, glass: glass, desk: desk)
                 .background(GeometryReader { Color.clear.preference(key: HelperControlsHeight.self, value: $0.size.height) })
+        }
+    }
+}
+
+/// The note's ink, block after block (a second opinion in its own color).
+struct InkBlocks: View {
+    let inks: [NoteHelp.Ink]
+    var among: [NoteHelp.Ink]? = nil
+    let tint: NoteInk.RGB
+    let glass: Bool
+
+    var body: some View {
+        ForEach(Array(inks.enumerated()), id: \.offset) { index, ink in
+            // Each block of ink keeps 8 points above and below; two in a row share them (8 between, not 16).
+            InkView(ink: ink, heading: ink.heading(among: among ?? inks), tint: !ink.opinion ? tint : NoteInk.hex("#a550a7") ?? tint, glass: glass)
+                .padding(.top, index > 0 ? -8 : 0)
+        }
+    }
+}
+
+/// One request the person sent, and what came back under it.
+struct AskItem: View {
+    let ask: NoteHelp.Ask
+    let paper: PaperNote
+    let tint: NoteInk.RGB
+    let glass: Bool
+    var desk: NoteDesk?
+    let names: (notes: [String], notebooks: [String], place: String)
+    let inkUnder: String?
+
+    var body: some View {
+        let state = AskBubble.state(of: ask, paper: paper, desk: desk)
+        VStack(alignment: .leading, spacing: 0) {
+            AskBubble(ask: ask, state: state, paper: paper, tint: tint, glass: glass, desk: desk, names: names)
+            if state == .over, ask.end == .done {
+                if inkUnder == ask.id {
+                    // The note's ink as it is now: the whole answer, its proof, a second opinion of it (an answer already
+                    // under an earlier request isn't shown twice).
+                    let earlier = Set(paper.file.asks.filter { $0.id != ask.id && $0.end == .done }.map(\.said))
+                    InkBlocks(inks: paper.file.ink.filter { $0.opinion || !earlier.contains($0.text) }, among: paper.file.ink, tint: tint, glass: glass)
+                } else if let ink = NoteHelp.Ink(.map([("who", .text(ask.who)), ("text", .text(ask.said.isEmpty ? "Done." : ask.said))])) {
+                    InkView(ink: ink, tint: tint, glass: glass)
+                }
+            } else if state == .over, ask.end == .replied, !ask.said.isEmpty {
+                // What Petal said back without a helper: its own words, kept under the request.
+                Text(ask.said).font(.system(size: TextSize.callout)).foregroundStyle(glass ? Color.primary : HelperLook.ink(tint))
+                    .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    .padding(.leading, 9).padding(.vertical, 6)
+                    .overlay(alignment: .leading) { Rectangle().fill(HelperLook.rule(tint)).frame(width: 2).padding(.vertical, 6) }
+            }
+        }
+    }
+}
+
+/// A request as the person sent it: their words (with what each @ and understood word bound to) on a rounded shape
+/// in the notebook's color, apart from the writing and never edited there; while it goes, what it's doing now with
+/// Pause and Stop; when it didn't finish, why, with Try again and Edit.
+struct AskBubble: View {
+    @Environment(PetalApp.self) private var app
+    let ask: NoteHelp.Ask
+    let state: NoteHelpers.AskState
+    let paper: PaperNote
+    let tint: NoteInk.RGB
+    let glass: Bool
+    var desk: NoteDesk?
+    let names: (notes: [String], notebooks: [String], place: String)
+
+    /// Where a request is: what the helpers know on this Mac, else what the note says (a helper at work on this very
+    /// request, as its `helper:` line says: on another Mac, or left at work by a Petal that quit, with Stop).
+    @MainActor
+    static func state(of ask: NoteHelp.Ask, paper: PaperNote, desk: NoteDesk?) -> NoteHelpers.AskState {
+        let known = desk?.helpers.askState(paper.noteID, ask) ?? .over
+        guard known == .over, ask.end == nil, let helper = paper.file.helper, helper.state == .working || helper.state == .waiting,
+              helper.asked == ask.words, paper.file.asks.last(where: { $0.words == ask.words })?.id == ask.id else { return known }
+        return .working
+    }
+
+    private var ink: Color { PaperLook.color(NoteInk.mix(tint, 0.70, NoteInk.black)) }
+    private var faint: Color { PaperLook.color(NoteInk.mix(tint, 0.30, NoteInk.ink)) }
+    /// The bubble's own color: the notebook's, a step deeper than its paper, solid (never glass on glass), so it reads
+    /// apart from the writing and over anything behind.
+    private var fill: Color { PaperLook.color(NoteInk.mix(tint, 0.32, NoteInk.paper)).opacity(glass ? 0.96 : 1) }
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 28)
+            VStack(alignment: .leading, spacing: 6) {
+                words.font(.system(size: TextSize.body)).foregroundStyle(ink)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                status
+            }
+            .padding(.horizontal, 11).padding(.vertical, 8)
+            .background(fill, in: .rect(cornerRadius: Radius.tile))
+            .overlay { RoundedRectangle(cornerRadius: Radius.tile).stroke(PaperLook.color(tint).opacity(0.4), lineWidth: 0.5) }
+            .environment(\.colorScheme, .light)
+        }
+        .padding(.top, 8)
+        .onDrag { NSItemProvider(object: ask.words as NSString) }
+    }
+
+    /// The words as sent: each @ in the notebook's ink, and what an understood word bound to as a small word after it.
+    private var words: Text {
+        let line = ask.words
+        let ns = line as NSString
+        var out = Text("")
+        var at = 0
+        for binding in NoteHelp.bindings(line, notes: names.notes, notebooks: names.notebooks, now: ask.at ?? Date(), place: names.place)
+        where binding.range.location >= at && NSMaxRange(binding.range) <= ns.length {
+            out = out + Text(ns.substring(with: NSRange(location: at, length: binding.range.location - at)))
+            let word = Text(ns.substring(with: binding.range))
+            out = out + (binding.at ? word.fontWeight(.semibold).foregroundColor(PaperLook.color(NoteInk.mix(tint, 0.85, NoteInk.black))) : word)
+            if !binding.chip.isEmpty {
+                out = out + Text(" " + binding.chip).font(.system(size: TextSize.caption, weight: .medium)).foregroundColor(faint)
+            }
+            at = NSMaxRange(binding.range)
+        }
+        return out + Text(ns.substring(from: min(at, ns.length)))
+    }
+
+    @ViewBuilder private var status: some View {
+        let noteID = paper.noteID
+        switch state {
+        case .working:
+            let run = desk?.helpers.runs[noteID]
+            let asking = !(run?.sticky?.agent.pendingAsk.isEmpty ?? true) || desk?.helpers.card(noteID) != nil
+            HStack(spacing: 7) {
+                PulseDot(color: PaperLook.color(tint), pulsing: !asking && (run.map { !$0.paused } ?? (paper.file.helper?.state == .working)))
+                Text(asking ? "Waiting for you" : AskBubble.doing(run: run, helper: paper.file.helper, displays: app.displays))
+                    .font(.system(size: TextSize.small)).foregroundStyle(faint).lineLimit(2)
+                Spacer(minLength: 4)
+            }
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                // It works on a hidden display of its own: its window comes to the person's screen.
+                if let caller = run?.sticky?.id.uuidString, app.displays.display(for: caller) != nil {
+                    NoteButton(title: "Show me") { app.displays.showMe(caller: caller) }
+                }
+                if run != nil || paper.file.helper?.state == .working {
+                    NoteButton(title: run?.paused == true ? "Go on" : "Pause") { desk?.helpers.pause(noteID) }
+                }
+                NoteButton(title: "Stop") { desk?.helpers.stop(noteID) }
+            }
+        case .queued:
+            HStack(spacing: 7) {
+                PulseDot(color: PaperLook.color(tint).opacity(0.5), pulsing: false)
+                Text("Sends when this step is done").font(.system(size: TextSize.small)).foregroundStyle(faint)
+            }
+        case .sending:
+            HStack(spacing: 7) {
+                PulseDot(color: PaperLook.color(tint))
+                Text("Sending…").font(.system(size: TextSize.small)).foregroundStyle(faint)
+            }
+        case .over:
+            if ask.again {
+                // Sent from another Mac and not over there: at work (or waiting) on that Mac.
+                let elsewhere = NoteHelp.askedElsewhere(ask, mac: app.paper.helpers.thisMac)
+                // Try again only for a request this Mac sent itself; anything else needs the person's own Return (Edit).
+                let retry = app.paper.helpers.mayRetry(noteID, ask)
+                Text(elsewhere ? "Asked on another Mac" : AskBubble.why(ask)).font(.system(size: TextSize.small)).foregroundStyle(faint).lineLimit(4)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 6) {
+                    if ask.settings { NoteButton(title: "Open Settings") { PetalApp.shared.settings.show(.claude) } }
+                    Spacer(minLength: 0)
+                    NoteButton(title: "Edit", primary: !retry && !elsewhere) { desk?.helpers.edit(noteID, ask: ask.id) }
+                    if retry && !elsewhere {
+                        NoteButton(title: "Try again", primary: true) { desk?.helpers.retry(noteID, ask: ask.id) }
+                    }
+                }
+            }
+        }
+    }
+
+    /// What it's doing now, in a few words: its latest step, or what it waits its turn for.
+    @MainActor
+    static func doing(run: NoteHelpers.Run?, helper: NoteHelp.Helper?, displays: RunDisplays) -> String {
+        if let run {
+            if run.paused { return "Paused" }
+            if displays.waits(run.sticky?.id.uuidString) { return NoteStatus.waitingForDisplay }
+            if let waited = displays.waitsForApp(run.sticky?.id.uuidString) { return NoteStatus.waiting(for: waited) }
+            let step = run.sticky?.agent.activity.text ?? ""
+            return step.isEmpty ? "Working…" : step
+        }
+        guard let helper else { return "Working…" }
+        return helper.step.isEmpty ? (helper.state == .waiting ? "Waiting" : "Working…") : helper.step
+    }
+
+    /// Why it didn't finish, in one line.
+    static func why(_ ask: NoteHelp.Ask) -> String {
+        if !ask.said.isEmpty { return ask.said }
+        switch ask.end {
+        case .stopped: return "Stopped."
+        case .failed: return "It couldn't finish."
+        default: return "It didn't finish."
         }
     }
 }
@@ -233,12 +436,15 @@ struct HelperBar: View {
         let noteID = paper.noteID
         let run = desk?.helpers.runs[noteID]
         let helper = paper.file.helper
-        let working = run != nil || helper.map { $0.state == .working || $0.state == .waiting } == true
+        // A request's bubble shows its own run at work (and one the note says is at work on its words).
+        let onBubble = run.map { !($0.line?.ask ?? "").isEmpty }
+            ?? paper.file.asks.contains { AskBubble.state(of: $0, paper: paper, desk: desk) == .working }
+        let working = !onBubble && (run != nil || helper.map { $0.state == .working || $0.state == .waiting } == true)
         let denials = run?.sticky?.agent.pendingAsk ?? []
         VStack(alignment: .leading, spacing: 8) {
-            // A faint word (a bare @Petal asks nothing).
+            // What Petal did here without a run, or why it didn't.
             if let hint = desk?.helpers.hints[noteID] {
-                Text(hint).font(.system(size: TextSize.small)).foregroundStyle(glass ? Color.secondary.opacity(0.7) : PaperLook.footer.opacity(0.7))
+                Text(hint).font(.system(size: TextSize.small)).foregroundStyle(glass ? Color.secondary : PaperLook.footer)
             }
             if working {
                 HStack(spacing: 7) {
@@ -257,8 +463,11 @@ struct HelperBar: View {
             }
             if !denials.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("\(run?.who ?? "Petal") wants to run:").font(.system(size: TextSize.small, weight: .semibold))
-                    Text(denials.map(\.label).joined(separator: "\n")).font(.system(size: TextSize.small, design: .monospaced)).lineLimit(4)
+                    Text(Agent.Denial.heading(denials)).font(.system(size: TextSize.small, weight: .semibold)).lineLimit(3)
+                    let details = Agent.Denial.details(denials)
+                    if !details.isEmpty {
+                        Text(details).font(.system(size: TextSize.small, design: .monospaced)).foregroundStyle(PaperLook.footer).lineLimit(4)
+                    }
                     HStack(spacing: 6) {
                         Spacer()
                         NoteButton(title: "Don't", primary: true) { desk?.helpers.denyDenials(noteID) }

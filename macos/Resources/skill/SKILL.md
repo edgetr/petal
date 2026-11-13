@@ -13,7 +13,7 @@ Desktop, with Petal AI, the vault, routines and Petal Notes. This skill is insta
 
 ## Changing the dock
 
-Any AI session can change the dock: Petal's own panel, T3 Code, or Claude Code and Codex in a terminal. Petal
+Any AI agent on this Mac can change the dock: Petal's own panel, or Claude Code and Codex in another app or a terminal. Petal
 registers its MCP server (`petal`) with Claude Code and Codex and puts `petal` on the PATH (setting `otherAgents`).
 Use, in this order:
 
@@ -23,7 +23,9 @@ Use, in this order:
    out, and `apps` is the whole list in the order it shows, which is how to reorder (bundle ids from
    `petal_list_apps`; an `https://` address is a website shortcut).
    Petal AI's tools are done by the running Petal with its own permissions: `petal_look` (what's in front:
-   app, window, browser tab address, selected text; a screenshot when asked), `petal_apps`, `petal_windows`,
+   app, window, browser tab address, selected text; with `text: true` the window's words in reading order (a page,
+   a document, a thread; long ones in parts, `find` for the passages around a word): read them to answer about or
+   summarize what's there; a screenshot when asked), `petal_apps`, `petal_windows`,
    `petal_trash` (the Trash, never deleting; quitting, closing and trashing ask the user first), and memory:
    `petal_remember`, `petal_forget`, `petal_memories`; and routines, what Petal does by
    itself from the user's own words ("keep my Downloads tidy", "when I open Xcode, hide Messages"):
@@ -38,7 +40,7 @@ Use, in this order:
    sticky note, on the note's own window, it works in the background instead (no pointer, nothing comes forward,
    the user's keyboard untouched); what can't be done there (menus and keys in the app the user is using, copying
    and pasting, the vault, a tab that isn't showing) comes back as "needs the window in front": ask the user to
-   bring it forward (clicking the note in the AI button's preview does), then `petal_ui` again. The
+   click that window, then `petal_ui` again. The
    first use of an app in a reply asks the user; from a session outside Petal's own chat, the first in a task (pass
    the same `task` words with each act; a new task, two quiet minutes or a Stop asks again), on a card that says
    who you are (Full access and an earlier Always cover the user's own Claude Code and Codex; any other program is
@@ -47,7 +49,7 @@ Use, in this order:
    Never private apps or password fields, and never Petal's own windows (a document in Petal's viewer: `petal_view`
    gives its words; a note: the note tools); what only a real click could do, ask the user to do. Only the user
    turns `computerUse` on.
-   A hidden display for each run (`runDisplays`, off unless the user turned it on): `petal_apps` with
+   A hidden display for each run (`runDisplays`, on unless the user turned it off): `petal_apps` with
    `action: open` puts the window it makes on a display of your own that the user doesn't see and their pointer can't
    reach (the default for a helper in a note and for a session outside Petal; `on: "screen"` opens on the user's
    screen instead, which is what to say whenever they asked to see or open something themselves; Petal's quick chat
@@ -76,8 +78,8 @@ Use, in this order:
    with nothing brought forward. Nothing is downloaded and no file can be chosen; a page can't write the user's
    clipboard by itself, and what a page copies on your press is cleared (an answer says so); there are
    no pictures of the page yet (`read` is the page). It goes when your run ends, with everything in it. When the
-   user means the page they're looking at ("this page", "here"), that's `petal_look` and `petal_ui` on their
-   window, as always.
+   user means the page they're looking at ("this page", "here"), that's `petal_look` (`text: true` for its words)
+   and `petal_ui` on their window, as always.
    The vault (`petal_vault`): logins, contact info, addresses, payment info and API keys, filled by Petal
    into fields from `petal_ui` without the AI seeing a secret (`action: fill`, the item and `fields`
    {field: id}). A login fills by itself on its own site or app, an API key on its service's site, this Mac or an
@@ -85,7 +87,7 @@ Use, in this order:
    and always asks before it fills (field `value`); the user sorts it in Settings › Vault. Payment info waits for one "Buy?" card per checkout (pass what you're buying
    and the price). Missing details: `action: request` (the user types them into Petal's card); a new account:
    `action: new_login`. Never ask for a password, card or key in the chat. From a session outside Petal's own chat
-   (T3 Code, a terminal), the first time you use an item in a project (or make a login there) Petal asks the user:
+   (in another app or a terminal), the first time you use an item in a project (or make a login there) Petal asks the user:
    Always for this project (Claude Code or Codex only), Allow once or Don't. They can allow it ahead in Settings ›
    Vault › Agents; an unanswered card counts as Don't after two minutes. API keys for commands: see below.
    The AI button opens the quick question: a chat stuck nowhere, over the dock. Its Stick here turns the
@@ -207,7 +209,7 @@ When the user says "get the Anthropic key from Petal to test this" or "use the l
 - Never ask for the key, print it, write it to a file, or put it on a command line, and don't try to get it out of
   `petal run` (echo, base64, a file you read later): keeping it out of your transcript is why the user doesn't have to
   rotate it. If a test truly needs to see it, ask the user.
-- Logins in a browser (T3 Code's own browser, Chrome…): `petal_ui`, then `petal_vault` `fill` with the login's id
+- Logins in a browser (an app's own browser, Chrome…): `petal_ui`, then `petal_vault` `fill` with the login's id
   (or none: Petal finds the one saved for the page); a new account: `new_login`; a login that isn't saved:
   `request` (the user types it into Petal's card, which waits for them).
 

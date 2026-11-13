@@ -68,7 +68,13 @@ extension ClaudePanel {
             let window = place.flatMap { $0.kind == .app ? assist.computer.maps[note.id.uuidString]?.windowID : $0.window }
             // Private by the app it was stuck to, even once that window is gone (or the chat kept it from before).
             let hidden = NotePicture.hidden(app: note.place?.app ?? note.agent.keptPlace?.app, private: assist.neverLook)
-            return NotePreviewItem(id: note.id, app: place?.app ?? "", appName: place?.appName ?? "", title: note.agent.title,
+            // A helper's chat keeps no message of the person's: its tile is named by its note, its body redacted first
+            // (the app's name while the vault's index isn't ready or can't be read).
+            if note.paper != nil, VaultIndex.cached() == nil { VaultIndex.warm() }
+            let title = note.paper.flatMap { PetalApp.shared.paper.helpers.paper($0) }.map { paper in
+                NoteShield.previewTitle(body: paper.file.body, index: VaultIndex.cached(), fallback: place?.appName ?? "")
+            } ?? note.agent.title
+            return NotePreviewItem(id: note.id, app: place?.app ?? "", appName: place?.appName ?? "", title: title,
                                    line: NoteStatus.line(facts), working: facts.running, needsYou: NoteStatus.needsYou(facts),
                                    hidden: hidden, pid: place?.pid ?? 0, window: window, attached: place != nil,
                                    appWide: place?.kind == .app, display: displays.display(for: note.id.uuidString)?.id)
@@ -78,7 +84,7 @@ extension ClaudePanel {
     /// Some note waits for the person (its window in front, its tab showing, an answer) and isn't open in front of
     /// them: the AI button wears a small ✦.
     var needsYou: Bool {
-        notes.contains { NoteStatus.needsYou(facts($0)) && !(isOpen && current === $0) }
+        notes.contains { (NoteStatus.needsYou(facts($0)) || $0.ready && $0.place == nil) && !(isOpen && current === $0) }
     }
 
     /// A note picked in the preview: its window (and tab) comes forward and it opens there; a chat stuck to no window

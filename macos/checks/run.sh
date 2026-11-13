@@ -34,9 +34,19 @@ swiftc -parse-as-library -O -o "$out/look" Sources/Petal/LookSchedule.swift chec
 swiftc -parse-as-library -O -o "$out/signals" Sources/Petal/SignalRules.swift checks/SignalRulesCheck.swift
 "$out/signals"
 # Clicking an app in front again brings its next window forward, through every one of them and back, whatever order
-# the app lists them in as they come forward (DockRules).
+# the app lists them in as they come forward; which running apps the dock lists and their dots; what letting go of a
+# dragged app does (a wobble is a click, out of the dock removes it); what a drop adds or opens; and windows kept
+# clear of the dock, look after look, over 1500 generated runs (screens left of and above the main one, docks on
+# every side, apps that keep a minimum size, looks a moment old, the person dragging and resizing into the strip):
+# Petal stops moving windows within a few looks, a window dragged in at its size goes back out at that size and is
+# never shortened later, nothing creeps, and turning it off gives every window back (DockRules).
 swiftc -parse-as-library -O -o "$out/dockrules" Sources/Petal/DockRules.swift checks/DockRulesCheck.swift
 "$out/dockrules"
+# Magnification: the icon under the pointer grows by the amount set and stays under it, its neighbours ease aside
+# without overlapping, the glass stretches with them, nothing grows past the room the panel keeps, and the zone the
+# pointer counts as at the dock (MagnifyRules). `Petal --bench-dock` drives the real dock the same way.
+swiftc -parse-as-library -O -o "$out/magnify" Sources/Petal/MagnifyRules.swift checks/MagnifyRulesCheck.swift
+"$out/magnify"
 # Petal's own files: an entry in dock.json's apps that isn't text never empties the dock, a file someone is
 # editing that doesn't read as JSON yet keeps what was read before, and a change in settings.json that would let Petal
 # AI do more (Full access, using apps, more allowed without asking, an app off the private list) isn't taken while
@@ -52,6 +62,10 @@ swiftc -parse-as-library -O -o "$out/thumbnails" Sources/Petal/ThumbnailCache.sw
 "$out/thumbnails"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
+# A window's words for petal_look's text (WindowText): reading order, a page without its browser's toolbar, the cap
+# and the next part, find, a secret hidden whole or in pieces, a password field left out.
+swiftc -parse-as-library -O -o "$out/windowtext" Sources/Petal/UIMap.swift checks/WindowTextCheck.swift
+"$out/windowtext"
 # What petal_act says of a menu is its app's own text (a Window menu lists every window by its title): the items a
 # menu has, the path walked and the item chosen are told only in UIMap's words, every title through the vault's
 # redaction (Acting.menuWords); the title Petal goes by (menuTitle) is never told.
@@ -230,7 +244,7 @@ grep -q 'app.paper.handle(name, args, asker: note.flatMap { app.claude.note(with
 grep -q 'return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false' Sources/Petal/NoteHelpers.swift \
     && grep -q 'if required.map({ place.samePlace($0) }) ?? true { return (model, place) }' Sources/Petal/NoteHelpers.swift \
     && grep -q 'let file = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path' Sources/Petal/NoteHelpers.swift \
-    && grep -q 'if compare == nil, let stick, ViewerFiles.namesFile(stick) {' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'if work, let stick, ViewerFiles.namesFile(stick) {' Sources/Petal/NoteHelpers.swift \
     && grep -q 'if item.kind == "file" { return located(item, mac: mac, follow: follow).map(decide) }' Sources/Petal/NoteTasks.swift \
     && ! grep -n 'documentShowing\|sceneFile\|run\.document' Sources/Petal/NoteHelpers.swift Sources/Petal/NoteHelp.swift \
     || { echo "NoteHelpers: a helper's files go by the one file resolver, never a path comparison"; exit 1; }
@@ -272,7 +286,7 @@ grep -q 'app.viewers.handle(name, args, caller: note ?? "petal", live: live, sen
 # NotePrivacy over NoteStore.privateBooks, nowhere else. One NoteTasks, one Open all. What's kept per notebook goes by
 # its binding (NotebookBinding, NoteShelf.notebookFor): a rename isn't a move, another notes' folder is never used.
 perl -0777 -ne '
-    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) \{(?:(?!\n    \}\n).)*?guard desk\.takesChanges\(\) else \{ return \}(?:(?!\n    \}\n).)*?ticket\.take\(\)|func returned\((?:(?!\n    \}\n).)*?guard desk\.takesChanges\(\) else \{ return \}/s
+    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) -> Bool \{(?:(?!\n    \}\n).)*?guard desk\.takesChanges\(\) else \{ return false \}(?:(?!\n    \}\n).)*?send\(paper, trimmed, at: ticket\)/s
             && /func write\(_ noteID: String, touch: Bool = false,[^\n]*\n\s*guard let desk, desk\.acceptsChanges, let paper = paper\(noteID\)/
             && /private func tick\(\) \{\s*(?:\/\/[^\n]*\n\s*)*guard let desk, desk\.on, desk\.acceptsChanges else \{ return \}/
             && /func applyHeld\(\) \{\s*(?:\/\/[^\n]*\n\s*)*guard let desk, desk\.acceptsChanges else \{ return \}/
@@ -359,7 +373,7 @@ echo "forms: fields scroll, buttons stay on the screen"
 # own opinion only, applied onto the note's ink as it is when it lands (never ink it captured), with the answer it
 # reviewed. A reviewer outside a worktree is bound to the note's place like any run.
 perl -0777 -ne '
-    unless (/run\.reviewed = ""/ && /if let reviewed = run\.reviewed \{ return NoteHelp\.Result\(opinion: ink, reviewed: reviewed, steps: steps, helper: helper\) \}/
+    unless (/run\.reviewed = ""/ && /if let reviewed = run\.reviewed \{ return NoteHelp\.Result\(opinion: ink, reviewed: reviewed, steps: steps, helper: helper, asks: asks\) \}/
             && !/withOpinion|run\.carried|carried:/ && /run\.reviewed = NoteHelp\.inkHash\(primary\)\s*raw\.answer = primary\?\.text/
             && /let model = asked\?\.model \?\? run\.holes.*?self\.secondOpinion\(paper, model, asked: words, tree: run\.tree\)/s
             && /folder: tree, placed: tree == nil\)\)/ && /where run\.launch != nil && run\.kind\.placed/ && /= run\.kind\.placed \? NoteHelp\.requirement\(/
@@ -373,12 +387,12 @@ perl -0777 -ne '
     print "helpers: a reviewer result never holds the primary ink\n";
 ' Sources/Petal/NoteHelp.swift
 # Return runs a line only as the person wrote or edited it: the editor hands only a runnable line (its identity, a
-# mark set by the person's own typing or pasting; undo, redo, autocorrect and text from outside clear it, never set
-# it), and nothing about its words is kept. A bare @Petal and a note whose id isn't lasting are refused or waited on
+# mark set by the person's own typing or pasting; undo, redo and text from outside clear it, never set it; an automatic
+# correction keeps it and never sets it), and nothing about its words is kept. A bare @Petal and a note whose id isn't lasting are refused or waited on
 # before the line is taken or any run registered; control requests come before follow-up routing; a follow-up's line
 # goes with it through delivery; an empty prompt never reaches an agent.
 perl -0777 -ne '
-    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) \{.*?if NoteHelp\.bare\(trimmed\) \{ return reply\(noteID, giveBack: nil\) \{ _ in NoteHelp\.bareHint.*?guard NoteShelf\.lasting\(noteID, pending: desk\.store\.pendingIDs\) else \{\s*return desk\.store\.ensureID\(.*?ticket\.take\(\).*?if NoteHelp\.isControl\(request\) \{ return control\(.*?NoteHelp\.followUpTarget\(/s
+    unless (/func returned\(_ key: String, line: String, at ticket: NoteLine\) -> Bool \{.*?if NoteHelp\.bare\(trimmed\) \{\s*reply\(noteID, giveBack: nil\) \{ _ in NoteHelp\.bareHint \}\s*return false.*?guard NoteShelf\.lasting\(noteID, pending: desk\.store\.pendingIDs\) else \{.*?desk\.store\.ensureID\(.*?return false\s*\}\s*send\(paper, trimmed, at: ticket\).*?func send\(.*?ticket\.take\(\).*?if NoteHelp\.isControl\(request\) \{ return control\(.*?NoteHelp\.followUpTarget\(/s
             && /func start\(.*?guard !words\.text\.trimmingCharacters/s && /func letGo\(.*?run\.line\?\.again\(\)/s
             && /followUps\.add\(trimmed, note: noteID, token: run\.token, line: ticket\)/ && /followUp\(run, next\.text, line: next\.line\)/
             && /private func followUp\(_ run: Run, _ words: String, line: NoteLine\?\) \{\s*if let line \{ run\.line = line \}/) {
@@ -388,7 +402,9 @@ perl -0777 -ne '
     print "helpers: Return takes only the runnable line; control requests never become follow-ups; follow-up lines carried\n";
 ' Sources/Petal/NoteHelpers.swift
 perl -0777 -ne '
-    unless (/let person = !history\.isUndoing && !history\.isRedoing && !correcting/ && /override func handleTextCheckingResults\(.*?correcting = true/s
+    unless (/let undoing = history\.isUndoing \|\| history\.isRedoing\s*let person = !undoing && !correcting && setFromOutside == 0 && !sending/
+            && /override func handleTextCheckingResults\(.*?asCorrection \{/s && /func asCorrection\(_ change: \(\) -> Void\) \{\s*correcting = true/
+            && /if edit\.correction \{.*?runnable\.contains\(mark\).*?continue\s*\}/s
             && /private func remark\(.*?NoteHelp\.editedLines\(after: text, location: edit\.location, inserted: edit\.inserted, person: edit\.person\).*?storage\.removeAttribute\(NoteLine\.key, range: line\)\s*guard marks/s
             && /func replaceFromOutside\(_ text: NSAttributedString\) \{\s*textStorage\?\.setAttributedString\(text\)\s*\/\/[^\n]*\n\s*runnable\.removeAll\(\)/) {
         print "NoteEditor: only the person'"'"'s own typing or pasting may make a line runnable\n"; exit 1 }
@@ -419,12 +435,14 @@ perl -0777 -ne '
     print "brain: each call picks its own AI first\n";
 ' Sources/Petal/Brain.swift
 # Only a run that succeeded writes `done` (what chains and morning notes wait for), inside `end` once its token
-# completed; every other reply is a faint word that leaves the note's ink and helper line as they are.
+# completed; every other reply is a word on the note (or on its request's bubble) that leaves its ink and helper line
+# as they are.
 perl -0777 -ne '
     my $done = () = /state: \.done/g;
     unless ($done == 1 && /private func complete\(_ run: Run, made:.*?run\.token\.complete\(\.succeeded\).*?state: \.done/s
-            && /private func reply\(_ noteID: String, giveBack line: NoteLine\?.*?\{\s*line\?\.again\(\)\s*guard !parts\.isEmpty else \{ return hint\(noteID, words\(\[\]\)\) \}/s) {
-        print "NoteHelpers: only a succeeded run writes done; replies stay faint\n"; exit 1 }
+            && /private func reply\(_ noteID: String, giveBack line: NoteLine\?.*?\{\s*line\?\.again\(\)\s*let keep = line != nil.*?settle\(noteID, ask: id, end, said: words\(\[\]\)\).*?guard !parts\.isEmpty else \{ return hint\(noteID, words\(\[\]\), keep: keep\) \}/s
+            && /private func settle\(_ noteID: String, ask id: String,[^\n]*\{\s*sending\[id\] = nil\s*let outcome = [^\n]*\n\s*write\(noteID\) \{ file in\s*var asks = file\.asks\s*outcome\.apply\(to: &asks\)\s*file\.asks = asks\s*\}\s*\}/) {
+        print "NoteHelpers: only a succeeded run writes done; replies are words on the note\n"; exit 1 }
     print "helpers: only a succeeded run writes done; replies are faint\n";
 ' Sources/Petal/NoteHelpers.swift
 # A second opinion goes through the same checkout choice as a primary request, and one asked while a run works rides
@@ -448,7 +466,7 @@ perl -0777 -ne '
             && !/func say\(|func refuse\(|func succeeded\(|func answer\(|desk\.tell\(/ && $hints == 2
             && /self\.end\(run, \.succeeded\(nil, Made\(calc: calc\)\)\)/ && /self\.end\(run, \.succeeded\(Said\(who: who, text: line \?\? plain, form: \.words\), Made\(task: items\)\)\)/
             && /self\.end\(run, \.succeeded\(said\)\)|end\(run, \.succeeded\(said\)\)/
-            && /run\.kind == \.quick \{\s*return reply\(paper\.noteID, giveBack: taking\) \{ _ in "A quick helper/) {
+            && /run\.kind == \.quick \{\s*return reply\(paper\.noteID, giveBack: taking\) \{ _ in "Wait for this to finish/) {
         print "NoteHelpers: every run kind must end through end, every reply through reply ($direct completes, $nil removals, $hints hints)\n"; exit 1 }
     print "helpers: one end for every run kind, one reply\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -488,8 +506,8 @@ perl -0777 -ne '
 # remain: finding a note by its name, and the @ menu'"'"'s names, both local).
 perl -0777 -ne '
     my $titles = () = /file\.title/g;
-    unless ($titles == 2 && /private func reply\(_ noteID: String, giveBack line: NoteLine\?, _ parts: \[String\] = \[\], _ words: \@escaping \@MainActor \(\[Shielded\]\) -> Shielded\)/
-            && /private func hint\(_ noteID: String, _ words: Shielded\)/ && !/\.label\(\)/ && !/label\.prefix|prefix\(48\)|prefix\(30\)/) {
+    unless ($titles == 2 && /private func reply\(_ noteID: String, giveBack line: NoteLine\?, ask: NoteLine\? = nil, _ parts: \[String\] = \[\], _ words: \@escaping \@MainActor \(\[Shielded\]\) -> Shielded\)/
+            && /private func hint\(_ noteID: String, _ words: Shielded, keep: Bool = false\)/ && !/\.label\(\)/ && !/label\.prefix|prefix\(48\)|prefix\(30\)/) {
         print "NoteHelpers: what is said of a note comes only from Shielded whole sources ($titles raw titles)\n"; exit 1 }
     print "helpers: replies, steps and chips only from Shielded whole sources\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -552,7 +570,8 @@ perl -0777 -ne '
     unless (/NoteJournal\.queue\.async \{ try\? FileManager\.default\.removeItem\(at: leftover\) \}/ && /leftoverUnshown: URL \{ NoteJournal\.folder\.appending/) {
         print "NoteHelpers: a leftover held file is deleted on launch\n"; exit 1 }
     # A run starts only when the vault is readable: a line (before it is taken) and a chain (before it fires).
-    unless (/func returned\(.*?Self\.vaultReady \{ ready in\s*guard ready else \{ return self\.reply\(noteID, giveBack: nil\) \{ _ in Self\.vaultWords \} \}.*?self\.take\(paper, trimmed, at: ticket\)/s
+    unless (/func returned\(.*?send\(paper, trimmed, at: ticket\).*?private func send\(.*?go\(noteID, trimmed, at: ticket\).*?private func go\(_ noteID: String, _ trimmed: String, at ticket: NoteLine\) \{.*?Self\.vaultReady \{ ready in\s*guard ready else \{ return self\.reply\(noteID, giveBack: ticket\) \{ _ in Self\.vaultWords \} \}.*?self\.take\(paper, trimmed, at: ticket\)/s
+            && /func retry\(.*?go\(noteID, ask\.words, at: ticket\)/s
             && /private func take\(_ paper: PaperNote, _ trimmed: String, at ticket: NoteLine\) \{\s*let noteID = paper\.noteID\s*ticket\.take\(\)/
             && /private func fire\(.*?Self\.vaultReady \{ ready in.*?self\.fireNow\(paper\)/s && /func vaultLost\(_ sticky: StickyNote\) \{.*?end\(run, \.failed\(Self\.vaultWords\.text\)\)/s) {
         print "NoteHelpers: a run starts only with the vault readable; output while it is not fails the run\n"; exit 1 }
@@ -611,7 +630,7 @@ grep -q 'enum Item { case say(String), review(NoteHelp.Model, asked: String) }' 
 # B: a result lands only after the gate is asked again, on the main actor, right before; a finished answer lands
 # paused or not (a paused run hands nothing on); a result held through a conflict is asked about again when applied.
 perl -0777 -ne '
-    unless (/private func complete\(_ run: Run, made:(?:(?!\n    \}\n).)*?if !look, let refused = landing\(run\) \{ return end\(run, \.failed\(refused\)\) \}\s*let paused = run\.token\.paused\s*guard run\.token\.complete\(\.succeeded\) else \{ return \}(?:(?!\n    \}\n).)*?keep\(run, result\(run, ink: made\?\.ink, steps: made\?\.steps, also: also, helper: \.set\(done\)\)\)/s
+    unless (/private func complete\(_ run: Run, made:(?:(?!\n    \}\n).)*?if !look, let refused = landing\(run\) \{ return end\(run, \.failed\(refused\)\) \}\s*let paused = run\.token\.paused\s*guard run\.token\.complete\(\.succeeded\) else \{ return \}(?:(?!\n    \}\n).)*?keep\(run, result\(run, ink: made\?\.ink, steps: made\?\.steps, also: also, helper: \.set\(done\), ask: ask\.map \{ outcome\(\$0, run, made\?\.ink\) \}\)\)/s
             && /private func landing\(_ run: Run\) -> String\? \{\s*switch admit\(run, landing: true\)/
             && /private func turnOutput\((?:(?!\n    \}\n).)*?if let refused = self\.landing\(run\) \{ return self\.end\(run, \.failed\(refused\)\) \}\s*self\.keep\(/s
             && /if entry\.of == \.answer, let refused = heldRefusal\(entry, on: papers\[0\]\)/ && /facts\.landing = landing/) {
@@ -647,7 +666,7 @@ grep -q 'if let watch = paper.file.watch, NoteHelp.corner(watch) != nil' Sources
 echo "helpers: rejected readings keep the last accepted value; only drawing rounds"
 # A cover that can't be read yet is waited for (iCloud asked), then refused; never skipped.
 perl -0777 -ne '
-    unless (/private func gather\(.*?case \.notHere, \.conflict:\s*guard waited < Self\.coverWait else \{\s*if !run\.kind\.apart \{ reply\(.*?Couldn.t read .*?cover yet.*?end\(run, \.stopped\(nil\)\)\s*return done\(\.refused\)/s
+    unless (/private func gather\(.*?case \.notHere, \.conflict:\s*guard waited < Self\.coverWait else \{.*?end\(run, \.stopped\(nil\)\)\s*if !run\.kind\.apart \{ reply\(.*?Couldn.t read .*?cover yet.*?\}\s*return done\(\.refused\)/s
             && /raw\.coverOf = / && !/raw\.cover = mayRead/) { print "NoteHelpers: a cover that can.t be read is waited for, then refused\n"; exit 1 }
     print "helpers: an unreadable cover is waited for, then refused, never skipped\n";
 ' Sources/Petal/NoteHelpers.swift
@@ -673,7 +692,7 @@ perl -0777 -ne '
 grep -q 'static func lensAsk(_ t: Told) -> Shielded?' Sources/Petal/NoteHelp.swift || { echo "NoteHelp: the lens words are made only from what was shielded"; exit 1; }
 # Every reviewer output, its turns on the way included, goes through its one result (an opinion).
 perl -0777 -ne '
-    if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /turnOutput\(run, Said\(who: run\.who, text: answer, steps: steps, form: run\.reviewed == nil \? \.answer : \.opinion\)\)/) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }
+    if (/Something said meanwhile.*?\n\s*return\n/s && $& !~ /turnOutput\(run, Said\(who: run\.who, text: answer, steps: steps, form: run\.reviewed == nil \? \.answer : \.opinion\),\s*ask: /) { print "NoteHelpers: a reviewer turn must go through output\n"; exit 1 }
     print "helpers: every reviewer output goes through opinion\n";
 ' Sources/Petal/NoteHelpers.swift
 # Helpers read and write a cover only by the cover rule (the file named for it in the notebook's own folder).
@@ -828,6 +847,30 @@ n=$(grep -c 'replaceItemAt' Sources/Petal/Updater.swift || true)
 grep -q 'guard try UpdateTrust\.install(app, in: bundle, is: release\.version, over: running) else' Sources/Petal/Updater.swift && [ "$n" = 0 ] \
     || { echo "update trust: the updater puts an update in place without looking at it there"; exit 1; }
 echo "update trust: an update is looked at again once it's in place"
+# WhatsNew.swift: after an update What's New opens once, with each version missed since the last one Petal ran as,
+# never on a first install; and every notes file in macos/notes leaves its release-page-only lines out of the app.
+swiftc -parse-as-library -O -o "$out/whatsnew" Sources/Petal/UpdateTrust.swift Sources/Petal/WhatsNew.swift checks/WhatsNewCheck.swift
+"$out/whatsnew" notes
+grep -q 'cp "$ROOT"/macos/notes/\*.md "$APP/Contents/Resources/notes/"' build.sh \
+    || { echo "what's new: build.sh doesn't put the notes in the app"; exit 1; }
+# AgentSetup.swift: turning other AI agents off takes back only Petal's own skill copy, command link and MCP
+# registration (on throwaway folders: links never followed); DockImport.swift: importing macOS's Dock replaces only on
+# the first setup and otherwise adds.
+swiftc -parse-as-library -O -o "$out/agentsetup" Sources/Petal/AgentSetup.swift checks/AgentSetupCheck.swift
+"$out/agentsetup"
+# Every skill a released Petal copied into the agents' folders is known as Petal's own (AgentSetup.earlierSkills), so
+# turning other agents off takes back what an older Petal left; the skill this source carries needn't be listed yet.
+current="$(shasum -a 256 Resources/skill/SKILL.md | cut -d' ' -f1)"
+for tag in $(git tag -l 'macos-v*' 2>/dev/null); do
+    skill="$(git ls-tree -r --full-tree --name-only "$tag" 2>/dev/null | grep -E '(^|/)skill/SKILL\.md$' | head -1)"
+    [ -n "$skill" ] || continue
+    digest="$(git show "$tag:$skill" | shasum -a 256 | cut -d' ' -f1)"
+    [ "$digest" = "$current" ] || grep -q "\"$digest\"" Sources/Petal/AgentSetup.swift \
+        || { echo "agent setup: $tag's skill ($digest) isn't in AgentSetup.earlierSkills"; exit 1; }
+done
+echo "agent setup: every released skill is known as Petal's own"
+swiftc -parse-as-library -O -o "$out/dockimport" Sources/Petal/DockImport.swift checks/DockImportCheck.swift
+"$out/dockimport"
 # An update rebuilt with the person's own changes to Petal's code takes its source from the release Petal checked:
 # Personal.update asks the updater for the commit that release's own Petal.app says (Updater.source, which checks the
 # download as an installed update is and reads the commit through UpdateTrust.source) and hands petal-personal that

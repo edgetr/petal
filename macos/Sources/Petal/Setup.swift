@@ -24,8 +24,14 @@ final class AISetup {
             guard let path = app.paths[provider] else { states[provider] = .missing; return }
             let status = await Self.run(path, provider.statusArguments, environment: app.childEnvironment, timeout: 20)
             if let who = provider.signedIn(status: status.status, output: status.output) {
+                // Installed or signed in since Petal started (from the welcome, Settings or a terminal): the person's
+                // own sessions of it get Petal's tools and skill now, not at Petal's next start.
+                let before = states[provider]
                 states[provider] = .ready(who)
                 polls[provider]?.invalidate()
+                if let before, before != .checking, !Self.isReady(before), app.config.bool("otherAgents") {
+                    OtherAgents.connect(paths: app.paths)
+                }
             } else if states[provider] != .signingIn {
                 states[provider] = .signedOut
             }
@@ -67,6 +73,8 @@ final class AISetup {
             MainActor.assumeIsolated { self?.refresh(provider) }
         }
     }
+
+    private static func isReady(_ state: State) -> Bool { if case .ready = state { true } else { false } }
 
     struct Result: Sendable { let status: Int32; let output: String }
 

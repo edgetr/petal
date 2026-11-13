@@ -269,8 +269,12 @@ enum DockBench {
             measure(app: app, apps: apps, loose: loose)
         }
         DockStrip.shared.layers = was
+        // Magnification, driven with a made-up pointer (DockMagnifyCheck): a failure makes the bench fail.
+        let arguments = CommandLine.arguments
+        let folder = arguments.firstIndex(of: "--bench-dock").flatMap { arguments.count > $0 + 1 ? arguments[$0 + 1] : nil }
+        let failures = DockMagnifyCheck.run(app: app, apps: apps + loose, installed: installed, folder: folder) + DockDropsCheck.run()
         SettingsBench.cleanUp()
-        exit(0)
+        exit(failures == 0 ? 0 : 1)
     }
 
     private static func measure(app: PetalApp, apps: [String], loose: [String]) {

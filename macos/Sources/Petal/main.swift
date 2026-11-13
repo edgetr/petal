@@ -95,6 +95,14 @@ MainActor.assumeIsolated {
         // Its own throwaway folders, set before anything reads a setting (never a copy of the person's).
         app.setActivationPolicy(.prohibited)
         HelpersCheck.run(ai: ai)
+    case .dockCheck:
+        // Its own throwaway folders, set before anything reads a setting (never a copy of the person's).
+        app.setActivationPolicy(.prohibited)
+        DockCheck.run()
+    case .notesDeskCheck:
+        // Its own throwaway folders, set before anything reads a setting (never a copy of the person's).
+        app.setActivationPolicy(.prohibited)
+        NotesDeskCheck.run()
     case .displayCheck(let folder):
         // One real hidden display, for whoever is at the Mac (it changes the screens for a few seconds).
         app.setActivationPolicy(.prohibited)
@@ -104,6 +112,10 @@ MainActor.assumeIsolated {
         // display with a real browser, for whoever is at the Mac.
         app.setActivationPolicy(.prohibited)
         BrowserCheck.run(live: live)
+    case .lookCheck(let bundle):
+        // Reads one app's front window as petal_look's text would, and nothing else.
+        app.setActivationPolicy(.prohibited)
+        LookCheck.run(bundle: bundle, arguments: CommandLine.arguments)
     case .mcp, .usage:
         exit(0)   // handled above
     case .dock:

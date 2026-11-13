@@ -363,7 +363,7 @@ final class RunDisplays {
 
     /// Why there are none, in the person's words, for Settings; nil when they can be made.
     static var unavailableWords: String? {
-        VirtualDisplay.available ? nil : "This Mac's macOS doesn't let Petal make a hidden display, so runs work on your screen as before."
+        VirtualDisplay.available ? nil : "This Mac can’t make a hidden screen, so Petal AI works on yours."
     }
 
     var limit: Int {

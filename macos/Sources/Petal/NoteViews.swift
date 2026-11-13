@@ -13,6 +13,10 @@ enum PaperLook {
     /// Room around the paper in its panel, for its shadow.
     static let margin: CGFloat = 16
 
+    /// The open editor's height for writing `writing` points tall: with an answer, a step or a card under it, only
+    /// what the writing needs (the answer follows its question); with nothing under it, room to write in.
+    static func editorRoom(writing: CGFloat, below: Bool) -> CGFloat { below ? max(writing, 24) : max(minOpen - 70, writing) }
+
     static func rgb(_ color: NSColor) -> NoteInk.RGB {
         let c = color.usingColorSpace(.sRGB) ?? NSColor.systemBlue
         return NoteInk.RGB(r: Double(c.redComponent), g: Double(c.greenComponent), b: Double(c.blueComponent))
@@ -115,10 +119,17 @@ struct PaperView: View {
     private var corner: some View {
         HStack(alignment: .bottom, spacing: 0) {
             // A folded watcher's line takes the room (the sketch's watchers carry no @).
-            Text("@").font(.system(size: TextSize.body, weight: .semibold)).foregroundStyle(glass ? Color.primary.opacity(0.22) : Color.black.opacity(0.22))
-                .padding(.trailing, 8).padding(.bottom, 9)
-                .opacity(face == .folded && paper.file.watch != nil ? 0 : 1)
-                .help("@ for a helper, a note or a notebook; Return on the line asks it")
+            // A button: a new "@Petal " line to write a request on (the paper opens for it first).
+            Button { desk?.askPetal(paper.key) } label: {
+                Text("@").font(.system(size: TextSize.body, weight: .semibold)).foregroundStyle(glass ? Color.primary.opacity(0.22) : Color.black.opacity(0.22))
+                    .padding(.trailing, 8).padding(.bottom, 9).contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .disabled(desk == nil || flipped != nil || conflict)
+            // A conflict's paper is read only: nothing can be written on it, so no @ either.
+            .opacity((face == .folded && paper.file.watch != nil) || conflict ? 0 : 1)
+            .allowsHitTesting(!(face == .folded && paper.file.watch != nil) && !conflict)
+            .help("Ask Petal AI: write what you want, then press Return")
             Button { if let flipped { flipped() } else { desk?.flip(paper.key) } } label: { FoldCorner().fill(Color.black.opacity(0.13)).frame(width: 24, height: 24).contentShape(.rect) }
                 .buttonStyle(.plain)
                 .help(face == .back ? "Turn it back over" : "Turn it over")
@@ -131,7 +142,7 @@ struct PaperView: View {
             // Petal's own note (a morning note) says so, with the time it was left: "from Petal · 08:00".
             Letterhead(place: paper.file.fromPetal ? "from Petal · " + paper.file.created.formatted(date: .omitted, time: .shortened)
                        : face == .folded ? NoteText.site(place) : place, notebook: notebook, others: face == .folded ? "" : others, tint: tint, glass: glass,
-                       tapPlace: { desk?.placeMenu(paper.key) }, tapNotebook: { desk?.notebookMenu(paper.key) })
+                       menus: face == .open && (desk != nil || snapshotting), tapPlace: { desk?.placeMenu(paper.key) }, tapNotebook: { desk?.notebookMenu(paper.key) })
                 .padding(.bottom, 9)
             switch face {
             case .folded: foldedBody
@@ -196,6 +207,12 @@ struct PaperView: View {
         return NoteHelp.paperHeights(screen: screen, chrome: 110 + corner, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: max(controlsHeight, 40))
     }
 
+    /// Something of a helper's under the writing: its answer, a task's chips, a sum, or its bar (a step, a card).
+    private var helperShows: Bool {
+        let file = paper.file
+        return !file.ink.isEmpty || !file.asks.isEmpty || !file.task.isEmpty || file.calc != nil || controlsHeight > 1
+    }
+
     /// The helper's ink and its controls, the controls measured (a form's buttons too) so the paper keeps their room.
     private var helperFront: some View {
         HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
@@ -248,7 +265,7 @@ struct PaperView: View {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
                            // Saved through the note's identity: renamed or moved meanwhile, it lands on that note.
-                           save: { desk.write(paper.key, noteID: paper.noteID, instance: paper.instance, body: $0, base: $1) },
+                           save: { desk.helpers.edited(paper.noteID); return desk.write(paper.key, noteID: paper.noteID, instance: paper.instance, body: $0, base: $1) },
                            register: { [editorToken] in desk.editorRegistered(paper.key, $0, token: editorToken) },
                            importPictures: { desk.importPictures($0, into: paper.key) },
                            idle: { desk.store.takeDeferred(paper.key) },
@@ -261,16 +278,15 @@ struct PaperView: View {
                            settled: { desk.settleUnsaved(paper.key, noteID: paper.noteID, instance: paper.instance, saved: $0) },
                            helperReturn: { desk.helpers.returned(paper.key, line: $0, at: $1) },
                            names: { desk.helpers.names(for: paper.key) },
+                           petalPicked: { desk.askHint(paper.key) },
                            accent: color, tint: tint)
-                .frame(height: min(heights.editor, max(PaperLook.minOpen - 70, editorHeight)))
+                .frame(height: min(heights.editor, PaperLook.editorRoom(writing: editorHeight, below: helperShows)))
             helperFront
         }
     }
 
     private var back: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("The back of this note").font(.system(size: TextSize.callout, weight: .semibold)).foregroundStyle(words)
-                .allowsHitTesting(grab == nil)
             // What a helper did, and what was allowed (tap a stamp to take it back).
             HelperBack(paper: paper, tint: tint, glass: glass, desk: desk)
             VStack(alignment: .leading, spacing: 4) {
@@ -303,16 +319,27 @@ struct Letterhead: View {
     let others: String
     let tint: NoteInk.RGB
     let glass: Bool
+    /// Each half shows it's a menu (a small chevron after it): on the open face.
+    var menus = false
     var tapPlace: () -> Void = {}
     var tapNotebook: () -> Void = {}
 
     var body: some View {
         let ink = glass ? Color.primary.opacity(0.75) : PaperLook.color(NoteInk.letterhead(tint))
         HStack(spacing: 6) {
-            Button(action: tapPlace) { Text(place).fontWeight(.semibold) }.buttonStyle(.plain)
-                .help("Change where it's stuck")
+            Button(action: tapPlace) {
+                HStack(spacing: 3) {
+                    Text(place).fontWeight(.semibold)
+                    if menus { chevron }
+                }
+            }
+            .buttonStyle(.plain)
+            .help("Change where it's stuck")
             Button(action: tapNotebook) {
-                Text("· " + notebook + (others.isEmpty ? "" : " · also on " + others)).fontWeight(.medium)
+                HStack(spacing: 3) {
+                    Text("· " + notebook + (others.isEmpty ? "" : " · also on " + others)).fontWeight(.medium)
+                    if menus { chevron }
+                }
             }
             .buttonStyle(.plain).opacity(0.7)
             .help("Change its notebook")
@@ -322,6 +349,8 @@ struct Letterhead: View {
         .foregroundStyle(ink)
         .lineLimit(1)
     }
+
+    private var chevron: some View { Image(systemName: "chevron.down").font(.system(size: TextSize.micro, weight: .semibold)).opacity(0.7) }
 }
 
 /// The note's writing, read only: in snapshots, and wherever the editor isn't.
@@ -361,10 +390,16 @@ struct NoteBodyView: View {
     let accent: NSColor
     let glass: Bool
     var names: (notes: [String], notebooks: [String], place: String) = ([], [], "")
+    @Environment(\.snapshotting) private var snapshotting
 
     var body: some View {
         let words: Color = glass ? .primary : PaperLook.words
         let blocks = NoteBlock.blocks(paper.file.body)
+        // Drawn as the editor draws an empty note (its placeholder), for a snapshot of one.
+        if snapshotting, paper.file.body.isEmpty {
+            Text(NoteTextView.placeholder).font(.system(size: TextSize.body)).foregroundStyle(words.opacity(0.35))
+                .frame(maxWidth: .infinity, minHeight: PaperLook.minOpen - 70, alignment: .topLeading)
+        }
         // A card or a picture keeps 8 points above and below it, and two in a row share them (8 between, as the
         // sketch's margins do, never 16).
         let boxed = blocks.map { if case .link = $0 { true } else if case .image = $0 { true } else { false } }
@@ -392,7 +427,7 @@ struct NoteBodyView: View {
                         .overlay(alignment: .leading) { Rectangle().fill(Color(nsColor: accent).opacity(0.4)).frame(width: 2) }
                         .padding(.vertical, 4)
                 case .bullet(let text):
-                    Text("• " + NoteText.plain(text)).font(.system(size: TextSize.body)).foregroundStyle(words).lineSpacing(PaperLook.openSpacing)
+                    Text("- " + NoteText.plain(text)).font(.system(size: TextSize.body)).foregroundStyle(words).lineSpacing(PaperLook.openSpacing)
                 case .text(let text) where text.contains("@"):
                     Text(MentionLine.attributed(text, tint: tint, names: names)).font(.system(size: TextSize.body)).foregroundStyle(words).lineSpacing(PaperLook.openSpacing)
                 case .text(let text):

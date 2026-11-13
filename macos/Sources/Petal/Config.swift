@@ -75,7 +75,7 @@ final class Config {
     func bool(_ key: String) -> Bool { watch(key); return values[key] as? Bool ?? Settings.defaults[key] as? Bool ?? false }
     func number(_ key: String) -> Double {
         watch(key)
-        return (values[key] as? NSNumber)?.doubleValue ?? (Settings.defaults[key] as? NSNumber)?.doubleValue ?? 0
+        return ConfigRules.number(values[key], default: Settings.defaults[key])
     }
     func string(_ key: String) -> String { watch(key); return values[key] as? String ?? Settings.defaults[key] as? String ?? "" }
     func strings(_ key: String) -> [String] { watch(key); return values[key] as? [String] ?? Settings.defaults[key] as? [String] ?? [] }
@@ -123,11 +123,17 @@ final class Config {
         setApps(apps.filter { $0 != app })
     }
 
-    /// "Import Dock": macOS's Dock becomes Petal's (its apps, in its order), and its folders become Petal's stacks.
+    /// "Import macOS's Dock" (`DockImport.merge`): on the first setup (the welcome not finished), into a dock with no
+    /// apps, macOS's Dock becomes Petal's; every other time it only adds the apps and folders Petal's dock doesn't
+    /// have, after its own.
     func importSystemDock() {
-        setApps(SystemDock.apps())
-        let folders = SystemDock.folders()
-        if !folders.isEmpty { set("stackFolders", folders) }
+        let stacks = strings("stackFolders")
+        let result = DockImport.merge(apps: apps, folders: stacks, systemApps: SystemDock.apps(), systemFolders: SystemDock.folders(),
+                                      firstSetup: !welcomed,
+                                      // By the folder each stack really shows (Screenshots may stand for the Desktop).
+                                      key: { Stacks.url(Stacks.resolve([$0]).first ?? $0).standardizedFileURL.path })
+        if result.apps != apps { setApps(result.apps) }
+        if result.folders != stacks { set("stackFolders", result.folders) }
     }
 
     // MARK: Files

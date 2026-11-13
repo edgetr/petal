@@ -65,9 +65,12 @@ enum Stacks {
         return count.int32Value == 0
     }
 
+    /// Files dropped on the Trash, moved there off the dock's thread (a slow volume never holds the dock).
     static func moveToTrash(_ urls: [URL]) {
-        for url in urls { try? FileManager.default.trashItem(at: url, resultingItemURL: nil) }
-        Task { @MainActor in PetalApp.shared.signals.lookAtTrash() }
+        DispatchQueue.global(qos: .userInitiated).async {
+            for url in urls { try? FileManager.default.trashItem(at: url, resultingItemURL: nil) }
+            Task { @MainActor in PetalApp.shared.signals.lookAtTrash() }
+        }
     }
 
     static let imageTypes: Set<String> = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "heic", "tiff"]
@@ -101,8 +104,27 @@ enum Stacks {
         finder.async {
             var error: NSDictionary?
             NSAppleScript(source: "tell application \"Finder\" to empty trash")?.executeAndReturnError(&error)
-            DispatchQueue.main.async { MainActor.assumeIsolated { PetalApp.shared.signals.lookAtTrash() } }
+            // Not allowed to use Finder (the person once said Don't Allow): said, with the way to allow it.
+            let refused = [-1743, -1744].contains(error?[NSAppleScript.errorNumber] as? Int ?? 0)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    PetalApp.shared.signals.lookAtTrash()
+                    if refused { askForFinder() }
+                }
+            }
         }
+    }
+
+    @MainActor private static func askForFinder() {
+        let alert = NSAlert()
+        alert.messageText = "Petal needs Finder to empty the Trash"
+        alert.informativeText = "Allow Petal to use Finder in System Settings."
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 
@@ -193,7 +215,25 @@ final class StackContents {
 enum Capture {
     static var allowed: Bool { CGPreflightScreenCaptureAccess() }
 
-    static func askForPermission() { CGRequestScreenCaptureAccess() }
+    private static let askedLock = NSLock()
+    nonisolated(unsafe) private static var askedOnce = false
+
+    /// Asked already while Petal runs. macOS often counts a permission given then only once Petal opens again.
+    static var asked: Bool { askedLock.withLock { askedOnce } }
+
+    /// macOS's own prompt the first time; asked again (macOS prompts only once), the Screen Recording list in System
+    /// Settings.
+    static func askForPermission() {
+        let again = askedLock.withLock { () -> Bool in
+            defer { askedOnce = true }
+            return askedOnce
+        }
+        if again, let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        } else {
+            CGRequestScreenCaptureAccess()
+        }
+    }
 
     /// One picture per window, matched to Accessibility's windows by their window server id, else by app and frame.
     static func capture(_ windows: [(window: AppWindow, number: CGWindowID?)], height: CGFloat = 150) async -> [String: NSImage] {

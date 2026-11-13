@@ -4,8 +4,8 @@ import SwiftUI
 
 /// The first launch: what Petal is, as its four parts in their colors, then only what has to be decided now (the
 /// Dock's apps, which AI, seeing windows, opening at login). "Use Petal" takes the Dock's place; "Keep macOS's Dock"
-/// leaves it, and Petal's settings can switch any time. Everything else Petal may be allowed (pictures of windows,
-/// browsers' tabs, what's playing) is asked where it's first used, never here.
+/// leaves it, as closing the window does, and Petal's settings can switch any time. Everything else Petal may be
+/// allowed (pictures of windows, browsers' tabs, what's playing) is asked where it's first used, never here.
 @MainActor
 final class Welcome {
     private var window: NSWindow?
@@ -21,6 +21,16 @@ final class Welcome {
         window.isReleasedWhenClosed = false
         window.setGlassContent(WelcomeView { [weak self] in self?.window?.close() }.environment(PetalApp.shared))
         window.letContentGoWhenClosed()
+        // Closed with its own button, without choosing: as "Keep macOS's Dock", so the welcome doesn't come back at
+        // every launch with no dock meanwhile.
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+            MainActor.assumeIsolated {
+                let app = PetalApp.shared
+                guard !app.config.welcomed else { return }
+                app.config.setDock("welcomed", true)
+                app.useDock("macos")
+            }
+        }
         window.center()
         self.window = window
         PetalWindow.bringForward(window)
@@ -54,7 +64,7 @@ struct WelcomeView: View {
                         DockIcons()
                         Toggle("", isOn: $bringDock).toggleStyle(.switch).labelsHidden().controlSize(.small)
                     }
-                    ProviderList()
+                    ProviderList(welcome: true)
                     WelcomeRow(title: "Let Petal see your windows") {
                         Image(systemName: "macwindow.on.rectangle")
                     } trailing: {
@@ -266,6 +276,7 @@ struct WelcomeRow<Mark: View, Trailing: View>: View {
 struct ProviderRow: View {
     @Environment(PetalApp.self) private var app
     let provider: Provider
+    var welcome = false
     @Binding var on: Bool
 
     var body: some View {
@@ -278,8 +289,13 @@ struct ProviderRow: View {
         }
         HStack(spacing: 12) {
             ProviderMark(provider: provider).frame(width: WelcomeLook.mark, height: WelcomeLook.mark)
-            Text(provider.name).font(.system(size: TextSize.body, weight: .medium))
+            Text(welcome ? (provider == .claude ? "Petal AI, with Claude" : "Petal AI, with ChatGPT (Codex)") : provider.name)
+                .font(.system(size: TextSize.body, weight: .medium))
             Spacer(minLength: 12)
+            // Before installing or signing in: whose plan it uses.
+            if welcome, on, state == .missing || state == .signedOut {
+                Text(provider.plan).font(.system(size: TextSize.small)).foregroundStyle(.secondary).lineLimit(1)
+            }
             if on { ProviderStatus(provider: provider, state: state, keyed: keyed) }
             Toggle("", isOn: $on).toggleStyle(.switch).labelsHidden().controlSize(.small)
         }
@@ -308,7 +324,7 @@ struct ProviderStatus: View {
                 said("Installing…")
                 ProgressView().controlSize(.small)
             case .signingIn:
-                said("Finish in your browser")
+                said("Finish signing in in your browser")
                 ProgressView().controlSize(.small)
             case .missing:
                 Button("Install") { setup.install(provider) }.buttonStyle(.glassProminent).tint(Part.ai.color).controlSize(.small)
@@ -333,11 +349,13 @@ struct ProviderStatus: View {
 /// The AI apps as switches, saved in aiProviders; none is fine.
 struct ProviderList: View {
     @Environment(PetalApp.self) private var app
+    /// In the welcome, each row says what it is and that it uses the person's own plan.
+    var welcome = false
 
     var body: some View {
         VStack(spacing: 0) {
             ForEach(Provider.allCases) { provider in
-                ProviderRow(provider: provider, on: Binding(
+                ProviderRow(provider: provider, welcome: welcome, on: Binding(
                     get: { app.providers.contains(provider) },
                     set: { on in
                         var chosen = app.providers.filter { $0 != provider }

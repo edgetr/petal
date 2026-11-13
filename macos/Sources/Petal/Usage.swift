@@ -136,7 +136,7 @@ final class Usage {
     private func refreshCodex() async {
         let found = await Task.detached { Self.codexLimits() }.value
         limitsBy[.codex] = found ?? []
-        helpBy[.codex] = found == nil ? "Use Codex once to see your usage." : ""
+        helpBy[.codex] = found == nil ? "Ask Petal AI something to see your usage." : ""
     }
 
     /// The newest rate limits with numbers in them, from the newest session logs back. Many sessions carry none
@@ -183,7 +183,7 @@ final class Usage {
         if let claudeAsked, now.timeIntervalSince(claudeAsked) < 120, limitsBy[.claude]?.isEmpty == false { return }
         claudeAsked = now
         guard let token = await Self.accessToken() else {
-            helpBy[.claude] = "Sign in to Claude Code to see your usage."
+            helpBy[.claude] = "Sign in to Claude above to see your usage."
             return
         }
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!, timeoutInterval: 10)
@@ -203,7 +203,7 @@ final class Usage {
             return
         }
         guard status == 200, let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            helpBy[.claude] = status == 401 || status == 403 ? "Sign in to Claude again from Petal's settings, under AI." : "Anthropic's usage check answered \(status)."
+            helpBy[.claude] = status == 401 || status == 403 ? "Sign in to Claude again in Settings › Petal AI." : "Couldn’t read your usage. Trying again shortly."
             return
         }
         var found: [UsageLimit] = []
@@ -213,7 +213,7 @@ final class Usage {
             found.append(UsageLimit(label: label, percent: min(1, max(0, used / 100)), resetsAt: Self.date(bucket["resets_at"])))
         }
         limitsBy[.claude] = found
-        helpBy[.claude] = found.isEmpty ? "Anthropic's usage check returned no limits." : ""
+        helpBy[.claude] = found.isEmpty ? "Your plan shows no limits right now." : ""
     }
 
     private static func accessToken() async -> String? {

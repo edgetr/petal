@@ -7,6 +7,25 @@ extension Snapshot {
     /// The sketch's desk behind the paper.
     static let desk = Color(.sRGB, red: 0xd9 / 255.0, green: 0xdd / 255.0, blue: 0xe6 / 255.0)
 
+    /// A busy made-up page behind a glass paper: headings, lines of text and coloured pictures.
+    static var busyPage: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(0..<14, id: \.self) { row in
+                HStack(spacing: 12) {
+                    if row % 4 == 1 {
+                        RoundedRectangle(cornerRadius: Radius.control).fill([Color.red, .orange, .green, .purple][row % 4].opacity(0.8)).frame(width: 140, height: 70)
+                    }
+                    Text(row % 3 == 0 ? "Garden talks: the full programme for the weekend" : "Doors open at 8. The Orangery seats forty; the Long Hall has a screen and the Studio has steps at its door.")
+                        .font(.system(size: row % 3 == 0 ? TextSize.subtitle : TextSize.body, weight: row % 3 == 0 ? .semibold : .regular))
+                        .foregroundStyle(Color(white: 0.1))
+                }
+            }
+        }
+        .padding(30)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.white)
+    }
+
     @MainActor static func paperNotes(app: PetalApp, folder: String) {
         let root = FileManager.default.temporaryDirectory.appending(path: "petal-snapshot-notes")
         let blue = "#007aff", orange = "#f7821b", pink = "#e0567a"
@@ -57,6 +76,9 @@ extension Snapshot {
         var early = NoteFile(id: "S4", created: day, body: "Get there by 7:45 for a seat near the front.")
         early.places = [passage]
         let sentence = PaperNote(file: early, url: root.appending(path: "Inbox/Early.md"), notebook: "Inbox")
+        var blank = NoteFile(id: "S6", created: Date(), body: "")
+        blank.places = [page]
+        let empty = PaperNote(file: blank, url: root.appending(path: "Inbox/Untitled.md"), notebook: "Inbox")
         app.paper.store.preview([folded, open, other, sentence], notebooks: books)
         app.paper.preview(here: [folded.key: 0, open.key: 0, other.key: 0, sentence.key: 0], found: [sentence.key: true])
 
@@ -71,6 +93,7 @@ extension Snapshot {
             ("note-folded", scene(paper(folded, .folded))),
             ("note-open", scene(paper(open, .open))),
             ("note-back", scene(paper(open, .back))),
+            ("note-empty", scene(paper(empty, .open))),
             ("note-glass", scene(HStack(alignment: .top, spacing: 30) { paper(folded, .folded, glass: true); paper(open, .open, glass: true) })),
             ("note-sentence", scene(paper(sentence, .folded))),
             ("note-edge-tabs", scene(edgeScene(app: app, keys: [sentence.key, other.key, folded.key, open.key], sentence: sentence))),
@@ -97,8 +120,8 @@ extension Snapshot {
     @MainActor private static func helpers(app: PetalApp, folder: String, root: URL, day: Date, scene: (AnyView) -> AnyView) {
         let now = Date()
         let names: (notes: [String], notebooks: [String], place: String) = (["Slides", "Venue"], ["Work", "Home"], "garden.example")
-        func paper(_ note: PaperNote, _ face: PaperFace, color: String = "#007aff") -> PaperView {
-            PaperView(paper: note, color: NSColor(hex: color) ?? .systemBlue, glass: false, face: face, place: app.paper.letterhead(note).place,
+        func paper(_ note: PaperNote, _ face: PaperFace, color: String = "#007aff", glass: Bool = false) -> PaperView {
+            PaperView(paper: note, color: NSColor(hex: color) ?? .systemBlue, glass: glass, face: face, place: app.paper.letterhead(note).place,
                       notebook: note.notebook, others: app.paper.letterhead(note).others, footer: app.paper.footer(note), names: names)
         }
         var page = NoteStick(kind: .tab)
@@ -110,12 +133,20 @@ extension Snapshot {
             # Garden talk
             Ask about the side room before Thursday. Bring the clicker.
             https://github.com
-            @Petal bring @this back @Friday with @[Slides]
             """)
         plan.places = [page]
         plan.back = friday
-        plan.ink = [NoteHelp.Ink(who: "✦ Petal", text: "This note and Slides will be in front of you Friday 9:00.")]
-        plan.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", asked: "@Petal bring @this back @Friday with @[Slides]", at: now)
+        // Sent: the line left the writing; Petal's own reply is kept under it.
+        var bringBack = NoteHelp.Ask(id: "q1", words: "@Petal bring @this back @Friday with @[Slides]", at: now)
+        bringBack.end = .replied
+        bringBack.said = "This note and Slides will be in front of you Friday 9:00."
+        var summary = NoteHelp.Ask(id: "q2", words: "@Petal what does the side room hold, from this page?", at: now)
+        summary.end = .done
+        summary.said = "Forty seated, with a screen and a clicker at the desk."
+        summary.who = "✦ Petal"
+        plan.asks = [bringBack, summary]
+        plan.ink = [NoteHelp.Ink(who: "✦ Petal", text: "Forty seated, with a screen and a clicker at the desk.")]
+        plan.helper = NoteHelp.Helper(state: .done, who: "✦ Petal", step: "", asked: summary.words, at: now)
         let planned = PaperNote(file: plan, url: root.appending(path: "Work/Garden talk.md"), notebook: "Work")
         let menu = MentionMenuView(choices: MentionChoice.choices("", notes: ["Slides", "Venue"], notebooks: ["Work", "Home"]), selected: 0,
                                    accent: NSColor(hex: "#007aff") ?? .systemBlue, pick: { _ in })
@@ -123,6 +154,7 @@ extension Snapshot {
         draft.ink = []
         draft.helper = nil
         draft.back = nil
+        draft.asks = []
         draft.body = "# Garden talk\nAsk about the side room before Thursday. Bring the clicker.\n@Petal bring @this back @Friday with @[Slides]\n@"
         let typing = PaperNote(file: draft, url: planned.url, notebook: "Work")
         app.paper.store.preview([planned], notebooks: [Notebook(name: "Work", folder: root.appending(path: "Work"), color: "#007aff", cover: nil, count: 1)])
@@ -138,8 +170,13 @@ extension Snapshot {
         // A coding helper's result, and the back of that note: steps and stamps.
         var pr = NoteStick(kind: .tab)
         pr.url = "https://github.com/example/garden/pull/42"
-        var fix = NoteFile(id: "H2", created: day, body: "@Petal use Opus 5.5 to fix the date picker and open a PR. Done means the tests pass. Have GPT 6.1 Sol look for holes")
+        var fix = NoteFile(id: "H2", created: day, body: "The date picker loses the time zone.")
         fix.places = [pr]
+        var fixAsk = NoteHelp.Ask(id: "q3", words: "@Petal use Opus 5.5 to fix the date picker and open a PR. Done means the tests pass. Have GPT 6.1 Sol look for holes", at: now)
+        fixAsk.end = .done
+        fixAsk.said = "Opened a PR into #42: the picker now keeps the time zone. The tests pass."
+        fixAsk.who = "Opus 5.5"
+        fix.asks = [fixAsk]
         fix.ink = [NoteHelp.Ink(who: "Opus 5.5", text: "Opened a PR into #42: the picker now keeps the time zone. The tests pass.",
                                 proof: ["tests ✓", "diff +9 −3", "PR #43"], link: "https://github.com/example/garden/pull/43", code: true, finish: "the tests pass"),
                    NoteHelp.Ink(who: "GPT 6.1 Sol", text: "1. Does the week view use the same picker? It still shows the old time.", objections: 1)]
@@ -150,13 +187,42 @@ extension Snapshot {
         let fixed = PaperNote(file: fix, url: root.appending(path: "Work/Date picker.md"), notebook: "Work")
 
         // A helper at work: its step, Pause and Stop.
-        var busy = NoteFile(id: "H3", created: day, body: "Which of these three venues has step-free access?\n@Petal check this page and the other two")
+        var busy = NoteFile(id: "H3", created: day, body: "Which of these three venues has step-free access?")
         busy.places = [page]
-        busy.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Reading garden.example/access", at: now)
+        busy.asks = [NoteHelp.Ask(id: "q4", words: "@Petal check this page and the other two", at: now)]
+        busy.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "Reading garden.example/access", asked: "@Petal check this page and the other two", at: now)
         let working = PaperNote(file: busy, url: root.appending(path: "Work/Venues.md"), notebook: "Work")
 
+        // Two requests: one answered, the next at work; and one that couldn't finish, with Try again and Edit.
+        var talk = NoteFile(id: "H7", created: day, body: "Venues for the garden talk\nNeeds: step-free, 40 seats, a screen.")
+        talk.places = [page]
+        var first = NoteHelp.Ask(id: "q5", words: "@Petal which of these has step-free access?", at: now)
+        first.end = .done
+        first.said = "The Orangery and the Long Hall. The Studio has six steps at its door."
+        first.who = "✦ Petal"
+        let second = NoteHelp.Ask(id: "q6", words: "@Petal and which of those two seats 40, with Haiku", at: now)
+        talk.asks = [first, second]
+        talk.ink = [NoteHelp.Ink(who: "✦ Petal", text: "The Orangery and the Long Hall. The Studio has six steps at its door.")]
+        talk.helper = NoteHelp.Helper(state: .working, who: "✦ Petal · Haiku", step: "Reading garden.example/long-hall", asked: second.words, at: now)
+        let conversation = PaperNote(file: talk, url: root.appending(path: "Work/Venues for the garden talk.md"), notebook: "Work")
+        var trip = NoteFile(id: "H8", created: day, body: "Train to the venue on Friday")
+        trip.places = [page]
+        var broke = NoteHelp.Ask(id: "q7", words: "@Petal find the fastest train that gets there before 9", at: now)
+        broke.end = .failed
+        broke.said = "Petal AI couldn't reach the timetable page. Check the connection, then try again."
+        broke.who = "✦ Petal · couldn't finish"
+        // Sent from this Mac, as this Mac recorded it: Try again is offered.
+        broke.mac = app.paper.local.mac
+        app.paper.local.sent = ["H8": [broke.id: broke.words]]
+        trip.asks = [broke]
+        let failed = PaperNote(file: trip, url: root.appending(path: "Work/Train.md"), notebook: "Work")
+
         // A watcher: its newest number in the corner, the older ones struck.
-        var lamp = NoteFile(id: "H4", created: day, body: "@Petal check this every morning, tell me under $100")
+        var lamp = NoteFile(id: "H4", created: day, body: "Kitchen lamp")
+        var watching = NoteHelp.Ask(id: "q8", words: "@Petal check this every morning, tell me under $100", at: day)
+        watching.end = .replied
+        watching.said = "Watching lamps.example every morning at 9:00 on this Mac."
+        lamp.asks = [watching]
         var shop = NoteStick(kind: .tab)
         shop.url = "https://lamps.example/kitchen"
         lamp.places = [shop]
@@ -174,6 +240,11 @@ extension Snapshot {
                      NoteHelp.TaskItem(kind: .file, title: "Receipt.pdf", target: "/Users/someone/Receipt.pdf"),
                      NoteHelp.TaskItem(kind: .mail, title: "Shop", target: "message://x")]
         task.ink = [NoteHelp.Ink(who: "✦ Petal · put away today", text: "You were comparing delivery dates. Still open: which one fits the old bracket. Next: reply to the shop.")]
+        var putAway = NoteHelp.Ask(id: "q9", words: "@Petal put this away", at: now)
+        putAway.end = .done
+        putAway.said = task.ink[0].text
+        putAway.who = task.ink[0].who
+        task.asks = [putAway]
         let away = PaperNote(file: task, url: root.appending(path: "Inbox/Renew the bike lock.md"), notebook: "Inbox")
 
         // A morning note from Petal.
@@ -184,7 +255,7 @@ extension Snapshot {
         morning.places = [desk]
         let fromPetal = PaperNote(file: morning, url: root.appending(path: "Work/Morning.md"), notebook: "Work")
 
-        app.paper.store.preview([planned, fixed, working, watcher, away, fromPetal],
+        app.paper.store.preview([planned, fixed, working, watcher, away, fromPetal, conversation, failed],
                                 notebooks: [Notebook(name: "Work", folder: root.appending(path: "Work"), color: "#f7821b", cover: nil, count: 4),
                                             Notebook(name: "Home", folder: root.appending(path: "Home"), color: "#e0567a", cover: nil, count: 1),
                                             Notebook(name: "Inbox", folder: root.appending(path: "Inbox"), color: "#8c8c8c", cover: nil, count: 1)])
@@ -203,8 +274,36 @@ extension Snapshot {
                 paper(fromPetal, .folded, color: "#f7821b").rotationEffect(.degrees(1.5))
                 paper(away, .open, color: "#8c8c8c")
             }))),
+            ("helper-bubbles", scene(AnyView(HStack(alignment: .top, spacing: 30) {
+                paper(conversation, .open, color: "#f7821b")
+                paper(failed, .open, color: "#007aff")
+            }))),
+            // On Liquid Glass, over a busy page: the bubble and the writing must still read.
+            ("helper-bubbles-glass", AnyView(HStack(alignment: .top, spacing: 30) {
+                paper(conversation, .open, color: "#f7821b", glass: true)
+                paper(failed, .open, color: "#007aff", glass: true)
+            }.padding(40).background(busyPage).environment(\.colorScheme, .light))),
         ]
         for (name, view) in shots2 { write(render(view, app: app, size: nil), name: name, folder: folder) }
+
+        // One window with three papers on it: one folded, one open with its answer, one the person moved over the
+        // window; placed as the desk places them (NoteRoom.stack), none over another.
+        var onPage = task
+        onPage.places = [page]
+        let movedHere = PaperNote(file: onPage, url: away.url, notebook: away.notebook)
+        write(render(scene(besideScene(app: app, papers: [
+            ("folded", AnyView(paper(watcher, .folded, color: "#e0567a"))),
+            ("open", AnyView(paper(planned, .open, color: "#f7821b"))),
+            ("moved", AnyView(paper(movedHere, .folded, color: "#8c8c8c"))),
+        ])), app: app, size: nil), name: "note-beside", folder: folder)
+
+        // Three folded papers in two columns on a short screen, then the first one opened: the other two stay where
+        // they were, and the opened one goes around them (NoteRoom.stack, as the desk uses it, its panels' margin
+        // kept).
+        let three: [(id: String, note: PaperNote, color: String)] = [("a", watcher, "#e0567a"), ("b", movedHere, "#8c8c8c"), ("c", working, "#f7821b")]
+        write(render(scene(columnsScene(app: app, papers: three.map { item in
+            (item.id, AnyView(paper(item.note, .folded, color: item.color)), item.id == "a" ? AnyView(paper(item.note, .open, color: item.color)) : nil)
+        })), app: app, size: nil), name: "note-columns", folder: folder)
 
         // A quick question that used notes: a chip for each.
         let ask = ClaudePanel()
@@ -272,6 +371,85 @@ extension Snapshot {
         .frame(width: width + 110, height: height + 10, alignment: .topLeading)
         .padding(40).background(desk).environment(\.colorScheme, .light)
         write(render(AnyView(screenScene), app: app, size: nil), name: "note-on-screen", folder: folder)
+    }
+
+    /// A made-up window on a short screen with papers beside it, twice: as they first go (two columns), and after the
+    /// one with an open face opened. Each half is laid out by NoteRoom.stack with the panels' margin, the second
+    /// from where the first left them.
+    @MainActor private static func columnsScene(app: PetalApp, papers: [(id: String, folded: AnyView, open: AnyView?)]) -> AnyView {
+        let width: CGFloat = 420, height: CGFloat = 440
+        let window = CGRect(x: 0, y: 30, width: width, height: height)
+        let visible = CGRect(x: 0, y: 0, width: width + 560, height: height + 60)
+        func size(_ view: AnyView) -> CGSize { NSHostingView(rootView: view.environment(app).environment(\.snapshotting, true)).fittingSize }
+        let before = NoteRoom.stack(window: window, visible: visible, papers: papers.map { NoteRoom.Paper(id: $0.id, size: size($0.folded), top: EdgeLayout.top) },
+                                    margin: PaperLook.margin)
+        let after = NoteRoom.stack(window: window, visible: visible, papers: papers.map { item in
+            NoteRoom.Paper(id: item.id, size: size(item.open ?? item.folded), top: EdgeLayout.top, was: before.first { $0.id == item.id }?.was)
+        }, margin: PaperLook.margin)
+        func half(_ placed: [NoteRoom.Placed], opened: Bool) -> some View {
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: Radius.card).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
+                    .overlay { RoundedRectangle(cornerRadius: Radius.card).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+                    .frame(width: width, height: height).offset(y: window.minY)
+                Rectangle().fill(Color(white: 0.95)).frame(width: width, height: 52)
+                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: Radius.card, topTrailingRadius: Radius.card)).offset(y: window.minY)
+                ForEach(0..<8, id: \.self) { row in
+                    Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([320, 280, 300, 220, 310, 260, 290, 200][row]), height: 9)
+                        .offset(x: 36, y: window.minY + 90 + CGFloat(row) * 24)
+                }
+                // The screen's edge: the panels' margin is kept inside it.
+                Rectangle().stroke(Color.black.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .frame(width: visible.width, height: visible.height).offset(x: visible.minX, y: visible.minY)
+                ForEach(Array(papers.enumerated()), id: \.offset) { _, item in
+                    if let spot = placed.first(where: { $0.id == item.id }) {
+                        (opened ? item.open ?? item.folded : item.folded).offset(x: spot.frame.minX, y: spot.frame.minY)
+                    }
+                }
+            }
+            .frame(width: visible.maxX, height: visible.maxY, alignment: .topLeading)
+        }
+        return AnyView(HStack(alignment: .top, spacing: 60) { half(before, opened: false); half(after, opened: true) })
+    }
+
+    /// A made-up window with its notes' tabs on its right edge and three papers: the first two placed beside it the
+    /// one way (NoteRoom.stack, at their tabs' heights, the second under the first), the third where the person moved
+    /// it, over the window.
+    @MainActor private static func besideScene(app: PetalApp, papers: [(id: String, view: AnyView)]) -> AnyView {
+        let width: CGFloat = 600, height: CGFloat = 600
+        let window = CGRect(x: 0, y: 0, width: width, height: height)
+        let visible = CGRect(x: 0, y: -12, width: width + NoteRoom.gap * 2 + PaperLook.openWidth, height: height + 140)
+        let sizes = papers.map { NSHostingView(rootView: $0.view.environment(app).environment(\.snapshotting, true)).fittingSize }
+        let tabs = EdgeLayout.tabs(papers.map { EdgeNote(id: $0.id, line: nil, color: "#007aff", faded: false) }, height: height)
+        let moved = papers.count > 2 ? CGRect(x: width - 250, y: 330, width: sizes[2].width, height: sizes[2].height) : nil
+        let placed = NoteRoom.stack(window: window, visible: visible, papers: papers.enumerated().map { index, paper in
+            NoteRoom.Paper(id: paper.id, size: sizes[index], top: tabs.first { $0.ids.contains(paper.id) }?.y ?? EdgeLayout.top,
+                           moved: index == 2 ? moved : nil)
+        })
+        let colors = ["#e0567a", "#f7821b", "#8c8c8c"]
+        return AnyView(ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: Radius.card).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
+                .overlay { RoundedRectangle(cornerRadius: Radius.card).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+                .frame(width: width, height: height)
+            Rectangle().fill(Color(white: 0.95)).frame(width: width, height: 52)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: Radius.card, topTrailingRadius: Radius.card))
+            Text("Garden talks").font(.system(size: TextSize.large, weight: .semibold)).foregroundStyle(Color(white: 0.07)).offset(x: 44, y: 88)
+            ForEach(0..<12, id: \.self) { row in
+                Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([460, 400, 430, 300, 450, 380, 420, 260, 440, 390, 410, 280][row]), height: 9)
+                    .offset(x: 44, y: 140 + CGFloat(row) * 24)
+            }
+            ForEach(Array(tabs.enumerated()), id: \.offset) { index, tab in
+                EdgeTabView(tab: EdgeTab(ids: tab.ids, y: tab.y, height: tab.height, color: colors[min(index, colors.count - 1)], faded: false),
+                            colors: [:], outside: false, hovering: false, label: "")
+                    .frame(width: 300, alignment: .trailing)
+                    .offset(x: width - 300, y: tab.y)
+            }
+            ForEach(Array(papers.enumerated()), id: \.offset) { index, paper in
+                if let spot = placed.first(where: { $0.id == paper.id }) {
+                    paper.view.offset(x: spot.frame.minX, y: spot.frame.minY)
+                }
+            }
+        }
+        .frame(width: visible.maxX, height: visible.maxY, alignment: .topLeading))
     }
 
     /// A made-up window with a sentence highlighted, its notes resting as tabs on its right edge (one with a count,

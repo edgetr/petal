@@ -334,6 +334,7 @@ final class AgentPass: @unchecked Sendable {
 /// The agents allowed to use the vault without asking: each grant (an item, a project, an agent) with Remove, and
 /// adding one ahead of time, so an agent working while the person is away is never stuck on a card.
 struct AgentsCard: View {
+    @Environment(PetalApp.self) private var app
     @Environment(\.snapshotting) private var snapshotting
     private var grants: AgentGrants { AgentGrants.shared }
     private var model: VaultModel { VaultModel.shared }
@@ -343,8 +344,16 @@ struct AgentsCard: View {
     @State private var project: String?
     @State private var problem: String?
 
+    /// Only for someone who has given an agent something, or who lets other AI agents change Petal and has Claude
+    /// Code or Codex installed: nobody else has agents to allow.
+    private var shows: Bool { !grants.grants.isEmpty || (app.config.bool("otherAgents") && !app.paths.isEmpty) }
+
     var body: some View {
-        SettingsGroup(title: "Agents", footer: "Each agent asks first in a project unless it’s allowed here. It never sees a secret, but a command made to show a key still can.") {
+        if shows { card }
+    }
+
+    private var card: some View {
+        SettingsGroup(title: "Other AI agents", footer: "They ask first unless allowed here. They never see a password or key, though a command made to show one still can.") {
             if grants.grants.isEmpty {
                 Text("Nothing allowed yet.").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
             }

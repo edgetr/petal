@@ -151,18 +151,28 @@ enum Snapshot {
         views.append(("site-icons", AnyView(HStack(spacing: 14) {
             ForEach(["https://github.com", "https://www.figma.com", "https://example.invalid"], id: \.self) { SiteIcon(id: $0, size: 64) }
         }.padding(14)), nil))
-        views.append(("whats-new", AnyView(ReleaseNotesView(version: "0.2.0", preloaded: .init(body: """
-            ## Petal 0.2.0
+        // What's New as it opens by itself after an update: one version, and three missed (made-up notes in the
+        // shape of macos/notes: a first line, then groups of bullets).
+        let release = { (version: String, lead: String) in
+            ReleaseNotes.Section(version: version, body: """
+                \(lead)
 
-            Your dock holds **your notes** now, and a *note pad* to take a paper from.
+                ## Notes
+                - Drag a paper off the note pad and let it go anywhere. It stays where you leave it.
+                - Press ⌃⌥N for a new note on what's in front, or choose **Note** by selected text.
 
-            - Drag a paper off the note pad and let go anywhere
-            - Keyboard shortcuts: ⌃⌥N for a new note
-            - Magnification, and [a menu bar icon](https://github.com/edgetr/petal)
-
-            ### Fixes
-            * A note no longer covers the update notice
-            """, link: nil))), CGSize(width: 560, height: 600)))
+                ## Also
+                - The dock's icons shrink to fit when there are many.
+                - A note no longer covers the update notice.
+                """)
+        }
+        views.append(("whats-new", AnyView(ReleaseNotesView(sections: [release("2.2.0", "Notes stick anywhere, and stay where you put them.")])),
+                      CGSize(width: 560, height: 600)))
+        views.append(("whats-new-missed", AnyView(ReleaseNotesView(sections: [
+            release("2.2.0", "Notes stick anywhere, and stay where you put them."),
+            release("2.1.4", "The dock is quicker, and Petal AI asks less often."),
+            ReleaseNotes.Section(version: "2.1.3", body: "Petal checks who made an update before installing it.\n\n- Nothing changes in how you use Petal."),
+        ])), CGSize(width: 560, height: 1100)))
         // Groups of the settings window on their own, with every row whatever the settings say: tiling's keys, using
         // your apps with the switch for a hidden display for each run, and paying with a subscription or an API key.
         for (name, block, height) in [("settings-windows", SettingsList.windows, 420.0), ("settings-run-displays", SettingsList.usingApps, 260.0),
@@ -171,7 +181,7 @@ enum Snapshot {
         }
         // Petal AI using an app: its first question, the chip with Stop by its pointer, and the pointer itself.
         app.assist.preview(Assist.Request(kind: "computer:com.apple.Safari", title: "Let Petal AI use Safari?",
-                                          detail: "First, pressing Export. Until this reply is done it can press, type and choose menus in Safari with its own pointer; yours stays where it is. Esc stops it."))
+                                          detail: "First: pressing Export. With its own pointer, for this reply. Esc stops it."))
         write(render(AnyView(AskCard()), app: app, size: nil), name: "card-ask-computer", folder: folder)
         app.assist.preview(nil)
         // The vault's cards: a login it doesn't have yet, the one Buy card of a checkout, an address, and a login on a
@@ -229,7 +239,7 @@ enum Snapshot {
         VaultModel.shared.preview(vault + BenchTargets.logins(300))
         write(settingsPage(SettingsView(selection: .vault), app: app), name: "settings-vault-300", folder: folder)
         VaultModel.shared.preview(vault)
-        views.append(("whats-new-long", AnyView(ReleaseNotesView(version: "1.0.0", preloaded: .init(body: BenchTargets.releaseNotes, link: nil))),
+        views.append(("whats-new-long", AnyView(ReleaseNotesView(sections: BenchTargets.releaseNotes)),
                       CGSize(width: 560, height: 3200)))
         try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
         // Magnification: drawn once to find where everything is, then with the pointer over the third app.

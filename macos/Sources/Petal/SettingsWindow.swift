@@ -215,8 +215,8 @@ struct SettingsView: View {
     }
 }
 
-/// Across the top of the window: what's typed finds settings on every page as it's typed, and Return hands it to
-/// Petal AI. With no AI chosen it only searches.
+/// Across the top of the window: what's typed finds settings on every page as it's typed, and Return opens the page
+/// of the first one found, or, when nothing matched, hands the words to Petal AI. With no AI chosen it only searches.
 struct AskBar: View {
     @Environment(PetalApp.self) private var app
     let state: SettingsState
@@ -235,14 +235,20 @@ struct AskBar: View {
                 .font(.system(size: TextSize.body))
                 .onSubmit {
                     let text = state.ask.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard ai, !text.isEmpty else { return }
-                    app.claude.open(asking: text)
-                    state.ask = ""
+                    guard !text.isEmpty else { return }
+                    // As in any search field, Return goes to what was found; only words that find nothing are a
+                    // question for Petal AI.
+                    if let query = state.query, let first = SettingsList.find(query, app: app).first {
+                        state.go(first.section)
+                    } else if ai {
+                        app.claude.open(asking: text)
+                        state.ask = ""
+                    }
                 }
                 // Escape clears it: back to the page.
                 .onExitCommand { if !state.ask.isEmpty { state.ask = "" } }
             if !state.ask.isEmpty {
-                if ai { KeyCaps(text: "↩").help("Return asks Petal AI") }
+                if ai { KeyCaps(text: "↩").help("Return opens the first setting found, or asks Petal AI") }
                 RoundButton(symbol: "xmark") { state.ask = "" }
             }
         }
@@ -807,14 +813,20 @@ enum SettingsList {
     }
 
     /// What the ask bar found: on each page, the rows that hold every word of `query` in their title, their extra
-    /// words or their group's label; and a page whose own name or words hold them, with or without rows.
+    /// words, their group's label or their page's name ("hide dock" finds Dock's Auto-hide); and a page whose own name
+    /// or words hold them, with or without rows.
     static func find(_ query: String, app: PetalApp) -> [Hit] {
         let words = query.split(separator: " ")
         func holds(_ text: String) -> Bool { words.allSatisfy { text.contains($0) } }
         return SettingsSection.allCases.compactMap { section in
+            let page = section.title.lowercased() + " "
             let entries = blocks(section).filter { $0.when(app) }.flatMap { block in
                 let label = (block.title ?? "").lowercased() + " "
-                return block.entries.filter { $0.when(app) && holds(label + $0.found) }
+                // The page's name counts only beside the row's own words: "dock" alone isn't every row of Dock.
+                return block.entries.filter { entry in
+                    let own = label + entry.found
+                    return entry.when(app) && words.contains(where: { own.contains($0) }) && holds(page + own)
+                }
             }
             let named = holds((section.title + " " + section.words).lowercased())
             return entries.isEmpty && !named ? nil : Hit(section: section, entries: entries)
@@ -839,9 +851,9 @@ struct InstructionsEditor: View {
             // until they pick.
             if notes.changedElsewhere {
                 HStack(spacing: 8) {
-                    Text("Changed elsewhere since you started typing.").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
+                    Text("This changed somewhere else while you were typing.").font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
                     Spacer(minLength: 0)
-                    Button("Use theirs") { notes.useTheirs() }
+                    Button("Use that version") { notes.useTheirs() }
                     Button("Keep mine") { notes.keepMine() }
                 }
                 .buttonStyle(.glass)

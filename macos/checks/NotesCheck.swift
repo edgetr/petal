@@ -963,6 +963,9 @@ struct NotesCheck {
         expect(crowded.reduce(0) { $0 + $1.count } == 30 && crowded.last.map { $0.y + $0.height <= 300 } == true, "too many: the last tab holds the rest")
         expect(NoteShelf.faded(modified: when, now: when.addingTimeInterval(31 * 86400)) && !NoteShelf.faded(modified: when, now: when.addingTimeInterval(29 * 86400)),
                "untouched for 30 days, a note fades")
+        expect(!NoteShelf.faded(modified: when, opened: when.addingTimeInterval(20 * 86400), now: when.addingTimeInterval(31 * 86400))
+               && NoteShelf.faded(modified: when, opened: when.addingTimeInterval(-86400), now: when.addingTimeInterval(31 * 86400)),
+               "opened in the last 30 days, it doesn't")
 
         // MARK: Room
 
@@ -984,6 +987,223 @@ struct NotesCheck {
         expect(spot.minX == roomy.maxX + NoteRoom.gap && spot.minY == roomy.minY + 118, "an open note beside its line")
         let low = NoteRoom.beside(window: roomy, visible: visible, size: CGSize(width: 340, height: 300), top: 690)
         expect(low.maxY <= visible.maxY, "and kept on the screen")
+
+        // MARK: Papers beside a window, never over one another
+
+        let foldedSize = CGSize(width: 170, height: 170), openSize = CGSize(width: 360, height: 420)
+        func apart(_ placed: [NoteRoom.Placed]) -> Bool {
+            for (i, a) in placed.enumerated() { for b in placed.dropFirst(i + 1) where a.frame.intersects(b.frame) { return false } }
+            return true
+        }
+        func onScreen(_ placed: [NoteRoom.Placed]) -> Bool { placed.allSatisfy { visible.contains($0.frame) } }
+        func frame(_ placed: [NoteRoom.Placed], _ id: String) -> CGRect { placed.first { $0.id == id }?.frame ?? .null }
+        // Two notes with no line: their tabs stacked from the top (52 and 92 down the window).
+        let two = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52), NoteRoom.Paper(id: "b", size: foldedSize, top: 92)])
+        expect(apart(two) && onScreen(two), "two papers at the stacked tabs' heights never cover one another", "\(two)")
+        expect(frame(two, "a").minY == roomy.minY + 52 && frame(two, "b").minY == frame(two, "a").maxY + NoteRoom.spacing,
+               "the first at its line, the second right under it", "\(two)")
+        expect(two.allSatisfy { $0.frame.minX == roomy.maxX + NoteRoom.gap }, "both beside the window")
+        // One the person moved into the default place: it stays, the other goes around it.
+        let spotted = CGRect(x: roomy.maxX + NoteRoom.gap + 20, y: roomy.minY + 60, width: 170, height: 170)
+        let movedOne = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52, moved: spotted), NoteRoom.Paper(id: "b", size: foldedSize, top: 52)])
+        expect(frame(movedOne, "a") == spotted, "a moved paper stays where it was left")
+        expect(apart(movedOne), "a paper placed by default never lands on a moved one", "\(movedOne)")
+        // A new paper takes free room: those already there don't move.
+        let earlier = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52), NoteRoom.Paper(id: "b", size: foldedSize, top: 300)])
+        func was(_ placed: [NoteRoom.Placed], _ id: String) -> NoteRoom.Was? { placed.first { $0.id == id }?.was }
+        let added = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52, was: was(earlier, "a")), NoteRoom.Paper(id: "b", size: foldedSize, top: 300, was: was(earlier, "b")),
+            NoteRoom.Paper(id: "new", size: openSize, top: 52)])
+        expect(frame(added, "a") == frame(earlier, "a") && frame(added, "b") == frame(earlier, "b"), "a new paper moves nobody", "\(added)")
+        expect(apart(added) && onScreen(added), "and covers nobody", "\(added)")
+        // One that grows pushes the ones below it down, and they come back when it folds.
+        let grown = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: openSize, top: 52, was: was(two, "a"), held: true), NoteRoom.Paper(id: "b", size: foldedSize, top: 92, was: was(two, "b"))])
+        expect(frame(grown, "a").minY == frame(two, "a").minY, "the paper written in stays where it was")
+        expect(apart(grown) && frame(grown, "b").minY > frame(two, "b").minY, "the one below it moves down", "\(grown)")
+        let foldedBack = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: foldedSize, top: 52, was: was(grown, "a")), NoteRoom.Paper(id: "b", size: foldedSize, top: 92, was: was(grown, "b"))])
+        expect(foldedBack == two, "folded again, it comes back up", "\(foldedBack)")
+        // A paper held still keeps its place even when one above it grows: the one above goes around it.
+        let still = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: openSize, top: 52, was: was(two, "a")), NoteRoom.Paper(id: "b", size: foldedSize, top: 92, was: was(two, "b"), held: true)])
+        expect(frame(still, "b") == frame(two, "b") && apart(still), "a paper being written in never jumps", "\(still)")
+        // More than fit below: a second column, never a pile.
+        let many = (0..<9).map { NoteRoom.Paper(id: "p\($0)", size: foldedSize, top: 52 + CGFloat($0) * 40) }
+        let crowdedBeside = NoteRoom.stack(window: roomy, visible: visible, papers: many)
+        expect(crowdedBeside.count == 9 && apart(crowdedBeside) && onScreen(crowdedBeside), "more papers than fit: none covers another", "\(crowdedBeside)")
+        expect(Set(crowdedBeside.map(\.column)).count >= 2, "they go on in another column")
+        // A window with no room beside it: the first column on the screen's edge, the next to its left.
+        let full = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        let packed = NoteRoom.stack(window: full, visible: visible, papers: (0..<7).map { NoteRoom.Paper(id: "q\($0)", size: foldedSize, top: 52) })
+        expect(apart(packed) && onScreen(packed), "no room beside the window: still none covers another", "\(packed)")
+        expect(packed.first { $0.column == 0 }?.frame.maxX == visible.maxX - NoteRoom.gap, "the first column on the screen's edge")
+        expect(packed.contains { $0.column == 1 && $0.frame.maxX <= visible.maxX - NoteRoom.gap - 170 }, "the next to its left")
+        // A paper whose line is low on the screen is kept on it, not sent to another column.
+        let lowOne = NoteRoom.stack(window: roomy, visible: visible, papers: [NoteRoom.Paper(id: "a", size: openSize, top: 690)])
+        expect(lowOne.first.map { $0.column == 0 && visible.contains($0.frame) } == true, "a low paper moves up onto the screen", "\(lowOne)")
+        // Each panel is its paper and a 16-point margin for its shadow, kept whole on the screen (NotePanel.whole):
+        // what stack returns must be where the panel can really go, or the clamp pushes papers over each other.
+        let shadow: CGFloat = 16
+        let screen1440 = CGRect(x: 0, y: 25, width: 1440, height: 875)
+        func asShown(_ placed: [NoteRoom.Placed]) -> [NoteRoom.Placed] {
+            placed.map { spot in
+                var out = spot
+                out.frame = NoteShelf.wholeOnScreen(spot.frame.insetBy(dx: -shadow, dy: -shadow), visible: screen1440).insetBy(dx: shadow, dy: shadow)
+                return out
+            }
+        }
+        // A window ending at 1076: the first column at 1088, and a second to its right would end on the screen's
+        // very edge (1270 + 170 = 1440), past where its panel can go.
+        let edgeWindow = CGRect(x: 100, y: 60, width: 976, height: 700)
+        let edgeStack = NoteRoom.stack(window: edgeWindow, visible: screen1440,
+                                       papers: (0..<6).map { NoteRoom.Paper(id: "e\($0)", size: foldedSize, top: 52) }, margin: shadow)
+        expect(asShown(edgeStack) == edgeStack, "papers are placed where their panels really go", "\(edgeStack) \(asShown(edgeStack))")
+        expect(apart(asShown(edgeStack)) && Set(edgeStack.map(\.column)).count >= 2, "two columns, never a few points over each other", "\(asShown(edgeStack))")
+        expect(!edgeStack.contains { $0.frame.minX == 1270 }, "no column ends on the screen's edge")
+        // A full-width window on a 1288-point screen: columns go left to the screen's other edge, where without the
+        // margin the last would start at 14 and its panel be pushed in by the clamp; with it, every one is where it
+        // was put.
+        let screen1288 = CGRect(x: 0, y: 25, width: 1288, height: 875)
+        func asShown1288(_ placed: [NoteRoom.Placed]) -> [NoteRoom.Placed] {
+            placed.map { spot in
+                var out = spot
+                out.frame = NoteShelf.wholeOnScreen(spot.frame.insetBy(dx: -shadow, dy: -shadow), visible: screen1288).insetBy(dx: shadow, dy: shadow)
+                return out
+            }
+        }
+        let bare = NoteRoom.stack(window: screen1288, visible: screen1288, papers: (0..<28).map { NoteRoom.Paper(id: "l\($0)", size: foldedSize, top: 52) })
+        expect(asShown1288(bare) != bare, "(without the margin, the clamp would move the last column)")
+        let leftmost = NoteRoom.stack(window: screen1288, visible: screen1288,
+                                      papers: (0..<24).map { NoteRoom.Paper(id: "l\($0)", size: foldedSize, top: 52) }, margin: shadow)
+        expect(asShown1288(leftmost) == leftmost && apart(leftmost) && Set(leftmost.map(\.column)).count == 6,
+               "with it, the last column stays where it was put", "\(leftmost.filter { $0.frame.minX < 200 })")
+        // Three folded papers in two columns; one opens: the other two don't move.
+        let short = CGRect(x: 0, y: 25, width: 1440, height: 500)
+        let lowWindow = CGRect(x: 100, y: 60, width: 900, height: 440)
+        let three = (0..<3).map { NoteRoom.Paper(id: "t\($0)", size: foldedSize, top: 52) }
+        let before3 = NoteRoom.stack(window: lowWindow, visible: short, papers: three, margin: shadow)
+        expect(Set(before3.map(\.column)).count == 2 && apart(before3), "three folded papers in two columns", "\(before3)")
+        for opening in ["t0", "t1", "t2"] {
+            let after3 = NoteRoom.stack(window: lowWindow, visible: short, papers: three.map { paper in
+                var paper = paper
+                paper.was = was(before3, paper.id)
+                if paper.id == opening { paper.size = CGSize(width: 360, height: 300) }
+                return paper
+            }, margin: shadow)
+            let others = after3.filter { $0.id != opening }
+            let stayed = others.allSatisfy { (spot: NoteRoom.Placed) -> Bool in before3.first { $0.id == spot.id }?.frame == spot.frame }
+            expect(stayed && apart(after3) && asShown(after3) == after3, "\(opening) opens: the other two don't move", "\(before3) → \(after3)")
+        }
+        // One that opens short and wide over its neighbour's column: the neighbour stays, the opened one goes around it.
+        let shortOpen = NoteRoom.stack(window: lowWindow, visible: short, papers: three.map { paper in
+            var paper = paper
+            paper.was = was(before3, paper.id)
+            if paper.id == "t0" { paper.size = CGSize(width: 360, height: 120) }
+            return paper
+        }, margin: shadow)
+        let neighbour = before3.first { $0.column == 1 }
+        expect(neighbour.map { n in shortOpen.first { $0.id == n.id }?.frame == n.frame } == true && apart(shortOpen),
+               "opening over another column never moves the paper there", "\(before3) → \(shortOpen)")
+        // One opening that has room where it is: it stays, growing down, and no paper moves sideways.
+        let tall = NoteRoom.stack(window: roomy, visible: visible, papers: [NoteRoom.Paper(id: "a", size: foldedSize, top: 52),
+                                                                           NoteRoom.Paper(id: "b", size: foldedSize, top: 92)], margin: shadow)
+        let tallOpen = NoteRoom.stack(window: roomy, visible: visible, papers: [
+            NoteRoom.Paper(id: "a", size: openSize, top: 52, was: was(tall, "a")), NoteRoom.Paper(id: "b", size: foldedSize, top: 92, was: was(tall, "b"))], margin: shadow)
+        expect(frame(tallOpen, "a").origin == frame(tall, "a").origin && frame(tallOpen, "b").minX == frame(tall, "b").minX
+               && frame(tallOpen, "b").minY > frame(tall, "b").minY && apart(tallOpen),
+               "a paper opening where it is pushes the one below it down, never sideways", "\(tallOpen)")
+
+        // A full-width window, played as the desk does it: laid out with no room yet, narrowed for the open paper
+        // (with the panels' margin), laid out again from the first layout's places. The paper sits in the room made,
+        // never over the window, and doesn't move sideways as the window narrows under it. Then fold, open again, a
+        // second paper, and the width room back: each layout fed the last one's places.
+        let screen1920 = CGRect(x: 0, y: 25, width: 1920, height: 1030)
+        let browser = CGRect(x: 0, y: 30, width: 1920, height: 992)
+        func lay(_ window: CGRect, _ papers: [(id: String, size: CGSize)], after last: [NoteRoom.Placed]) -> [NoteRoom.Placed] {
+            NoteRoom.stack(window: window, visible: screen1920, papers: papers.map { NoteRoom.Paper(id: $0.id, size: $0.size, top: 52, was: was(last, $0.id)) },
+                           margin: shadow)
+        }
+        func besideIt(_ placed: [NoteRoom.Placed], _ id: String, _ window: CGRect) -> Bool { frame(placed, id).minX == window.maxX + NoteRoom.gap }
+        let firstLaid = lay(browser, [("n", openSize)], after: [])
+        let roomFor = NoteRoom.narrowed(window: browser, visible: screen1920, note: 360, margin: shadow)
+        expect(roomFor.map { $0.minX == 0 && $0.width < 1920 } == true, "a full-width window is narrowed for an open paper", "\(String(describing: roomFor))")
+        let room = roomFor ?? browser
+        let inRoom = lay(room, [("n", openSize)], after: firstLaid)
+        expect(besideIt(inRoom, "n", room), "then the paper sits in the room made, beside the window", "\(room) \(inRoom)")
+        expect(frame(inRoom, "n").minX == frame(firstLaid, "n").minX, "and didn't move sideways as the window narrowed", "\(firstLaid) → \(inRoom)")
+        let panel = frame(inRoom, "n").insetBy(dx: -shadow, dy: -shadow)
+        expect(NoteShelf.wholeOnScreen(panel, visible: screen1920) == panel, "where its panel can really go", "\(panel)")
+        expect(NoteRoom.narrowed(window: room, visible: screen1920, note: 360, margin: shadow) == nil, "narrowed once: it has room now")
+        let foldedThere = lay(room, [("n", foldedSize)], after: inRoom)
+        expect(besideIt(foldedThere, "n", room), "folded, it stays beside the window", "\(foldedThere)")
+        let openAgain = lay(room, [("n", openSize)], after: foldedThere)
+        expect(besideIt(openAgain, "n", room), "opened again, beside it", "\(openAgain)")
+        let secondPaper = lay(room, [("n", openSize), ("m", openSize)], after: openAgain)
+        expect(besideIt(secondPaper, "n", room) && frame(secondPaper, "n") == frame(openAgain, "n") && apart(secondPaper), "a second paper moves nobody", "\(secondPaper)")
+        let widthBack = lay(browser, [("n", foldedSize), ("m", foldedSize)], after: secondPaper)
+        expect(apart(widthBack) && widthBack.allSatisfy { screen1920.insetBy(dx: shadow, dy: shadow).contains($0.frame) },
+               "the width given back: the papers on the screen, apart", "\(widthBack)")
+        // A paper the person moved a little within the room made beside a narrowed window keeps that room: its spot
+        // is by the window's right corner, so with the width given back it would land over the page.
+        let wideUp = CGRect(x: 0, y: 0, width: 1920, height: 1000), narrowUp = CGRect(x: 0, y: 0, width: 1520, height: 1000)   // y up, AppKit's
+        let movedDown = CGRect(x: narrowUp.maxX + NoteRoom.gap, y: 400, width: 360, height: 420)
+        let spotBeside = NoteSpot.stick(panel: movedDown, window: narrowUp)
+        let unclamped = CGRect(x: -1e7, y: -1e7, width: 2e7, height: 2e7)
+        expect(NoteRoom.leftBeside(spotBeside.frame(size: movedDown.size, window: narrowUp, screen: unclamped), window: narrowUp),
+               "moved within the room beside its window: still beside it")
+        let wouldLand = spotBeside.frame(size: movedDown.size, window: wideUp, screen: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        expect(wouldLand.maxX > wideUp.maxX - 400 && NoteRoom.leftBeside(spotBeside.frame(size: movedDown.size, window: wideUp, screen: unclamped), window: wideUp),
+               "(given the width back it would land over the window; it asks for the room again)", "\(wouldLand)")
+        let overPage = NoteSpot.stick(panel: movedDown.offsetBy(dx: -600, dy: 0), window: narrowUp)
+        expect(!NoteRoom.leftBeside(overPage.frame(size: movedDown.size, window: narrowUp, screen: unclamped), window: narrowUp), "moved onto the window: room given back")
+        let otherScreen = NoteSpot.stick(panel: movedDown.offsetBy(dx: 900, dy: 0), window: narrowUp)
+        expect(!NoteRoom.leftBeside(otherScreen.frame(size: movedDown.size, window: narrowUp, screen: unclamped), window: narrowUp), "moved far off its side: room given back")
+        expect(!NoteRoom.leftBeside(movedDown.offsetBy(dx: 0, dy: 1200), window: narrowUp), "moved below the window: not beside it")
+        expect(NoteRoom.leftBeside(movedDown.offsetBy(dx: -40, dy: 0), window: narrowUp), "a little over the window's edge: still beside it")
+        // Petal's own dock takes a strip macOS's visible area doesn't know of, and draws over papers: papers and the
+        // room made for them keep out of it, whichever edge it's on (AppKit's coordinates here, y up).
+        let mac = CGRect(x: 0, y: 0, width: 1440, height: 900), macVisible = CGRect(x: 0, y: 4, width: 1440, height: 871)
+        expect(NoteRoom.freeOfDock(visible: macVisible, screen: mac, reach: 80, position: "bottom") == CGRect(x: 0, y: 80, width: 1440, height: 795), "a dock at the bottom")
+        expect(NoteRoom.freeOfDock(visible: macVisible, screen: mac, reach: 80, position: "right") == CGRect(x: 0, y: 4, width: 1360, height: 871), "on the right")
+        expect(NoteRoom.freeOfDock(visible: macVisible, screen: mac, reach: 80, position: "left") == CGRect(x: 80, y: 4, width: 1360, height: 871), "on the left")
+        expect(NoteRoom.freeOfDock(visible: macVisible, screen: mac, reach: nil, position: "right") == macVisible, "hidden: the whole visible area")
+        let leftScreen = CGRect(x: -1920, y: 0, width: 1920, height: 1080)
+        expect(NoteRoom.freeOfDock(visible: leftScreen, screen: leftScreen, reach: 70, position: "right") == CGRect(x: -1920, y: 0, width: 1850, height: 1080),
+               "on a screen left of the main one")
+        // A dock on the right: a full-width window kept clear of it, then narrowed for a note: the paper beside it and
+        // whole left of the dock.
+        let rightFree = CGRect(x: 0, y: 25, width: 1440 - 80, height: 875)
+        let clearOfDock = CGRect(x: 0, y: 30, width: 1360, height: 860)
+        let roomRight = NoteRoom.narrowed(window: clearOfDock, visible: rightFree, note: 360, margin: shadow) ?? clearOfDock
+        let besideDock = NoteRoom.stack(window: roomRight, visible: rightFree, papers: [NoteRoom.Paper(id: "n", size: openSize, top: 52)], margin: shadow)
+        expect(besideIt(besideDock, "n", roomRight) && frame(besideDock, "n").maxX + shadow <= rightFree.maxX, "a dock on the right: the paper beside the window, clear of the dock",
+               "\(roomRight) \(besideDock)")
+        // Every screen and window width: narrowed, the open paper is beside the window where it was clamped before.
+        for screenWidth in [1280, 1440, 1512, 1728, 1920, 2560] as [CGFloat] {
+            for left in stride(from: CGFloat(-200), through: 600, by: 40) {
+                for width in stride(from: CGFloat(300), through: screenWidth + 200, by: 37) {
+                    let screen = CGRect(x: -screenWidth / 2, y: 25, width: screenWidth, height: 900)
+                    let window = CGRect(x: screen.minX + left, y: 40, width: width, height: 700)
+                    guard window.maxX > screen.minX + 200 else { continue }
+                    let first = NoteRoom.stack(window: window, visible: screen, papers: [NoteRoom.Paper(id: "n", size: openSize, top: 52)], margin: shadow)
+                    guard let to = NoteRoom.narrowed(window: window, visible: screen, note: openSize.width, margin: shadow) else {
+                        // Not narrowed: it had room (and the paper is beside it), or it can't be.
+                        if window.maxX + NoteRoom.gap + openSize.width <= screen.maxX - shadow, window.maxX >= screen.minX {
+                            expect(besideIt(first, "n", window), "room beside the window: the paper beside it", "\(window) \(screen) \(first)")
+                        }
+                        continue
+                    }
+                    let then = NoteRoom.stack(window: to, visible: screen, papers: [NoteRoom.Paper(id: "n", size: openSize, top: 52, was: was(first, "n"))], margin: shadow)
+                    if !(besideIt(then, "n", to) && frame(then, "n").minX == frame(first, "n").minX) {
+                        expect(false, "narrowed: the paper beside the window, where it was", "\(screen) \(window) → \(to): \(first) → \(then)")
+                    }
+                }
+            }
+        }
 
         // A Chromium tab after its browser restarted: found by address, decided over every note it could be.
         var oldTab = NoteStick(kind: .tab)

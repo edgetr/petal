@@ -183,7 +183,8 @@ struct NoteStick: Equatable, Sendable {
         case .passage:
             let quote = "“" + self.quote.prefix(60) + (self.quote.count > 60 ? "…”" : "”")
             return quote + " on " + (url.isEmpty ? (path as NSString).lastPathComponent : NoteText.shortAddress(url))
-        case .tab: return "The page " + (NoteText.shortAddress(url).isEmpty ? title : NoteText.shortAddress(url))
+        // Stuck to the tab itself, wherever it goes: where it shows now.
+        case .tab: return NoteText.shortAddress(url).isEmpty ? "This tab" + (title.isEmpty ? "" : ": “\(title)”") : "This tab, now on " + NoteText.shortAddress(url)
         case .file:
             let name = (path as NSString).lastPathComponent
             if !self.quote.isEmpty {
@@ -983,10 +984,10 @@ enum NoteShelf {
     /// A notebook's cover note's file name.
     static let coverName = "About this notebook.md"
 
-    /// Untouched this long, a note rests as a faint line.
+    /// Untouched this long (neither changed nor opened), a note rests as a faint line.
     static let fadeAfter: TimeInterval = 30 * 86400
 
-    static func faded(modified: Date, now: Date) -> Bool { now.timeIntervalSince(modified) > fadeAfter }
+    static func faded(modified: Date, opened: Date? = nil, now: Date) -> Bool { now.timeIntervalSince(max(modified, opened ?? .distantPast)) > fadeAfter }
 
     /// A notebook's name as a folder name: no slashes, no leading dots.
     static func folderName(_ name: String) -> String {
@@ -2335,13 +2336,42 @@ enum NoteRoom {
     /// The room right of the window, within the screen's visible area.
     static func room(window: CGRect, visible: CGRect) -> CGFloat { visible.maxX - window.maxX }
 
+    /// Whether a paper the person moved (its frame where its spot puts it, not kept on any screen) was left right
+    /// beside its window: mostly right of the window's right edge and starting near it, beside it. Such a paper keeps
+    /// the room made for it (its spot is by the window's right corner: given the width back, it would land over the
+    /// window).
+    static func leftBeside(_ paper: CGRect, window: CGRect) -> Bool {
+        paper.midX >= window.maxX && paper.minX <= window.maxX + 40 && paper.maxY > window.minY && paper.minY < window.maxY
+    }
+
+    /// A screen's visible area (`visible`, AppKit's coordinates, y up) less the strip Petal's own dock takes along
+    /// `position`'s edge of the screen (`screen`), reaching `reach` in from it: macOS leaves room only for its own
+    /// Dock, and Petal's draws over papers. `reach` nil: no dock there, or it hides.
+    static func freeOfDock(visible: CGRect, screen: CGRect, reach: CGFloat?, position: String) -> CGRect {
+        guard let reach, reach > 0 else { return visible }
+        var free = visible
+        switch position {
+        case "left":
+            let edge = min(max(visible.minX, screen.minX + reach), visible.maxX)
+            free = CGRect(x: edge, y: visible.minY, width: visible.maxX - edge, height: visible.height)
+        case "right":
+            free.size.width = max(0, min(visible.maxX, screen.maxX - reach) - visible.minX)
+        default:
+            let edge = min(max(visible.minY, screen.minY + reach), visible.maxY)
+            free = CGRect(x: visible.minX, y: edge, width: visible.width, height: visible.maxY - edge)
+        }
+        return free
+    }
+
     /// The window's frame with room for a note `width` wide on its right, or nil when it has room already or can't
     /// make it (narrowed below its minimum: the note then sits over the window's edge instead). It keeps its left
-    /// edge and shrinks; when that's too narrow it moves left first.
-    static func narrowed(window: CGRect, visible: CGRect, note width: CGFloat) -> CGRect? {
-        let needed = width + gap * 2
-        guard room(window: window, visible: visible) < needed else { return nil }
-        let right = visible.maxX - needed
+    /// edge and shrinks; when that's too narrow it moves left first. `margin`: the room the note's panel keeps inside
+    /// the screen (as `stack` takes it). Has room: `beside` puts the note right of the window, not clamped over it.
+    /// Narrowed: to where `beside` put the note while it had no room (the screen's edge, less the margin and a gap),
+    /// so the note doesn't move sideways as the window narrows under it.
+    static func narrowed(window: CGRect, visible: CGRect, note width: CGFloat, margin: CGFloat = 0) -> CGRect? {
+        guard room(window: window, visible: visible) < width + gap + margin else { return nil }
+        let right = visible.maxX - (width + gap * 2 + margin)
         if right - window.minX >= minimumWidth {
             return CGRect(x: window.minX, y: window.minY, width: right - window.minX, height: window.height)
         }
@@ -2400,6 +2430,179 @@ enum NoteRoom {
         if x + size.width > visible.maxX { x = visible.maxX - size.width - gap }
         let y = min(max(window.minY + top, visible.minY + gap), visible.maxY - size.height - gap)
         return CGRect(x: x, y: max(visible.minY, y), width: size.width, height: size.height)
+    }
+
+    // MARK: Papers beside a window, never over one another
+
+    /// The room kept between two papers above one another.
+    static let spacing: CGFloat = 10
+
+    /// One paper showing on the window in front, for `stack`.
+    struct Paper: Equatable, Sendable {
+        var id: String
+        var size: CGSize
+        /// Where it would sit: points down from the window's top (its line, or its tab's place).
+        var top: CGFloat
+        /// Where the person left it (its spot, as a frame): it stays there, and the others go around it.
+        var moved: CGRect? = nil
+        /// Where it sat at the last layout on this window (NoteRoom.Was).
+        var was: Was? = nil
+        /// Held still (dragged, or being written in): kept where it was (`was`), the others going around it.
+        var held = false
+    }
+
+    /// Where a paper sat at the last layout on a window: its top (points down from the window's top), its left edge
+    /// (points from where `beside` puts a paper of its width: 0 in the column beside the window, so it follows the
+    /// window's edge and the screen's, never a place left from a layout where either was elsewhere), its column and
+    /// its size then.
+    struct Was: Equatable, Sendable {
+        var top: CGFloat
+        var column: Int
+        var x: CGFloat = 0
+        var size: CGSize = .zero
+    }
+
+    struct Placed: Equatable, Sendable {
+        var id: String
+        var frame: CGRect
+        /// The column it's in (0 beside the window; -1 for a paper the person moved).
+        var column: Int
+        /// What the next layout on this window is given as its `was` (nil for a paper the person moved).
+        var was: Was? = nil
+    }
+
+    /// Where every paper showing on a window sits (top-left frames, Accessibility's, as `beside`). One rule:
+    /// - a paper the person moved stays where they left it;
+    /// - a paper held still (dragged, or written in) stays where it was, growing down from its top;
+    /// - every other paper goes at its own line, or the first free room below it, never over another paper: the ones
+    ///   that were already there first, in the order they were down the window (so a paper that grows pushes the ones
+    ///   below it down, and they come back up when it shrinks), then the new ones, by their line (so a new paper takes
+    ///   free room and moves nobody);
+    /// - a paper that was there keeps its left edge; only where it can't stay there (off the screen, or nowhere free
+    ///   at that edge) does it go to another column. Where a paper that changed size (opened, grew) would send a paper
+    ///   nobody touched sideways, the untouched ones keep their places and the changed one goes around them;
+    /// - no room below: the next column (to the right while the screen has room there, then to the left, over the
+    ///   window), from its line, else from the top. With no room anywhere it sits at its line.
+    /// `margin`: the room each paper's panel keeps around it (its shadow) inside `visible`, so what's returned is
+    /// where the panel can really put it. `papers` in a stable order (ties go by it).
+    static func stack(window: CGRect, visible whole: CGRect, papers: [Paper], margin: CGFloat = 0) -> [Placed] {
+        let visible = whole.insetBy(dx: margin, dy: margin)
+        let free = papers.filter { $0.moved == nil }
+        let columns = columns(window: window, visible: visible, width: free.map(\.size.width).max() ?? 0)
+        /// Where `beside` puts a paper `width` wide: what a paper's remembered left edge is counted from.
+        func anchor(_ width: CGFloat) -> CGFloat { beside(window: window, visible: visible, size: CGSize(width: width, height: 0), top: 0).minX }
+        func x(_ width: CGFloat, column: Int) -> CGFloat {
+            if column == 0 { return anchor(width) }
+            return columns.lefts[column] + (columns.toWindow ? 0 : columns.width - width)
+        }
+        func fit(_ y: CGFloat, _ height: CGFloat) -> CGFloat { max(visible.minY, min(max(y, visible.minY + gap), visible.maxY - height - gap)) }
+        func clashes(_ rect: CGRect, _ taken: [CGRect]) -> Bool {
+            let room = rect.insetBy(dx: -(spacing / 2 - 1), dy: -(spacing / 2 - 1))
+            return taken.contains { $0.insetBy(dx: -(spacing / 2 - 1), dy: -(spacing / 2 - 1)).intersects(room) }
+        }
+        /// Its remembered left edge, while a paper of its width there stays on the screen.
+        func remembered(_ paper: Paper) -> CGFloat? {
+            guard let was = paper.was else { return nil }
+            let left = anchor(paper.size.width) + was.x
+            return left >= visible.minX + gap - 0.5 && left + paper.size.width <= visible.maxX + 0.5 ? left : nil
+        }
+        var fixed: [String: Placed] = [:]
+        var taken: [CGRect] = papers.compactMap(\.moved)
+        for paper in papers { if let moved = paper.moved { fixed[paper.id] = Placed(id: paper.id, frame: moved, column: -1) } }
+        // Held still: where it was.
+        for paper in free where paper.held {
+            guard let was = paper.was else { continue }
+            let column = columns.lefts.indices.contains(was.column) ? was.column : 0
+            let left = remembered(paper) ?? x(paper.size.width, column: column)
+            let rect = CGRect(x: left, y: fit(window.minY + was.top, paper.size.height), width: paper.size.width, height: paper.size.height)
+            taken.append(rect)
+            fixed[paper.id] = Placed(id: paper.id, frame: rect, column: column)
+        }
+        /// The rest placed one by one in `order`, around what's taken already. `stay`: these try the very spot they
+        /// had first.
+        func place(_ order: [Paper], stay: Set<String> = []) -> [String: Placed] {
+            var taken = taken
+            var placed: [String: Placed] = [:]
+            for paper in order {
+                let size = paper.size
+                let line = fit(window.minY + paper.top, size.height)
+                if stay.contains(paper.id), let was = paper.was, let left = remembered(paper) {
+                    let rect = CGRect(x: left, y: window.minY + was.top, width: size.width, height: size.height)
+                    if rect.minY >= visible.minY, rect.maxY <= visible.maxY + 0.5, !clashes(rect, taken) {
+                        taken.append(rect)
+                        placed[paper.id] = Placed(id: paper.id, frame: rect, column: max(0, was.column))
+                        continue
+                    }
+                }
+                // Where it was first (its own left edge, its own column), then each column.
+                var tries: [(left: CGFloat, column: Int)] = []
+                if let left = remembered(paper), let was = paper.was { tries.append((left, max(0, was.column))) }
+                tries += columns.lefts.indices.map { (x(size.width, column: $0), $0) }
+                var found: (rect: CGRect, column: Int)?
+                search: for (left, column) in tries {
+                    // At its line, or right under a paper in the way; past the first column, from the top too.
+                    var ys = [line] + taken.map { $0.maxY + spacing }
+                    if column > 0 { ys.append(visible.minY + gap) }
+                    let below = ys.filter { $0 >= line }.sorted(), above = column > 0 ? ys.filter { $0 < line }.sorted() : []
+                    for y in below + above where y >= visible.minY && y + size.height <= visible.maxY - gap + 0.5 {
+                        let rect = CGRect(x: left, y: y, width: size.width, height: size.height)
+                        if !clashes(rect, taken) { found = (rect, column); break search }
+                    }
+                }
+                let rect = found?.rect ?? CGRect(x: x(size.width, column: 0), y: line, width: size.width, height: size.height)
+                taken.append(rect)
+                placed[paper.id] = Placed(id: paper.id, frame: rect, column: found?.column ?? 0)
+            }
+            return placed
+        }
+        // Those that were here, in their order down the window, then the new ones by their line.
+        let rest = free.enumerated().filter { fixed[$0.element.id] == nil }
+        func byPlace(_ a: (offset: Int, element: Paper), _ b: (offset: Int, element: Paper)) -> Bool {
+            switch (a.element.was, b.element.was) {
+            case let (x?, y?): return (x.column, x.top, a.offset) < (y.column, y.top, b.offset)
+            case (.some, nil): return true
+            case (nil, .some): return false
+            case (nil, nil): return (a.element.top, a.offset) < (b.element.top, b.offset)
+            }
+        }
+        var placed = place(rest.sorted(by: byPlace).map(\.element))
+        // A paper nobody touched (there before, the same size) sent sideways, or moved at all from a column where no
+        // paper changed: the untouched ones first, where they were, and the ones that changed go around them. (Below
+        // a paper that grew, in its own column, one is still pushed down with it.)
+        let untouched = { (paper: Paper) in paper.was.map { $0.size == paper.size } == true }
+        let changedLefts = rest.compactMap { item in untouched(item.element) ? nil : remembered(item.element) }
+        let disturbed = rest.contains { item in
+            let paper = item.element
+            guard untouched(paper), let was = paper.was, let left = remembered(paper), let frame = placed[paper.id]?.frame else { return false }
+            if abs(frame.minX - left) > 0.5 { return true }
+            let own = !changedLefts.contains { abs($0 - left) <= 0.5 }
+            return own && abs(frame.minY - (window.minY + was.top)) > 0.5
+        }
+        if disturbed {
+            let first = rest.filter { untouched($0.element) }.sorted(by: byPlace), then = rest.filter { !untouched($0.element) }.sorted(by: byPlace)
+            placed = place((first + then).map(\.element), stay: Set(first.map(\.element.id)))
+        }
+        return papers.compactMap { paper in
+            guard var spot = fixed[paper.id] ?? placed[paper.id] else { return nil }
+            if spot.column >= 0 {
+                spot.was = Was(top: spot.frame.minY - window.minY, column: spot.column, x: spot.frame.minX - anchor(spot.frame.width), size: spot.frame.size)
+            }
+            return spot
+        }
+    }
+
+    /// The columns papers `width` wide may go in beside a window: the first beside it (as `beside` puts one), then to
+    /// the right while the screen has room, then to the left over the window. `toWindow`: the first column sits by
+    /// the window's edge (papers line up on their left), else on the screen's right edge (they line up on their right).
+    static func columns(window: CGRect, visible: CGRect, width: CGFloat) -> (lefts: [CGFloat], width: CGFloat, toWindow: Bool) {
+        let first = beside(window: window, visible: visible, size: CGSize(width: width, height: 0), top: 0).minX
+        let toWindow = first == window.maxX + gap
+        var lefts = [first]
+        var right = first + width + gap
+        while toWindow, right + width <= visible.maxX { lefts.append(right); right += width + gap }
+        var left = first - width - gap
+        while width > 0, left >= visible.minX + gap { lefts.append(left); left -= width + gap }
+        return (lefts, width, toWindow)
     }
 }
 

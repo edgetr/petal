@@ -166,6 +166,15 @@ extension NoteShield {
     /// What a line says when it can't be checked right now.
     static let working: Shielded = "Working…"
 
+    /// A note's title as a helper's tile in the AI button's preview names it: its whole body redacted with the vault's
+    /// index when that's already made and readable (`VaultIndex.cached`), then its title derived; else `fallback`
+    /// (its app's name). Never a hop, never a wait.
+    static func previewTitle(body: String, index: UIMap.SecretIndex?, fallback: String) -> String {
+        guard let index, !index.unreadable, let made = shield([body], index: index)?.first else { return fallback }
+        let title = made.title.text
+        return title.isEmpty ? fallback : title
+    }
+
     /// A line shown outside its own chat (the AI button's preview, a note's status line, the pointer's caption), with
     /// no wait: redacted now, where it's made, with the vault's index when that's already made and readable
     /// (`VaultIndex.cached`, which never reads the Keychain); else a plain generic line. Never a hop, never a wait.
@@ -186,6 +195,11 @@ extension NoteShield {
     static func place(_ stick: NoteStick, appPrivate: Bool, index: UIMap.SecretIndex) -> (words: Shielded, quote: Shielded)? {
         guard !index.unreadable else { return nil }
         let place = (appPrivate ? stick.scrubbed : stick).redacted { index.redacted($0) }
+        // A tab's page with its title and whole address (the letterhead's short form drops a video's id).
+        if place.kind == .tab, !place.url.isEmpty {
+            let title = place.title.isEmpty ? "" : " “\(place.title)”"
+            return (Shielded(verified: "The page\(title) at \(place.url)"), Shielded(verified: place.quote))
+        }
         return (Shielded(verified: place.words), Shielded(verified: place.quote))
     }
 }

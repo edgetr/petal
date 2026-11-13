@@ -177,8 +177,8 @@ final class ComputerUse {
 
     /// Why Petal can't use apps now (turned off, or no Accessibility), or nil.
     func refusal() -> String? {
-        guard app.config.bool("computerUse") else { return "Using apps is off in Petal's settings (computerUse); only the person can turn it on." }
-        guard Windows.trusted else { return "Petal needs Accessibility for this (Petal's settings, Permissions)." }
+        guard app.config.bool("computerUse") else { return "Using apps is off (computerUse). The person turns it on in Settings › Petal AI; only they can." }
+        guard Windows.trusted else { return Assist.askAccessibility() }
         return nil
     }
 
@@ -243,12 +243,16 @@ final class ComputerUse {
         Self.readQueue.async {
             // Its caller went while this waited its turn: nothing is read for nobody.
             if gone?() == true { return }
-            if let tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
-                return DispatchQueue.main.async { MainActor.assumeIsolated { self.waitsFor(caller, .tab) }; fail(ClaudePanel.tabNotShowing) }
+            if let tabPlace, case let state = ClaudePanel.tabState(tabPlace), state.showing == nil {
+                return DispatchQueue.main.async {
+                    MainActor.assumeIsolated { if state == .another { self.waitsFor(caller, .tab) } }
+                    fail(ClaudePanel.tabWords(state, browser: tabPlace.appName))
+                }
             }
             // Read again if the vault (or a secret Petal typed) changed meanwhile: nothing goes out unchecked against it.
             let settled = VaultIndex.settled { _ in Reader.read(pid: pid, window: wanted, budget: 1.5) }
-            let seen = tabPlace.flatMap { ClaudePanel.tabShowing($0) }
+            let after = tabPlace.map { ClaudePanel.tabState($0) }
+            let seen = after?.showing
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Turned off, or the app made private, while it read: nothing it read goes back.
@@ -272,7 +276,10 @@ final class ComputerUse {
                     // Another tab came forward while it read (or Petal can't tell any more): nothing it read goes back.
                     var stuckTab: NotePlace?
                     if let tabPlace {
-                        guard let seen, seen.window == reading.windowID else { self.waitsFor(caller, .tab); return fail(ClaudePanel.tabNotShowing) }
+                        guard let seen, seen.window == reading.windowID else {
+                            if after == .another { self.waitsFor(caller, .tab) }
+                            return fail(ClaudePanel.tabWords(after ?? .unsure(.unknown), browser: tabPlace.appName))
+                        }
                         self.app.claude.tabSeen(note: caller, was: tabPlace, tab: seen.tab, window: seen.window)
                         var now = tabPlace
                         if let tab = now.tab { now.tab = NoteRules.follow(tab, to: seen.tab, keepWords: true) }
@@ -631,13 +638,12 @@ final class ComputerUse {
         let caller = job.caller, name = job.appName, bundle = job.bundle, caption = job.caption
         let send = job.send, fail = job.fail
         let first = caption.prefix(1).lowercased() + caption.dropFirst()
-        let lasting = session.turn == Self.outside ? "For this task" : "Until this reply is done"
-        // A note on its own window works there in the background: said so, since nothing will show it working.
-        let detail = job.map.hidden
-            ? "First, \(first). \(lasting) it can press and type in a \(name) window on a display of its own, out of your way: nothing comes forward, and your pointer and keyboard stay yours. Stop it from its note or the AI button."
-            : job.map.ownPlace
-            ? "First, \(first). \(lasting) it can press and type in this note's \(name) window in the background, while you work elsewhere: nothing comes forward, and your pointer and keyboard stay yours. Stop it from its note."
-            : "First, \(first). \(lasting) it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it."
+        let lasting = session.turn == Self.outside ? "for this task" : "for this reply"
+        // How it works there, in a few words: in the background on a note's own window, on a display of its own, or
+        // in front with its own pointer.
+        let detail = job.map.hidden ? "First: \(first). On a display of its own, \(lasting)."
+            : job.map.ownPlace ? "First: \(first). In the background, \(lasting)."
+            : "First: \(first). With its own pointer, \(lasting). Esc stops it."
         assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?", wants: "use \(name)", detail: detail,
                    owner: caller) { allowed in
             // The note was stuck somewhere else while the person was asked (its card was taken away): look again.
@@ -645,7 +651,7 @@ final class ComputerUse {
             // Its turn ended, the person stopped it, or turned it off, while they were asked.
             if job.cancel.stopped { return fail(self.whyStopped(job)) }
             guard allowed else {
-                return send(["declined": "The person didn't let Petal AI use \(name). Don't find another way; say what you would have done."])
+                return send(["declined": self.assist.declined("The person didn't let Petal AI use \(name). Don't find another way; say what you would have done.")])
             }
             guard self.sessions[caller]?.cancel === session.cancel else { return fail(Self.stoppedText) }
             if let refusal = self.refusal(for: bundle, name: name) { return fail(refusal) }
@@ -883,8 +889,9 @@ final class ComputerUse {
         Self.actQueue.async {
             let before = display == nil ? [] : Set(RunDisplays.windowNumbers(pid: map.pid).keys)
             var outcome = Acting.Outcome()
-            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
-                outcome.needs = .tab
+            if let tabPlace = map.tabPlace, case let state = ClaudePanel.tabState(tabPlace), state.showing == nil {
+                // Another tab showing: the note waits for its tab. Petal can't tell which: said so, never "switch tabs".
+                if state == .another { outcome.needs = .tab } else { outcome.error = ClaudePanel.tabWords(state, browser: tabPlace.appName) }
             } else if !cancel.stopped {
                 let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options)
                 if let error = checked.error {
@@ -982,9 +989,9 @@ final class ComputerUse {
         cursor.preparing(job.caption, near: Self.screenPoint(near))
         Self.actQueue.async {
             // A tab note's tab must still be the one its window shows.
-            if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
+            if let tabPlace = map.tabPlace, case let state = ClaudePanel.tabState(tabPlace), state.showing == nil {
                 return DispatchQueue.main.async {
-                    MainActor.assumeIsolated { self.cursor.rest(); job.fail(ClaudePanel.tabNotShowing); self.finished() }
+                    MainActor.assumeIsolated { self.cursor.rest(); job.fail(ClaudePanel.tabWords(state, browser: tabPlace.appName)); self.finished() }
                 }
             }
             let prepared = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options)
@@ -1000,8 +1007,8 @@ final class ComputerUse {
                             if !cancel.stopped {
                                 // Right before the change: a tab note's tab still showing, then the window (its title
                                 // is the tab's), what's selected in it, what has the keyboard and the control, again.
-                                if let tabPlace = map.tabPlace, ClaudePanel.tabShowing(tabPlace) == nil {
-                                    outcome.error = ClaudePanel.tabNotShowing
+                                if let tabPlace = map.tabPlace, case let state = ClaudePanel.tabState(tabPlace), state.showing == nil {
+                                    outcome.error = ClaudePanel.tabWords(state, browser: tabPlace.appName)
                                 } else {
                                     let checked = Acting.prepare(job.action, entry: job.entry, map: map, options: job.options, known: prepared)
                                     // A note's act, decided while its window was in front: still so, and the person
@@ -1280,6 +1287,9 @@ enum Reader {
         /// that holds one, with the secret's parts (`UIMap.guardedSecrets`): selecting it a little at a time would
         /// show it whole.
         var guarded: [Int: [String]] = [:]
+        /// For a read of the window's words (`words`): every element as read, before anything of it was hidden (by
+        /// the same index as `nodes`), so what's told can be checked whole for a secret shown in pieces.
+        var raw: [UINode] = []
     }
 
     static let attributes = [kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute, kAXHelpAttribute,
@@ -1290,9 +1300,18 @@ enum Reader {
                                       "AXPopUpButton", "AXMenuButton", "AXComboBox", "AXIncrementor", "AXColorWell", "AXSearchField", "AXImage"]
     static let listRoles: Set<String> = ["AXTable", "AXOutline", "AXList", "AXBrowser"]
 
+    /// Controls whose insides are only their own label or a menu, for a read of the window's words (`words`): links,
+    /// buttons and cells are walked into for the words in them.
+    static let wordLeaves: Set<String> = ["AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXPopUpButton", "AXMenuButton",
+                                          "AXImage", "AXSlider", "AXIncrementor", "AXColorWell"]
+
     /// `deep`: also read every other control's text, for `holdsSecret` (a dashboard's key shown as plain text).
     /// `focus`: controls whose orders are noted (`focusOrders`), to tell whether one is a piece of a joined secret.
-    static func read(pid: pid_t, window wanted: UInt32?, budget: TimeInterval, deep: Bool = false, focus: [AXUIElement] = []) -> Reading {
+    /// `words`: for petal_look's text: every element read is kept in `nodes` (not only the controls), deeper and
+    /// further than for petal_ui, each text whole up to `WindowText.pieceCap` with only a vault secret's part of it
+    /// hidden (`UIMap.redactWords`), and nothing kept for acting.
+    static func read(pid: pid_t, window wanted: UInt32?, budget: TimeInterval, deep: Bool = false, focus: [AXUIElement] = [],
+                     words: Bool = false) -> Reading {
         var reading = Reading()
         // An Electron app's tree, asked for the first time, fills in a moment later.
         if AccessibilityTree.wake(pid) { usleep(300_000) }
@@ -1330,7 +1349,7 @@ enum Reader {
         var told: [Int] = []
         var own: [Int: [String]] = [:]
         while let (element, depth, clip, web, parent, sibling) = stack.popLast() {
-            if visited >= 5000 || Date() > deadline { reading.timedOut = true; break }
+            if visited >= (words ? 20_000 : 5000) || Date() > deadline { reading.timedOut = true; break }
             visited += 1
             let values = Self.values(element, attributes)
             let role = values[kAXRoleAttribute] as? String ?? ""
@@ -1382,37 +1401,38 @@ enum Reader {
             let parts = UIMap.ownSecrets(node, secret: secret, parts: vault.parts)
             if !parts.isEmpty { own[order] = parts }
             let holds = UIMap.holdsSecret(node, filled: filled, secret: secret)
-            node = UIMap.redact(node, filled: filled, secret: secret)
+            node = words ? UIMap.redactWords(node, filled: filled, secret: secret, redacted: vault.redacted)
+                         : UIMap.redact(node, filled: filled, secret: secret)
             if holds {
                 reading.holdsSecret = true
             } else if deep, !UIMap.valueRoles.contains(role), vault.matches(text(Windows.value(element, kAXValueAttribute) as CFTypeRef?, whole: true)) {
                 reading.holdsSecret = true
             }
-            for path in [\UINode.title, \.label, \.help, \.placeholder] { node[keyPath: path] = String(node[keyPath: path].prefix(200)) }
-            node.value = String(node.value.prefix(400))
-            if UIMap.pressableRoles.contains(role), depth > 0, !UIMap.name(node).isEmpty {
+            for path in [\UINode.title, \.label, \.help, \.placeholder] { node[keyPath: path] = String(node[keyPath: path].prefix(words ? 2000 : 200)) }
+            node.value = String(node.value.prefix(words ? WindowText.pieceCap : 400))
+            if !words, UIMap.pressableRoles.contains(role), depth > 0, !UIMap.name(node).isEmpty {
                 node.pressable = actions(element).contains(kAXPressAction as String)
             }
             walked.append(node)
-            if UIMap.isActionable(node) {
+            if !words, UIMap.isActionable(node) {
                 told.append(order)
                 reading.elements[order] = element
                 reading.meanings[order] = meaning
             }
             if listRoles.contains(role), reading.lists.count < 6 { reading.lists.append(element) }
             order += 1
-            guard depth < 40, !leaves.contains(role) else { continue }
+            guard depth < (words ? 100 : 40), !(words ? wordLeaves : leaves).contains(role) else { continue }
             var inner = clip
             if role == "AXScrollArea", node.frame.width > 0 { inner = clip.map { $0.intersection(node.frame) } ?? node.frame }
             // Long tables and lists: only the rows showing.
             let children: [AXUIElement]
-            if listRoles.contains(role) {
+            if listRoles.contains(role), !words {
                 children = Windows.value(element, "AXVisibleRows") ?? Windows.value(element, "AXVisibleChildren") ?? Windows.value(element, kAXChildrenAttribute) ?? []
             } else {
                 children = Windows.value(element, kAXChildrenAttribute) ?? []
             }
             let me = order - 1
-            for (index, child) in children.prefix(500).enumerated().reversed() {
+            for (index, child) in children.prefix(words ? 2000 : 500).enumerated().reversed() {
                 stack.append((child, depth + 1, inner, web || role == "AXWebArea", me, index))
             }
         }
@@ -1427,6 +1447,7 @@ enum Reader {
         }
         for index in reading.joined { UIMap.hideAll(&walked[index]) }
         reading.guarded = UIMap.guardedSecrets(whole, own: own)
+        if words { reading.nodes = walked; reading.raw = whole; return reading }
         reading.nodes = told.map { walked[$0] }
         reading.fingerprint = fingerprint(app: app, window: window, lists: reading.lists)
         return reading

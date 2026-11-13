@@ -461,17 +461,25 @@ final class NoteDesk {
     /// Shows a few words by what the person just clicked (true when it did); else they're said by the AI button.
     @ObservationIgnored private var sayNear: ((String) -> Bool)?
 
-    private func say(_ text: String) {
+    private func say(_ text: String, about key: String? = nil) {
         heard?(text)
         // Said where the person is looking when whoever asked can show it there (Note by a selection).
         if let near = sayNear, near(text) { return }
-        // Said by the AI button of the dock under the pointer (never a window-list lookup on the main thread); with
-        // macOS's Dock chosen there's no button to say it by.
+        // Said by the AI button of the dock under the pointer (never a window-list lookup on the main thread), else
+        // by the note pad, whether or not names show on hover.
         let mouse = NSEvent.mouseLocation
-        guard app.docks.shown, let dock = app.docks.panels.values.first(where: { $0.screen?.frame.contains(mouse) == true })?.dock
-                ?? app.docks.panels.values.first?.dock else { return }
-        app.tooltips.show(text, over: "claude", in: dock)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.app.tooltips.show(nil, over: "claude", in: dock) }
+        if app.docks.shown, let dock = app.docks.panels.values.first(where: { $0.screen?.frame.contains(mouse) == true })?.dock
+            ?? app.docks.panels.values.first?.dock,
+           let slot = ["claude", DockView.padSlot].first(where: { dock.panel?.screenFrame(of: $0) != nil }) {
+            app.tooltips.show(text, over: slot, in: dock, always: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { self.app.tooltips.show(nil, over: slot, in: dock) }
+            return
+        }
+        // No button to say it by (macOS's Dock chosen, no AI and no note pad): on the paper concerned, while it shows
+        // open.
+        guard let key = key ?? keyboard, faces[key] == .open, isShowing(key), let id = store.paper(key)?.noteID else { return }
+        helpers.hints[id] = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { MainActor.assumeIsolated { if self.helpers.hints[id] == text { self.helpers.hints[id] = nil } } }
     }
 
     // MARK: What's in front
@@ -682,6 +690,8 @@ final class NoteDesk {
                 if let index = NoteMatch.best(paper.file.places, scene, excluding: excluded[paper.key] ?? []) { fits[paper.key] = index }
             }
         }
+        // Papers whose place in front was left (another window or tab): an empty new one among them is let go.
+        let left = Set(here.keys).subtracting(fits.keys)
         if fits != here { here = fits }
         // Only now that `here` says what's in front: a running helper follows its note's places.
         helpers.placesFollow()
@@ -695,6 +705,13 @@ final class NoteDesk {
             // Notes that were open on the window left behind fold.
             for (key, face) in faces where face == .open && fits[key] == nil { faces[key] = .folded }
             }
+        // Another window or tab in front: an empty new note whose place was left goes (open there, it folds first).
+        // Only one that was showing there: a note made for a window still coming forward (a drop on one behind) stays.
+        for key in left where self.fresh.contains(key) && placedOnce.contains(key) {
+            if faces[key] == .open || faces[key] == .back { faces[key] = .folded }
+            if keyboard == key { keyboard = nil }
+            letGoIfEmpty(key)
+        }
         layout()
         if scan || moved { findPassages(scene) }
         placeDesktop()
@@ -1078,12 +1095,22 @@ final class NoteDesk {
 
     private var primaryHeight: CGFloat { Screens.all.first?.frame.height ?? 0 }
 
-    /// The visible frame (Accessibility's coordinates) of the screen a window is on.
+    /// The visible frame (Accessibility's coordinates) of the screen a window is on, less Petal's dock (paperArea).
     private func visible(for window: CGRect) -> CGRect? {
         let screens = Screens.all
         guard let screen = NoteRules.screen(for: NoteRules.appKitFrame(window, primaryHeight: primaryHeight), in: screens.map(\.frame)),
-              let visible = screens.first(where: { $0.frame == screen })?.visibleFrame else { return nil }
+              let visible = screens.first(where: { $0.frame == screen }).map(Self.paperArea) else { return nil }
         return CGRect(x: visible.minX, y: primaryHeight - visible.maxY, width: visible.width, height: visible.height)
+    }
+
+    /// Where papers may go on a screen (AppKit's coordinates): its visible area less the strip Petal's own dock takes
+    /// there while it shows (it draws over papers, and macOS keeps room only for its own Dock).
+    static func paperArea(_ screen: NSScreen) -> NSRect {
+        let app = PetalApp.shared
+        guard !Headless.on, let docks = app.docks, app.config.whichDock == "petal" else { return screen.visibleFrame }
+        let panel = docks.panels.values.first { $0.screenRef?.frame == screen.frame }
+        let reach = panel.flatMap { $0.hides ? nil : $0.reach }
+        return NoteRoom.freeOfDock(visible: screen.visibleFrame, screen: screen.frame, reach: reach, position: app.config.position)
     }
 
     /// The tabs on the window in front, and its notes that are showing beside it.
@@ -1096,6 +1123,7 @@ final class NoteDesk {
         defer { reconcileRoom() }
         prunePassageGeometry()
         guard on, let frame, let scene, scene.window != nil else {
+            placedBeside = []
             for panel in tabPanels.values { panel.conceal() }
             for panel in pinPanels.values { panel.conceal() }
             concealUnplaced()
@@ -1106,10 +1134,10 @@ final class NoteDesk {
         // While a browser's tab is read again, its tab and passage notes stay hidden (tabs, papers and pins).
         let edgeNotes = here.keys.sorted().compactMap { key -> EdgeNote? in
             guard let paper = store.paper(key), !hiddenForTab(key) else { return nil }
-            return EdgeNote(id: key, line: lines[key], color: notebookKey(paper.notebook), faded: NoteShelf.faded(modified: paper.file.modified, now: now))
+            return EdgeNote(id: key, line: lines[key], color: notebookKey(paper.notebook),
+                            faded: NoteShelf.faded(modified: paper.file.modified, opened: local.opened?[paper.noteID], now: now))
         }
         let tabs = EdgeLayout.tabs(edgeNotes, height: frame.height)
-        let visible = visible(for: frame) ?? frame
         // Inside the window's right edge, as the sketch has them; the window's own edge stays in sight beside them.
         let outside = false
         var keep: Set<String> = []
@@ -1124,33 +1152,75 @@ final class NoteDesk {
             spareTab(panel)
             tabPanels[key] = nil
         }
-        // The notes showing on this window, stacked down its right side where nobody moved them.
-        var placed: [CGRect] = []
-        let showing = here.keys.filter { faces[$0] != nil && !hiddenForTab($0) && standalone[$0] == nil }.sorted { (lines[$0] ?? 0, $0) < (lines[$1] ?? 0, $1) }
+        edgeTabs = tabs
+        let showing = placeBeside()
+        // Shown only where its one placement says it belongs now; every other paper hidden.
+        for (key, panel) in panels where !showing.contains(key) && !NoteShelf.restsOffWindow(placementNow(key)) { panel.conceal() }
+        drawPins(showing)
+        reconcilePassages()
+    }
+
+    /// The window in front's tabs as last laid out: where a paper with no line of its own would sit.
+    @ObservationIgnored private var edgeTabs: [EdgeTab] = []
+    /// Where each paper beside a window sat at its last layout there (its top and column, NoteRoom.Was, and whether
+    /// it was open), by window: the order they keep down the window, and where one held still stays.
+    @ObservationIgnored private var besides: [UInt32: [String: (was: NoteRoom.Was, open: Bool)]] = [:]
+    /// The papers placed beside the window in front by the last layout.
+    @ObservationIgnored private var placedBeside: Set<String> = []
+    /// New notes that have been placed beside their window at least once (an empty one is let go only once its place
+    /// is left after that).
+    @ObservationIgnored private var placedOnce: Set<String> = []
+
+    /// The notes showing on the window in front, placed beside it the one way (NoteRoom.stack): where the person
+    /// left one, it stays; the others at their lines, never over one another. Returns them, in order.
+    private func placeBeside() -> [String] {
+        guard let frame, let number = scene?.window else { placedBeside = []; return [] }
+        let visible = visible(for: frame) ?? frame
+        let showing = here.keys.filter { faces[$0] != nil && !hiddenForTab($0) && standalone[$0] == nil }.sorted()
+        let was = besides[number] ?? [:]
+        var papers: [NoteRoom.Paper] = []
         for key in showing {
             let panel = panel(for: key)
             // Placed by its window (it fits the window in front): not the Desktop's or the screen's, whatever else
             // it's stuck to.
             panel.rest = .window
             let size = panel.paperSize
-            var rect: CGRect
-            if let spotted = spotFrame(key, size: size) {
-                // Where the person left it, by its window's nearest corner: over the window or anywhere else.
-                rect = spotted
-            } else {
-                let top = lines[key] ?? tabs.first { $0.ids.contains(key) }?.y ?? EdgeLayout.top
-                var ax = NoteRoom.beside(window: frame, visible: visible, size: size, top: top)
-                while let clash = placed.first(where: { $0.intersects(ax) }), ax.maxY < visible.maxY { ax.origin.y = clash.maxY + 10 }
-                placed.append(ax)
-                rect = NoteRules.appKitFrame(ax, primaryHeight: primaryHeight)
-            }
-            panel.place(paperFrame: rect)
-            shown(key, panel)
+            // Its line; with none, its tab's place, or higher where it already sat (a new note's tab taking a place
+            // above never moves a paper down).
+            let tab = edgeTabs.first { $0.ids.contains(key) }?.y ?? EdgeLayout.top
+            let top = lines[key] ?? min(tab, was[key]?.was.top ?? tab)
+            // Where the person left it, by its window's nearest corner: over the window or anywhere else.
+            let moved = spotFrame(key, size: size).map { NoteRules.appKitFrame($0, primaryHeight: primaryHeight) }
+            // Held by the pointer, or being written in (open with the keyboard, and open already at the last layout:
+            // the moment it opens it still goes around a paper the person moved): it stays still, and the others go
+            // around it.
+            let held = panel.held || (keyboard == key && faces[key] == .open && was[key]?.open == true)
+            papers.append(NoteRoom.Paper(id: key, size: size, top: top, moved: moved, was: was[key]?.was, held: held))
         }
-        // Shown only where its one placement says it belongs now; every other paper hidden.
-        for (key, panel) in panels where !showing.contains(key) && !NoteShelf.restsOffWindow(placementNow(key)) { panel.conceal() }
+        var record: [String: (was: NoteRoom.Was, open: Bool)] = [:]
+        // Each panel keeps its shadow's margin around its paper on the screen: placed where the panel really goes.
+        for spot in NoteRoom.stack(window: frame, visible: visible, papers: papers, margin: PaperLook.margin) {
+            guard let panel = panels[spot.id] else { continue }
+            if let was = spot.was { record[spot.id] = (was, faces[spot.id] == .open) }
+            panel.place(paperFrame: NoteRules.appKitFrame(spot.frame, primaryHeight: primaryHeight))
+        }
+        if besides[number] == nil, besides.count >= 24 { besides = [:] }
+        besides[number] = record
+        placedBeside = Set(showing)
+        placedOnce.formUnion(showing.filter(fresh.contains))
+        // Each placed first, then the keyboard for one that waited for it (taking it fits that paper again).
+        for key in showing { if let panel = panels[key] { shown(key, panel) } }
+        return showing
+    }
+
+    /// A paper beside the window in front changed size (opened, its writing grew, a helper's answer came): every
+    /// paper there placed again, so the ones below it move with it. False: it isn't placed beside the window now.
+    func refitBeside(_ key: String) -> Bool {
+        guard on, !missionControlOpen, !awaitingRead, placedBeside.contains(key), frame != nil else { return false }
+        let showing = placeBeside()
+        guard showing.contains(key) else { return false }
         drawPins(showing)
-        reconcilePassages()
+        return true
     }
 
     /// Where a paper the person moved sits on the window in front (its NoteSpot, by the window's nearest corner), at
@@ -1350,7 +1420,10 @@ final class NoteDesk {
     /// near the middle of the screen under the pointer): from the Petal Notes window or a notebook's stack. It shows
     /// through layout like every paper, and folding it or clicking away puts it away.
     func openStandalone(_ key: String, at point: CGPoint? = nil, fromLibrary: Bool = false) {
-        guard on, takesChanges(), store.paper(key) != nil else { return }
+        guard on, takesChanges(), let paper = store.paper(key) else { return }
+        // Opened counts as touched: a note read often doesn't fade.
+        local.opened = (local.opened ?? [:]).merging([paper.noteID: Date()]) { _, new in new }
+        local.save(pending: store.pendingIDs)
         let mouse = NSEvent.mouseLocation
         let screen = (Screens.all.first { $0.frame.contains(mouse) } ?? Screens.main)?.visibleFrame ?? .zero
         let corner = point ?? CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
@@ -1389,6 +1462,7 @@ final class NoteDesk {
     private func closeStandalone(_ key: String, escape: Bool) {
         keyboardWanted.cancel(key)
         editors[key]?.flush()
+        petalWanted.remove(key)
         let fromLibrary = standalone.removeValue(forKey: key)?.fromLibrary == true
         faces[key] = nil
         if keyboard == key { keyboard = nil }
@@ -1463,7 +1537,7 @@ final class NoteDesk {
                 origin = CGPoint(x: point[0], y: point[1])
             } else {
                 // Nobody put it anywhere yet (a tool stuck it there): down the main screen's right side.
-                origin = NoteShelf.screenRest(index: resting, visible: Screens.all.first?.visibleFrame ?? .zero, paper: PaperLook.folded)
+                origin = NoteShelf.screenRest(index: resting, visible: Screens.all.first.map(Self.paperArea) ?? .zero, paper: PaperLook.folded)
                 resting += 1
             }
             panel.place(paperFrame: CGRect(x: origin.x, y: origin.y - size.height, width: size.width, height: size.height))
@@ -1478,6 +1552,7 @@ final class NoteDesk {
             }
             for (index, paper) in notes.enumerated() {
                 showing.insert(paper.key)
+                if fresh.contains(paper.key) { placedOnce.insert(paper.key) }
                 if faces[paper.key] == nil { faces[paper.key] = .folded }
                 let panel = panel(for: paper.key)
                 panel.rest = .desktop
@@ -1490,6 +1565,7 @@ final class NoteDesk {
                 shown(paper.key, panel)
             }
         }
+        leftDesktops()
         for (key, panel) in panels where panel.desktop && !showing.contains(key) {
             panel.rest = .window
             panel.conceal()
@@ -1517,6 +1593,8 @@ final class NoteDesk {
         faces[key] = .open
         keyboard = key
         local.shown = Array(Set(local.shown + [paper.noteID]))
+        // Opened counts as touched: a note read often doesn't fade.
+        local.opened = (local.opened ?? [:]).merging([paper.noteID: Date()]) { _, new in new }
         local.save(pending: store.pendingIDs)
         faceChanged(key)
         wantKeyboard(key, expecting: expecting)
@@ -1543,16 +1621,19 @@ final class NoteDesk {
         if standalone[key] != nil { return closeStandalone(key, escape: escape) }
         keyboardWanted.cancel(key)
         let hadKeyboard = panels[key]?.isKeyWindow == true
-        // Nothing to fold (a folded paper that took the keyboard, say by being dragged): Escape still hands it back.
+        // Already folded (a folded paper that took the keyboard, say by being clicked or dragged): Escape puts it away
+        // where it can be, and hands the keyboard back.
         guard faces[key] == .open || faces[key] == .back else {
+            if escape, putsAway(key) { putAway(key) }
             if escape && hadKeyboard { giveKeyboardBack() }
             return
         }
         Self.roomTurn.cancel()
         editors[key]?.flush()
+        petalWanted.remove(key)
         faces[key] = .folded
         if keyboard == key { keyboard = nil }
-        letGoIfEmpty(key)
+        // (An empty new note stays: it's let go of only once its window is left or it's put away.)
         faceChanged(key)
         if hadKeyboard { giveKeyboardBack() }
     }
@@ -1610,9 +1691,64 @@ final class NoteDesk {
         }
     }
 
+    /// An empty new note on a Desktop only, shown there before, whose Desktop no screen shows now (the person went to
+    /// another): let go, as one on a window is when its window is left.
+    private func leftDesktops() {
+        let showing = Set(Self.spaces.values)
+        guard !showing.isEmpty else { return }
+        for key in Array(fresh) where standalone[key] == nil && placedOnce.contains(key) {
+            guard let places = store.paper(key)?.file.places, !places.isEmpty, places.allSatisfy({ $0.kind == .desktop }),
+                  !places.contains(where: { $0.desktop.map(showing.contains) ?? false }) else { continue }
+            if faces[key] == .open || faces[key] == .back { faces[key] = .folded }
+            if keyboard == key { keyboard = nil }
+            letGoIfEmpty(key)
+        }
+    }
+
+    /// The corner's @: the paper open (it opens first when folded or turned over), and a new "@Petal " line at the end
+    /// of its writing with the cursor after it.
+    func askPetal(_ key: String) {
+        // A read-only paper (one of a conflict's) has no editor to write the line in: nothing waits for one.
+        guard let paper = store.paper(key), !store.readOnly(paper) else { return }
+        if faces[key] != .open { open(key) }
+        guard faces[key] == .open else { return }
+        if let editor = editors[key] { return editor.startPetal() }
+        // Its editor isn't made yet: once it's registered.
+        petalWanted.insert(key)
+    }
+
+    @ObservationIgnored private var petalWanted: Set<String> = []
+
+    /// "@Petal " was put in: the paper says what to do next, until a run says more.
+    func askHint(_ key: String) {
+        guard let id = store.paper(key)?.noteID else { return }
+        let words = "Write what you want, then press Return."
+        helpers.hints[id] = words
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { MainActor.assumeIsolated { if self.helpers.hints[id] == words { self.helpers.hints[id] = nil } } }
+    }
+
+    /// Whether a paper can be put away where it shows now: on a window (its tab brings it back), brought up for a
+    /// while (a summoned note), or opened on its own. One on its own Desktop or kept on the screen stays there.
+    func putsAway(_ key: String) -> Bool {
+        // An empty new note too, wherever it is: putting it away lets it go.
+        if standalone[key] != nil || helpers.summoned.contains(key) || fresh.contains(key) { return true }
+        if case .window = placementNow(key) { return true }
+        return false
+    }
+
+    /// "Put away" (the letterhead's menu, Escape on a folded paper): hidden until its tab or Petal Notes brings it
+    /// back.
+    func putAway(_ key: String) {
+        if standalone[key] != nil { return closeStandalone(key, escape: false) }
+        hide(key)
+        layout()
+        placeDesktop()
+    }
+
     func hide(_ key: String) {
         standalone[key] = nil
         keyboardWanted.cancel(key)
+        petalWanted.remove(key)
         Self.roomTurn.cancel()
         editors[key]?.flush()
         faces[key] = nil
@@ -1677,18 +1813,31 @@ final class NoteDesk {
     /// forward, until a fresh read of what's in front after it.
     func viewerFront() { concealWindowNotes() }
 
-    /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
+    /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright). What's
+    /// typed and not saved yet (the editor saves half a second after the last key) is saved first, so a note written
+    /// in just before its window was left is kept; one whose typing still couldn't be saved stays too.
     func letGoIfEmpty(_ key: String) {
-        guard fresh.contains(key), let paper = store.paper(key), faces[key] != .open,
-              NoteShelf.mayTrash(bodyEmpty: NoteShelf.untouched(paper.file.body, madeWith: madeWith[key]), picturesPending: store.picturesPending(key),
-                                 importing: store.importing(key))
+        guard fresh.contains(key) else { return }
+        editors[key]?.flush()
+        // Only a note with truly nothing in it: a request sent from it, an answer or a helper at work keep it, whatever
+        // `fresh` says; so does typing that still couldn't be saved.
+        guard fresh.contains(key), editors[key]?.busy() != true, let paper = store.paper(key), faces[key] != .open,
+              NoteShelf.mayTrash(bodyEmpty: NoteHelp.holdsNothing(paper.file, untouched: NoteShelf.untouched(paper.file.body, madeWith: madeWith[key])),
+                                 picturesPending: store.picturesPending(key), importing: store.importing(key))
         else { return }
         fresh.remove(key)
+        placedOnce.remove(key)
         madeWith[key] = nil
         faces[key] = nil
         panels[key]?.conceal()
         panels[key] = nil
         store.trash(key, asked: true)
+    }
+
+    /// Something was asked from this note (a request sent): it's no longer a new empty note to let go.
+    func asked(_ key: String) {
+        fresh.remove(key)
+        madeWith[key] = nil
     }
 
     /// The person said to throw this note away (its tab's menu, its letterhead's, the Petal Notes window's): what's
@@ -1782,21 +1931,39 @@ final class NoteDesk {
     /// put on the Desktop, another window in front): the window in front narrows while a note open on it (where
     /// nobody moved it) has no room, and every other narrowed window gets its width back.
     private func reconcileRoom() {
-        var wanted: (number: CGWindowID, pid: pid_t, frame: CGRect, target: CGRect?)?
-        // Only notes open there by their window placement (never one opened on its own) want room beside it.
-        if on, !quitting, let frame, let scene, let number = scene.window,
-           NoteRoom.wanted(here.keys.map { (placementNow($0), faces[$0] == .open, local.spots[store.paper($0)?.noteID ?? ""] != nil) }) {
-            let target = visible(for: frame).flatMap { NoteRoom.narrowed(window: frame, visible: $0, note: PaperLook.openWidth) }
-            wanted = (number, scene.pid, frame, target)
+        var wanted: (number: CGWindowID, pid: pid_t, frame: CGRect, target: CGRect?, opening: Bool)?
+        // Only notes there by their window placement (never one opened on its own, or moved off by the person): one
+        // open makes room; once made, any paper of it showing, folded too, keeps it (NoteRoom.keepsRoom).
+        if on, !quitting, let frame, let scene, let number = scene.window {
+            let notes = here.keys.map { (placement: placementNow($0), face: faces[$0], moved: movedAway($0, window: frame)) }
+            let opening = NoteRoom.wanted(notes.map { ($0.placement, $0.face == .open, $0.moved) })
+            let showing = NoteRoom.wanted(notes.map { ($0.placement, $0.face != nil, $0.moved) })
+            if opening || showing {
+                let target = visible(for: frame).flatMap { NoteRoom.narrowed(window: frame, visible: $0, note: PaperLook.openWidth, margin: PaperLook.margin) }
+                wanted = (number, scene.pid, frame, target, opening)
+            }
         }
         let turn = Self.roomTurn.next()
         Self.queue.async {
-            let plan = NoteRoom.reconcile(narrowed: Set(Self.ledger.keys), wanted: wanted?.number)
+            // A window not narrowed yet gets room only for a note opening on it.
+            let keep = wanted.flatMap { NoteRoom.keepsRoom(opening: $0.opening, showing: true, narrowed: Self.ledger[$0.number] != nil) ? $0.number : nil }
+            let plan = NoteRoom.reconcile(narrowed: Set(Self.ledger.keys), wanted: keep)
             for number in plan.giveBack { Self.giveBack(number) }
             // A newer look is on its way: it decides whether to narrow.
             guard let wanted, plan.narrow == wanted.number, let target = wanted.target, Self.roomTurn.current(turn) else { return }
             Self.narrow(wanted.number, pid: wanted.pid, from: wanted.frame, to: target, turn: turn)
         }
+    }
+
+    /// Whether the person moved a paper away from its window's side (it has a spot that isn't right beside the
+    /// window): it no longer asks for room there. One they only moved within the room beside it still does.
+    private func movedAway(_ key: String, window: CGRect) -> Bool {
+        guard let id = store.paper(key)?.noteID, let spot = local.spots[id] else { return false }
+        let size = panels[key]?.paperSize ?? CGSize(width: PaperLook.folded, height: PaperLook.folded)
+        let appKitWindow = NoteRules.appKitFrame(window, primaryHeight: primaryHeight)
+        // Where its spot puts it, kept on no screen: as it was left, whatever width the window has now.
+        let left = spot.frame(size: size, window: appKitWindow, screen: CGRect(x: -1e7, y: -1e7, width: 2e7, height: 2e7))
+        return !NoteRoom.leftBeside(left, window: appKitWindow)
     }
 
     /// Narrows one window, on `queue`: only while it's still where it was when this was decided, recorded before it
@@ -2161,6 +2328,7 @@ final class NoteDesk {
         if let handle {
             editors[key] = handle
             editorTokens[key] = token
+            if petalWanted.remove(key) != nil { DispatchQueue.main.async { handle.startPetal() } }
         } else {
             guard token == nil || editorTokens[key] == nil || editorTokens[key] == token else { return }
             editors[key] = nil
@@ -2348,12 +2516,12 @@ final class NoteDesk {
     /// `window`: the frame (Accessibility's coordinates) of the window it's made on, when that isn't the one in
     /// front (a drop on a window behind): its spot is recorded against that window.
     /// `open` false: made without opening it on the desk (Petal's viewer opens it in its margin).
-    func make(on stick: NoteStick, body: String = "", quote: String? = nil, chat: String = "", at point: CGPoint? = nil, window: CGRect? = nil,
-              expecting: NoteShelf.KeyboardRequests.Target? = nil, open opening: Bool = true) -> PaperNote? {
+    func make(on stick: NoteStick, in chosen: String? = nil, body: String = "", quote: String? = nil, chat: String = "", at point: CGPoint? = nil,
+              window: CGRect? = nil, expecting: NoteShelf.KeyboardRequests.Target? = nil, open opening: Bool = true) -> PaperNote? {
         var file = NoteFile(body: body)
         file.places = [stick]
         file.chat = chat
-        let notebook = notebook(for: stick)
+        let notebook = chosen.flatMap { store.notebook($0) != nil ? $0 : nil } ?? notebook(for: stick)
         guard let paper = store.make(file, in: notebook) else { return nil }
         remember(paper.notebook, for: stick)
         if body.isEmpty { fresh.insert(paper.key) }
@@ -2371,6 +2539,28 @@ final class NoteDesk {
         open(paper.key, expecting: expecting)
         if stick.kind == .desktop || stick.kind == .screen { refreshSpaces() }
         return paper
+    }
+
+    /// The notebook the Petal Notes window shows, while it's open on one.
+    var libraryNotebook: String? {
+        guard app.notesWindow.window?.isVisible == true, case .notebook(let name) = app.notesWindow.model.shelf, store.notebook(name) != nil else { return nil }
+        return name
+    }
+
+    /// A new note on the Desktop showing (under the pointer), in `notebook` (else the one new notes go in), open to
+    /// write in near the middle of that screen: "+ Note" in Petal Notes, and the note pad or ⌃⌥N with a window of
+    /// Petal's in front. It's a Desktop note like any other: a click elsewhere folds it there; empty, it goes only
+    /// when it's put away or its Desktop is left.
+    func newOnDesktop(in notebook: String? = nil) {
+        guard on, takesChanges() else { return }
+        let mouse = NSEvent.mouseLocation
+        let screen = (Screens.all.first { $0.frame.contains(mouse) } ?? Screens.main)?.visibleFrame ?? .zero
+        let corner = CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
+        resolveDesktop { [weak self] number in
+            guard let self else { return }
+            guard let desk = NoteShelf.desktopAnchor(number: number) else { return self.say("Petal couldn't tell which Desktop is showing, so no note was made.") }
+            self.make(on: desk, in: notebook, at: corner)
+        }
     }
 
     /// ⌃⌥N: a new note on what's in front: the selected sentence, else its tab, its file, its window; on the
@@ -2391,8 +2581,20 @@ final class NoteDesk {
         // Petal's viewer with the keyboard: a note on its selection (checked), else its page or slide, in its margin
         // (through the same readiness gate, in the viewer's own way of making a note).
         if let viewer = app.viewers.front { return viewer.newNote() }
-        guard let running = NSWorkspace.shared.frontmostApplication, running.processIdentifier != getpid() else { return }
+        guard let running = NSWorkspace.shared.frontmostApplication else { return }
+        // A window of Petal's own in front (Petal Notes, Settings): a note on the Desktop showing, in the notebook
+        // Petal Notes shows (else the one new notes go in), open on its own.
+        if running.processIdentifier == getpid() { return newOnDesktop(in: libraryNotebook) }
         guard takesChanges() else { return }
+        // Without Accessibility no window can be read: the note goes on the Desktop showing, and that's said.
+        guard Windows.trusted else {
+            return resolveDesktop { [weak self] number in
+                guard let self else { return }
+                guard let desk = NoteShelf.desktopAnchor(number: number) else { return self.say(Self.unknownFront) }
+                guard self.make(on: desk) != nil else { return }
+                self.say("On your Desktop: Petal needs Accessibility to stick notes to windows.")
+            }
+        }
         let name = running.localizedName ?? ""
         let privacy = ClaudePanel.privacy.now
         let ticket = looks
@@ -2775,8 +2977,12 @@ final class NoteDesk {
             if ViewerFiles.offersViewer(stick) {
                 sub.addItem(ActionItem("Open in Petal's viewer") { [weak self] in self?.openInViewer(stick) })
             }
+            // A page's note: back to that page.
+            if NoteTasks.web(stick.url) != nil, stick.kind != .file {
+                sub.addItem(ActionItem("Open this page") { NoteTasks.openWeb(stick.url) })
+            }
             if paper.file.places.count > 1 { sub.addItem(ActionItem("Take it off here") { [weak self] in self?.unstick(key, index) }) }
-            if !sub.items.isEmpty { item.submenu = sub }
+            if !sub.items.isEmpty { item.submenu = sub } else { item.isEnabled = false }
             menu.addItem(item)
         }
         // The place it shows at now, checked: the key viewer's margin, else the last look's window.
@@ -2785,7 +2991,7 @@ final class NoteDesk {
         let offers = stickOffers(key)
         if !offers.isEmpty {
             menu.addItem(.separator())
-            let title = NSMenuItem(title: "Stick it here instead", action: nil, keyEquivalent: "")
+            let title = NSMenuItem(title: "Move it to", action: nil, keyEquivalent: "")
             title.isEnabled = false
             menu.addItem(title)
             for offer in offers { menu.addItem(ActionItem(Self.describe(offer)) { [weak self] in self?.restick(key, [offer]) }) }
@@ -2807,7 +3013,7 @@ final class NoteDesk {
         // The Desktop the note's screen shows, read when chosen (off the main thread): only with its number is the note
         // moved there; its places stay as they are until then, and stay unknown.
         let screen = panels[key]?.screen
-        menu.addItem(ActionItem("Put it on this Desktop") { [weak self] in
+        menu.addItem(ActionItem("Move it to this Desktop") { [weak self] in
             self?.resolveDesktop(on: screen) { number in
                 guard let self else { return }
                 guard let desk = NoteShelf.desktopAnchor(number: number) else { return self.say(Self.desktopUnknown) }
@@ -2823,6 +3029,8 @@ final class NoteDesk {
         keep.isEnabled = NoteShelf.screenToggled(paper.file.places, mac: local.mac) != nil
         menu.addItem(keep)
         menu.addItem(.separator())
+        // Hidden until its tab or Petal Notes brings it back (a note on its own Desktop or the screen stays there).
+        if putsAway(key) { menu.addItem(ActionItem("Put away") { [weak self] in self?.putAway(key) }) }
         menu.addItem(ActionItem("Move to Trash") { [weak self] in self?.throwAway(key) })
         menu.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
     }
@@ -2840,7 +3048,7 @@ final class NoteDesk {
         restick(key, places)
     }
 
-    /// What "Stick it here instead" offers a note, from the current place (the one rule for "here"): Petal's viewer
+    /// What "Move it to" offers a note, from the current place (the one rule for "here"): Petal's viewer
     /// with the keyboard, its file at the page or slide shown (ViewerModel.fileAnchor), never the last scene outside
     /// it; else what the last look found in front (filtered again for privacy). Never a passage, nor a place the note
     /// already has.
@@ -2881,7 +3089,7 @@ final class NoteDesk {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let found else {
-                        self.say("Petal can't find that file any more (it was moved somewhere it can't follow, or deleted).")
+                        self.say("Petal can't find that file any more.")
                         return done(false)
                     }
                     self.app.viewers.open(path: found, page: stick.page ?? stick.slide) { result in
@@ -2924,7 +3132,7 @@ final class NoteDesk {
             menu.addItem(item)
         }
         menu.addItem(ActionItem("New notebook…") { [weak self] in
-            guard let self, let name = Self.askName("New notebook", "What's it for? Its name:") else { return }
+            guard let self, let name = Self.askName("New notebook", "Name it") else { return }
             let colors = ["#a550a7", "#f74f9e", "#f7821b", "#ffc600", "#62ba46", "#8c8c8c", "#007aff"]
             let made = self.store.ensureNotebook(name, color: colors[self.store.notebooks.count % colors.count])
             self.move(key, to: made)
@@ -3116,6 +3324,8 @@ final class NotePanel: NSPanel {
     var desktop: Bool { rest != .window }
     private var restingLevel: NSWindow.Level { rest == .desktop && desk?.faces[key] != .open ? Self.desktopLevel : .floating }
     private var dragStart: (mouse: CGPoint, origin: CGPoint)?
+    /// Held by the pointer (picked up, not yet let go).
+    var held: Bool { dragStart != nil }
 
     static let desktopLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
 
@@ -3131,6 +3341,8 @@ final class NotePanel: NSPanel {
         isOpaque = false
         hasShadow = false
         hidesOnDeactivate = false
+        // Petal is a background app: without this, the paper's tooltips never show.
+        allowsToolTipsWhenApplicationIsInactive = true
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         refresh()
     }
@@ -3174,6 +3386,11 @@ final class NotePanel: NSPanel {
         let size = hosting.fittingSize
         // Held by the pointer: left where it is until it's let go.
         guard dragStart == nil else { return }
+        // Beside the window in front: every paper there placed again the one way, so none covers another.
+        if unveiled, rest == .window, desk?.refitBeside(key) == true {
+            level = restingLevel
+            return
+        }
         var wanted = NSRect(x: frame.minX, y: frame.maxY - size.height, width: size.width, height: size.height)
         let paper = CGSize(width: size.width - PaperLook.margin * 2, height: size.height - PaperLook.margin * 2)
         if unveiled, let spotted = desk?.spotFrame(key, size: paper) { wanted = spotted.insetBy(dx: -PaperLook.margin, dy: -PaperLook.margin) }
@@ -3188,7 +3405,7 @@ final class NotePanel: NSPanel {
         let screens = Screens.all
         let area = { (screen: NSScreen) -> CGFloat in let cut = screen.frame.intersection(rect); return cut.isNull ? 0 : cut.width * cut.height }
         guard let screen = screens.max(by: { area($0) < area($1) }).flatMap({ area($0) > 0 ? $0 : nil }) ?? Screens.main else { return rect }
-        return NoteShelf.wholeOnScreen(rect, visible: screen.visibleFrame)
+        return NoteShelf.wholeOnScreen(rect, visible: NoteDesk.paperArea(screen))
     }
 
     /// The keyboard, only for a paper layout already showed (NoteShelf.mayTakeKeyboard): never unveiled here.
@@ -3252,10 +3469,12 @@ struct NotePanelContent: View {
     let key: String
     weak var panel: NotePanel?
 
-    /// What changes a paper's height from a helper: its file as written, a run, a question waiting on it.
+    /// What changes a paper's height from a helper: its file as written, a run, a question waiting on it, a word Petal
+    /// says on it, a request being sent.
     private func helperShape(_ paper: PaperNote) -> String {
         let run = desk.helpers.runs[paper.noteID]
-        return "\(paper.revision?.count ?? 0)|\(paper.file.ink.count)|\(run != nil)|\(run?.sticky?.agent.pendingAsk.count ?? 0)|\(run?.paused == true)|\(desk.helpers.card(paper.noteID)?.id.uuidString ?? "")"
+        let said = desk.helpers.hints[paper.noteID] ?? ""
+        return "\(paper.revision?.count ?? 0)|\(paper.file.ink.count)|\(paper.file.asks.count)|\(run != nil)|\(run?.sticky?.agent.pendingAsk.count ?? 0)|\(run?.paused == true)|\(desk.helpers.card(paper.noteID)?.id.uuidString ?? "")|\(said)|\(desk.helpers.sending.count)"
     }
 
     var body: some View {
@@ -3357,14 +3576,16 @@ final class EdgeTabPanel: NSPanel {
         guard let tab = edgeTab, let desk else { return }
         refreshSharing()
         let label = hovering ? (desk.store.paper(tab.ids[0]).map { $0.file.title.isEmpty ? "Empty note" : $0.file.title } ?? "") + (tab.count > 1 ? "  +\(tab.count - 1)" : "") : ""
+        // Only the tab itself takes the pointer: the room around it (for its shadow) lets clicks through to the window,
+        // its scroll bar too.
         let view = EdgeTabView(tab: tab, colors: [:], outside: outside, hovering: hovering, label: String(label.prefix(60)))
-            .padding(.vertical, 8).padding(.horizontal, 8)
             .contentShape(.rect)
             .onHover { [weak self] on in self?.hover(on) }
             .onTapGesture { [weak self] in
                 guard let self, let tab = self.edgeTab else { return }
                 self.desk?.tabClicked(tab.ids)
             }
+            .padding(.vertical, 8).padding(.horizontal, 8)
         hosting.rootView = AnyView(view)
         hosting.layoutSubtreeIfNeeded()
         let size = hosting.fittingSize

@@ -696,7 +696,7 @@ extension Assist {
                 guard let askPlace else { return go(item.kind == .card) }
                 self.ask("vault-fill", Vault.question(item, asked, place: askPlace), detail: reasons.joined(separator: " "), always: true, warn: true,
                          allow: "Fill anyway", owner: caller) { allowed in
-                    guard allowed else { return send(["declined": "The person didn't let Petal fill it. Don't find another way."]) }
+                    guard allowed else { return send(["declined": self.declined("The person didn't let Petal fill it. Don't find another way.")]) }
                     go(true)
                 }
             }

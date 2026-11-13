@@ -83,7 +83,8 @@ extension NoteDesk {
             // never its raw text: matching can't be used to guess a secret one character at a time.
             // "Here": placed now, by the window in front or on a Desktop showing (the one current-placement rule).
             let papers = store.notes.filter { $0.version == nil && readable($0.notebook) && (!onlyHere || hereNow($0.key)) }
-            let sources = papers.map { ($0.file.body, $0.notebook) }
+            // (What was asked of Petal from a note, and what came back, are found too.)
+            let sources = papers.map { ($0.file.body + $0.file.asks.map { "\n" + $0.words + ($0.said.isEmpty ? "" : "\n" + $0.said) }.joined(), $0.notebook) }
             let books = papers.map(\.notebook)
             Self.onShield({ index -> [Int]? in
                 // Each note's text and notebook redacted whole first (its title is in its text), then searched.
@@ -119,6 +120,12 @@ extension NoteDesk {
                                         if !ink.proof.isEmpty { out["proof"] = ink.proof }
                                         return out
                                     }]
+            }
+            // What the person asked Petal from this note (sent from its writing), each with what came back.
+            if !paper.file.asks.isEmpty {
+                result["asked"] = paper.file.asks.map { ask -> [String: Any] in
+                    ["words": ask.words, "ended": ask.end?.rawValue ?? "not finished", "said": ask.said]
+                }
             }
             if self.store.readOnly(paper) { result["note"] = "This note changed in two places at once: the person sees both papers until they keep one, and it can't be changed until then." }
             send(result)

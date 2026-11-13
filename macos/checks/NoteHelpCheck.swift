@@ -60,6 +60,127 @@ struct NoteHelpCheck {
         expect(handFile.serialized().contains("later: kept"), "an unknown key kept")
         expect(NoteFile.parse("---\nid: P\ncover: true\nprivate: true\n---\n", fallbackID: "x", fallbackDate: now).scalarValue("private") == "true", "a private cover, by its key")
 
+        // MARK: Requests sent as bubbles (`asks:`)
+
+        // Generated requests (words with quotes, colons, line-ish punctuation, @ mentions, long and empty answers),
+        // every ending: written, read back and written again exactly; each outcome lands only on its own request.
+        var generator = SystemRandomNumberGenerator()
+        let pieces = ["@Petal", "what is", "\"this\"", "video: about", "a summary", "#1", "Use Haiku for it.", "@[Bus card]", "—", "ü ğ ş", "tab\there", "x: y"]
+        let ends: [NoteHelp.Ask.End?] = [nil, .done, .replied, .refused, .failed, .stopped]
+        var sweeps = 0
+        for round in 0..<300 {
+            var note = NoteFile(id: "R\(round)", created: now, body: round % 3 == 0 ? "" : "Writing above\n\nmore")
+            var asks: [NoteHelp.Ask] = []
+            for index in 0..<Int.random(in: 0...5, using: &generator) {
+                let words = "@Petal " + (0..<Int.random(in: 1...6, using: &generator)).map { _ in pieces.randomElement(using: &generator)! }.joined(separator: " ")
+                var ask = NoteHelp.Ask(id: "a\(round)-\(index)", words: words, at: index % 2 == 0 ? now : nil, mac: index % 3 == 0 ? "" : "mac-1")
+                ask.end = ends.randomElement(using: &generator)!
+                if ask.end != nil, index % 2 == 1 { ask.said = String(repeating: "An answer: \"quoted\" line. ", count: index * 7) }
+                ask.who = index % 2 == 0 ? "" : "✦ Petal · Haiku"
+                ask.settings = ask.end == .failed && index % 2 == 0
+                asks.append(ask)
+            }
+            note.asks = asks
+            let text = note.serialized()
+            let read = NoteFile.parse(text, fallbackID: "x", fallbackDate: now)
+            expect(read.asks == asks, "requests read back as written", text)
+            expect(read.serialized() == text, "requests written again, the same text", text)
+            expect(read.body == note.body, "the writing is left as it was", read.body)
+            guard let target = asks.randomElement(using: &generator) else { continue }
+            // An outcome lands on its own request (by id), through the helpers' journal and back, composed with a later one.
+            let first = NoteHelp.Ask.Outcome(id: target.id, end: .stopped, said: "Stopped.")
+            let ink = NoteHelp.Ink(who: "✦ Petal", text: "The answer.")
+            let second = NoteHelp.Ask.Outcome(id: target.id, end: .done, ink: ink)
+            let missing = NoteHelp.Ask.Outcome(id: "gone", end: .done, said: "Nothing")
+            let composed = NoteHelp.Result(answer: nil, helper: .keep, asks: [first, missing]).then(NoteHelp.Result(answer: ink, helper: .keep, asks: [second]))
+            let held = NoteHelp.Result(held: NoteFile.parse(composed.held(noteID: note.id).serialized(), fallbackID: note.id, fallbackDate: now))
+            var landed = read
+            held.apply(to: &landed)
+            let after = landed.asks
+            expect(after.count == asks.count && after.map(\.id) == asks.map(\.id), "an outcome never adds or reorders requests")
+            expect(after.first { $0.id == target.id }.map { $0.end == .done && $0.said == "The answer." && $0.who == "✦ Petal" } == true, "the later outcome wins, on its own request")
+            expect(zip(asks, after).allSatisfy { $0.id == target.id || $0 == $1 }, "every other request is left as it was")
+            expect(landed.ink.first?.text == "The answer." && landed.body == note.body, "the answer is the ink, and the writing is untouched")
+            sweeps += 1
+        }
+        expect(sweeps > 100, "the sweep covered requests", "\(sweeps)")
+        // Try again clears an ending; nothing of it is left behind.
+        var retried = [NoteHelp.Ask(id: "t", words: "@Petal again")]
+        retried[0].end = .failed
+        retried[0].said = "It broke."
+        retried[0].settings = true
+        NoteHelp.Ask.Outcome(id: "t", end: nil).apply(to: &retried)
+        expect(retried[0].end == nil && retried[0].said.isEmpty && !retried[0].settings && retried[0].again, "Try again clears the ending")
+        // Where the ink shows: before every request when none is answered (ink from before requests were bubbles), else
+        // under the last one answered.
+        var done = NoteHelp.Ask(id: "d1", words: "@Petal one")
+        done.end = .done
+        var replied = NoteHelp.Ask(id: "d2", words: "@Petal two")
+        replied.end = .replied
+        let inked = [NoteHelp.Ink(who: "✦ Petal", text: "One.")]
+        expect(NoteHelp.askLayout([], ink: inked) == (true, nil) && NoteHelp.askLayout([], ink: []) == (false, nil), "an old note's ink shows as it did")
+        expect(NoteHelp.askLayout([replied], ink: inked) == (true, nil), "with none answered, the ink comes first")
+        expect(NoteHelp.askLayout([done, replied], ink: inked) == (false, "d1"), "the ink sits under the last request answered")
+        expect(NoteHelp.Ask(id: "x", words: "@Petal x").again && !done.again && !replied.again, "Try again only where it didn't finish")
+        // A request kept in a file is never a line of the writing: an old note's line and ink read as they were.
+        let old = "---\nid: O\ncreated: 2026-11-09T10:30:00Z\nmodified: 2026-11-09T10:30:00Z\nhelper:\n  state: done\n  who: \"✦ Petal\"\n  step: \"\"\n  asked: \"@Petal say hi\"\nink:\n  - who: \"✦ Petal\"\n    text: Hi.\n---\nWriting\n@Petal say hi"
+        let oldFile = NoteFile.parse(old, fallbackID: "x", fallbackDate: now)
+        expect(oldFile.asks.isEmpty && oldFile.body.hasSuffix("@Petal say hi") && oldFile.ink.first?.text == "Hi." && oldFile.serialized() == old,
+               "an old note with an @Petal line and ink opens unchanged", oldFile.serialized())
+
+        // Where a line's request starts (from its @Petal), swept over generated lines: what's before it is kept unless
+        // it's only blanks, the request's words are exactly from its @Petal on, and nothing before a non-blank is cut.
+        let befores = ["", "  ", "\t", "\u{FFFC} ", "\u{FFFC} Call the bank", "Call the bank ", "Plan", "ü ğ ş: ", "email petal@example.com about it ", "a @[Bus card] note "]
+        let asks = ["@Petal find their hours", "@Petal", "@Petal what's @this?", "@petal lower case", "@[Petal] in brackets"]
+        for before in befores {
+            for request in asks {
+                for gap in ["", " ", "   "] {
+                    let line = before + gap + request
+                    // "bank@Petal" isn't a mention (it calls nothing, so it's never sent).
+                    if gap.isEmpty, let last = before.unicodeScalars.last, CharacterSet.alphanumerics.contains(last) {
+                        expect(!NoteHelp.calls(line), "a word glued to @Petal calls nothing", line.debugDescription)
+                        continue
+                    }
+                    let found = NoteHelp.request(in: line)
+                    let ns = line as NSString
+                    let words = ns.substring(from: found.start)
+                    expect(words == request, "the request is from its @Petal", "\(line.debugDescription) → \(words.debugDescription)")
+                    let kept = ns.substring(to: found.cut)
+                    let blank = (before + gap).trimmingCharacters(in: CharacterSet(charactersIn: " \t")).isEmpty
+                    expect(found.keepsBefore == !blank, "what's before it is kept unless it's only blanks", line.debugDescription)
+                    expect(!found.keepsBefore || (before + gap).hasPrefix(kept) && kept.trimmingCharacters(in: CharacterSet(charactersIn: " \t")) == before.trimmingCharacters(in: CharacterSet(charactersIn: " \t")),
+                           "nothing of what's before it is cut", "\(line.debugDescription) keeps \(kept.debugDescription)")
+                }
+            }
+        }
+        let chainLine = NoteHelp.request(in: "when @Research is done, draft @Proposal")
+        expect(chainLine == (0, 0, false), "a chain's words, with no @Petal, are the whole line")
+        // Try again only for a request this Mac sent and recorded with the very same words.
+        var mine = NoteHelp.Ask(id: "m1", words: "@Petal again", mac: "mac-1")
+        mine.end = .failed
+        expect(NoteHelp.mayRetry(mine, mac: "mac-1", sent: ["m1": "@Petal again"]), "sent from this Mac, recorded: Try again")
+        expect(!NoteHelp.mayRetry(mine, mac: "mac-1", sent: nil) && !NoteHelp.mayRetry(mine, mac: "mac-1", sent: ["m1": "@Petal something else"]),
+               "not recorded here, or recorded with other words: never")
+        expect(!NoteHelp.mayRetry(mine, mac: "mac-2", sent: ["m1": "@Petal again"]) && !NoteHelp.mayRetry(mine, mac: "", sent: ["m1": "@Petal again"]),
+               "sent from another Mac: never")
+        var mineDone = mine
+        mineDone.end = .done
+        expect(!NoteHelp.mayRetry(mineDone, mac: "mac-1", sent: ["m1": "@Petal again"]), "a request answered isn't sent again")
+        let out = NoteHelp.Ask(id: "o1", words: "@Petal elsewhere", mac: "mac-2")
+        expect(NoteHelp.askedElsewhere(out, mac: "mac-1") && !NoteHelp.askedElsewhere(out, mac: "mac-2") && !NoteHelp.askedElsewhere(mineDone, mac: "mac-2"),
+               "a request not over on another Mac reads as asked there")
+        // A note is let go only with truly nothing in it.
+        var empty = NoteFile(id: "E", created: now, body: "")
+        expect(NoteHelp.holdsNothing(empty, untouched: true) && !NoteHelp.holdsNothing(empty, untouched: false), "an empty new note holds nothing")
+        empty.asks = [out]
+        expect(!NoteHelp.holdsNothing(empty, untouched: true), "a request keeps it")
+        empty.asks = []
+        empty.ink = [NoteHelp.Ink(who: "✦ Petal", text: "An answer.")]
+        expect(!NoteHelp.holdsNothing(empty, untouched: true), "an answer keeps it")
+        empty.ink = []
+        empty.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "")
+        expect(!NoteHelp.holdsNothing(empty, untouched: true), "a helper at work keeps it")
+
         // MARK: Mentions
 
         let line = "@Petal bring @this back @Friday with @[Bus card]"
@@ -97,9 +218,80 @@ struct NoteHelpCheck {
         // MARK: Requests
 
         let ask = { (text: String) in NoteHelp.request(text, now: now, calendar: calendar) }
+        let ask2 = { (text: String, now: Date) in NoteHelp.request(text, now: now, calendar: calendar) }
         if case .bringBack(let date, _, let others) = ask(line) { expect(parts(date).weekday == 6 && others == ["Bus card"], "bring back, with another note", "\(others)") } else { expect(false, "bring back") }
+        // More ways to say when, from Monday 9 November 2026, 10:30.
+        let full = { (date: Date) in calendar.dateComponents([.month, .day, .hour, .minute], from: date) }
+        let whenOf = { (text: String) in NoteHelp.when(text, now: now, calendar: calendar).map { full($0.date) } }
+        expect(whenOf("remind me at 5pm") == DateComponents(month: 11, day: 9, hour: 17, minute: 0), "a time alone, later today", "\(String(describing: whenOf("remind me at 5pm")))")
+        expect(whenOf("remind me at 5") == DateComponents(month: 11, day: 9, hour: 17, minute: 0), "“at 5” is the afternoon")
+        expect(whenOf("remind me at 9:15") == DateComponents(month: 11, day: 10, hour: 9, minute: 15), "a time already past today: tomorrow")
+        expect(whenOf("bring this back on the 20th") == DateComponents(month: 11, day: 20, hour: 9, minute: 0), "the 20th: this month")
+        expect(whenOf("bring this back the 3rd at 2pm") == DateComponents(month: 12, day: 3, hour: 14, minute: 0), "the 3rd, past: next month, at its time")
+        expect(whenOf("remind me Dec 1") == DateComponents(month: 12, day: 1, hour: 9, minute: 0), "a month and day")
+        expect(whenOf("remind me 14 February at 8am") == DateComponents(month: 2, day: 14, hour: 8, minute: 0), "a day and month, next year's")
+        expect(whenOf("bring this back next month") == DateComponents(month: 12, day: 9, hour: 9, minute: 0), "next month")
+        expect(whenOf("remind me next month at 17:30") == DateComponents(month: 12, day: 9, hour: 17, minute: 30), "next month at its time",
+               "\(String(describing: whenOf("remind me next month at 17:30")))")
+        expect(whenOf("remind me the 20th at 5") == DateComponents(month: 11, day: 20, hour: 17, minute: 0)
+               && whenOf("remind me Dec 1 at 9am") == DateComponents(month: 12, day: 1, hour: 9, minute: 0)
+               && whenOf("remind me 1 December at 9:15pm") == DateComponents(month: 12, day: 1, hour: 21, minute: 15)
+               && whenOf("bring this back on the 20th 8pm") == DateComponents(month: 11, day: 20, hour: 20, minute: 0),
+               "every new day form takes the time said after it")
+        expect(NoteHelp.timeWords("remind me next month at 17:30", now: now, calendar: calendar).count == 1, "one time, not a day and a time apart")
+        expect(whenOf("bring this back Friday 9:00") == DateComponents(month: 11, day: 13, hour: 9, minute: 0), "the old ways still the same")
+        expect(whenOf("bring this back in 3 days") != nil && whenOf("what was in 3") == nil && whenOf("page 20 of the report") == nil, "a number alone is no time")
+        // Said in the evening and in the morning: "tonight at 9" is 9 in the evening, a time today that has gone by is
+        // never taken (Petal asks when), and nothing is ever brought back in the past, at any hour of any day.
+        let evening = calendar.date(from: DateComponents(year: 2026, month: 11, day: 9, hour: 18, minute: 30))!
+        let whenAt = { (text: String, now: Date) in NoteHelp.when(text, now: now, calendar: calendar).map { full($0.date) } }
+        expect(whenAt("bring this back tonight at 9", now) == DateComponents(month: 11, day: 9, hour: 21, minute: 0)
+               && whenAt("remind me tonight at 8", evening) == DateComponents(month: 11, day: 9, hour: 20, minute: 0)
+               && whenAt("remind me tomorrow night at 11", now) == DateComponents(month: 11, day: 10, hour: 23, minute: 0)
+               && whenAt("bring it back Friday evening at 7", now) == DateComponents(month: 11, day: 13, hour: 19, minute: 0)
+               && whenAt("remind me tomorrow morning at 7", now) == DateComponents(month: 11, day: 10, hour: 7, minute: 0),
+               "an hour said with the evening is the evening's, with the morning the morning's")
+        expect(whenAt("remind me at 8", evening) == DateComponents(month: 11, day: 9, hour: 20, minute: 0)
+               && whenAt("remind me today at 9", now) == DateComponents(month: 11, day: 9, hour: 21, minute: 0)
+               && whenAt("remind me at 11", now) == DateComponents(month: 11, day: 9, hour: 11, minute: 0),
+               "a bare hour whose morning has gone by is this evening's")
+        expect(whenAt("remind me at midnight", evening) == DateComponents(month: 11, day: 10, hour: 0, minute: 0)
+               && whenAt("remind me this evening", now) == DateComponents(month: 11, day: 9, hour: 18, minute: 0)
+               && whenAt("remind me this afternoon", now) == DateComponents(month: 11, day: 9, hour: 14, minute: 0)
+               && whenAt("remind me in 2 hrs", now) == DateComponents(month: 11, day: 9, hour: 12, minute: 30)
+               && whenAt("remind me in half an hour", now) == DateComponents(month: 11, day: 9, hour: 11, minute: 0),
+               "midnight, this evening, hrs and half an hour")
+        expect(whenAt("remind me today at 10am", now) == nil && whenAt("remind me today", evening) == nil && whenAt("remind me in 0 minutes", now) == nil
+               && whenAt("bring this back tonight", calendar.date(byAdding: .hour, value: 3, to: evening)!) == nil,
+               "a time today that has gone by is no time")
+        expect(ask("@Petal remind me today at 10am") == .askWhen && ask("@Petal remind me later") == .askWhen && ask("@Petal remind me in 5") == .askWhen,
+               "a reminder with no time Petal can take: asked when, never handed to a helper that can't set one")
+        if case .ask = ask("@Petal remind me when this was due") { expect(true, "") } else { expect(false, "“remind me when …” is a question") }
+        let phrasings = ["tonight", "tonight at 9", "tonight at 11:30", "today", "today at 9", "today at 10am", "today 3", "this morning",
+                         "this afternoon", "this evening at 7", "tomorrow", "tomorrow night at 11", "tomorrow morning at 7", "Friday",
+                         "next Friday 8pm", "monday at 9", "at 5", "at 8", "at 11", "at 12", "at midnight", "at noon", "5pm", "17:30",
+                         "in 0 minutes", "in 5 mins", "in an hour", "in half an hour", "in 3 days", "next week", "next month", "the 9th",
+                         "the 31st", "Nov 9 at 9am", "Feb 29", "1 January"]
+        var past: [String] = []
+        for day in [9, 13, 15, 30] {
+            for hour in 0..<24 {
+                let then = calendar.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour, minute: 30))!
+                for words in phrasings {
+                    for line in ["@Petal bring this back \(words)", "@Petal remind me \(words)"] {
+                        if case .bringBack(let date, _, _) = ask2(line, then), date <= then { past.append("\(line) at \(day) \(hour):30") }
+                        for time in NoteHelp.timeWords(line, now: then, calendar: calendar) where time.date <= then { past.append("\(line) bound at \(day) \(hour):30") }
+                    }
+                }
+            }
+        }
+        expect(past.isEmpty, "nothing is ever brought back in the past (\(phrasings.count * 2 * 4 * 24) lines)", past.prefix(5).joined(separator: "; "))
+        if case .bringBack = ask("@Petal remind me at 5pm to call the bank") { expect(true, "") } else { expect(false, "remind me at a time alone") }
+        expect(ask("@Petal remind me to call the bank") == .askWhen && ask("@Petal bring this back") == .askWhen, "no time said: asked when")
+        if case .ask = ask("@Petal remind me what this project was about") { expect(true, "") } else { expect(false, "“remind me what …” is a question") }
         expect(ask("@Petal remember that Sam takes no sugar") == .remember("Sam takes no sugar"), "remember")
         expect(ask("@Petal forget the hotel") == .forget("the hotel"), "forget")
+        expect(ask("@Petal remember: Sam takes no sugar") == .remember("Sam takes no sugar") && ask("@Petal forget, the hotel") == .forget("the hotel"),
+               "remember and forget with a mark after them", "\(ask("@Petal remember: Sam takes no sugar"))")
         expect(ask("@Petal put this away") == .putAway, "put away")
         expect(ask("@Petal check this every morning, tell me under $300") == .watch(every: "1d", at: "09:00", line: "under $300"), "a watcher", "\(ask("@Petal check this every morning, tell me under $300"))")
         expect(ask("@Petal check every 6 hours and tell me over 50") == .watch(every: "6h", at: "", line: "over 50"), "every 6 hours")
@@ -120,6 +312,11 @@ struct NoteHelpCheck {
         expect(NoteHelp.hint(before: found[0], in: page) == "· from", "the words before it", NoteHelp.hint(before: found[0], in: page))
         expect(NoteHelp.crossed(11900, line: "under ¥12k") && !NoteHelp.crossed(12800, line: "under ¥12k"), "under the line")
         expect(NoteHelp.crossed(51, line: "over 50") && !NoteHelp.crossed(50, line: "over 50"), "over the line")
+        expect(NoteHelp.condition("tell me when it's over 1 million") == "over 1 million" && NoteHelp.crossed(1_200_000, line: "over 1 million")
+               && !NoteHelp.crossed(900_000, line: "over 1 million"), "millions said in words", NoteHelp.condition("tell me when it's over 1 million") ?? "nil")
+        expect(NoteHelp.crossed(1_400_000, line: "under 1.5M") && !NoteHelp.crossed(1_600_000, line: "under 1.5M")
+               && NoteHelp.crossed(3e9, line: "over $2b") && NoteHelp.crossed(3e9, line: "over 2 billion"), "m, b and billion")
+        expect(NoteHelp.condition("over 50 mph") == "over 50", "a word that only starts with m isn't millions", NoteHelp.condition("over 50 mph") ?? "nil")
         expect(NoteHelp.format(12800, currency: "¥", thousands: true) == "¥13k" && NoteHelp.format(1299.5, currency: "$", thousands: false) == "$1,299.50", "values as the line writes them")
         expect(NoteHelp.number("1.299,99") == 1299.99 && NoteHelp.number("96.400") == 96400 && NoteHelp.number("12,5") == 12.5, "numbers as people write them")
         expect(NoteHelp.pageText("<p>From <b>¥12,800</b></p><script>var x = '¥1';</script>") == "From ¥12,800", "a page's words")
@@ -264,6 +461,26 @@ struct NoteHelpCheck {
         expect(NoteHelp.repository(url: "https://github.com/edgetr/petal/pull/16") == NoteHelp.Repository(slug: "edgetr/petal", kind: .pull, number: 16), "a pull request")
         expect(NoteHelp.repository(url: "https://github.com/edgetr/petal/issues/3")?.kind == .issue && NoteHelp.repository(url: "https://example.com/a/b") == nil, "an issue; not GitHub")
         expect(NoteHelp.pullNumber(NoteHelp.repository(url: "https://github.com/edgetr/petal/pull/16")!) == 16, "a pull request starts from its head")
+        expect(NoteHelp.repository(url: "https://github.com/settings/profile") == nil && NoteHelp.repository(url: "https://github.com/notifications/x") == nil,
+               "GitHub's own pages are no repository")
+        expect(NoteHelp.asksForWork("@Petal fix the failing test") && NoteHelp.asksForWork("@Petal add a dark mode, open a PR")
+               && NoteHelp.asksForWork("@Petal can you look at this in ~/petal"), "a line asking for work, or naming a checkout")
+        expect(!NoteHelp.asksForWork("@Petal what does this project do?") && !NoteHelp.asksForWork("@Petal summarize this PR")
+               && !NoteHelp.asksForWork("@Petal is this safe to merge?"), "a question is answered, not a coding job")
+        expect(!NoteHelp.asksForWork("@Petal fix the typo in this note") && !NoteHelp.asksForWork("@Petal add a summary of the PR to my note")
+               && !NoteHelp.asksForWork("@Petal please rewrite the note shorter") && NoteHelp.asksForWork("@Petal add a test for what this note says") && NoteHelp.asksForWork("@Petal open a PR for this note")
+               && !NoteHelp.asksForWork("@Petal rewrite the note shorter") && NoteHelp.asksForWork("@Petal fix the note parser in ~/petal"),
+               "work on the note itself is no coding job; the repository named with it is")
+        expect(NoteHelp.repository(url: "https://github.com/edgetr/edgetr.github.io/blob/main/index.html") == NoteHelp.Repository(slug: "edgetr/edgetr.github.io", kind: .file, number: nil)
+               && NoteHelp.repository(url: "https://github.com/edgetr/petal.git")?.slug == "edgetr/petal"
+               && NoteHelp.repository(url: "https://github.com/edgetr/petal/blob/main/macos/build.sh#L10")?.kind == .file,
+               "a repository whose name has .git inside it keeps its name", "\(String(describing: NoteHelp.repository(url: "https://github.com/edgetr/edgetr.github.io/blob/main/index.html")))")
+        let polite = ["@Petal Can you fix the failing test?", "@Petal Could you add a test for this", "@Petal Please fix this",
+                      "@Petal could you please rename the helper", "@Petal would you mind updating the README?", "@Petal can we open a PR for this?"]
+        expect(polite.allSatisfy(NoteHelp.asksForWork), "a polite request for work is a coding job", polite.filter { !NoteHelp.asksForWork($0) }.joined(separator: " | "))
+        let questions = ["@Petal can you explain why this fails?", "@Petal what does this change?", "@Petal could you summarize this PR?",
+                         "@Petal how does the build work?", "@Petal please explain the release steps", "@Petal can you tell me what changed?"]
+        expect(!questions.contains(where: NoteHelp.asksForWork), "a question, polite or not, is answered", questions.filter(NoteHelp.asksForWork).joined(separator: " | "))
         expect(NoteHelp.pullNumber(NoteHelp.repository(url: "https://github.com/edgetr/petal/issues/3")!) == nil, "an issue starts from the default branch")
         let config = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:Edgetr/petal.git\n\tfetch = +refs/heads/*\n[branch \"main\"]\n\tremote = origin"
         expect(NoteHelp.remotes(config: config).map { "\($0.name) \($0.url)" } == ["origin git@github.com:Edgetr/petal.git"], "a git config's remotes, by name")
@@ -397,6 +614,34 @@ struct NoteHelpCheck {
         guard let hidden = NoteShield.place(privateStick, appPrivate: true, index: index) else { return expect(false, "a private place") }
         expect(!hidden.words.text.contains("secret window") && hidden.quote.isEmpty, "a private app's place: its words and sentence never told", hidden.words.text)
         expect(NoteShield.shield(["x"], index: .unavailable) == nil && NoteShield.place(stick, appPrivate: false, index: .unavailable) == nil, "the vault unreadable: nothing told")
+        // A tab's page: its title and whole address (a video's id with it), redacted; from a private app, neither.
+        var tabStick = NoteStick(kind: .tab)
+        tabStick.url = "https://www.youtube.com/watch?v=abc123&key=\(secret.replacingOccurrences(of: " ", with: ""))"
+        tabStick.title = "A video"
+        guard let tabPlace = NoteShield.place(tabStick, appPrivate: false, index: index),
+              let privateTab = NoteShield.place(tabStick, appPrivate: true, index: index) else { return expect(false, "a tab's place") }
+        expect(tabPlace.words.text.hasPrefix("The page “A video” at https://www.youtube.com/watch?v=abc123") && !tabPlace.words.text.contains(digits),
+               "a tab's page told with its title and whole address, redacted", tabPlace.words.text)
+        expect(!privateTab.words.text.contains("youtube") && !privateTab.words.text.contains("A video"), "a private app's tab: neither", privateTab.words.text)
+        // A helper's tile in the AI button's preview: its note's title from its body redacted whole; no index, its app.
+        let tileTitle = NoteShield.previewTitle(body: "# Pay with \(secret) today\nmore", index: index, fallback: "Safari")
+        expect(!tileTitle.contains(digits) && tileTitle.hasPrefix("Pay with"), "a tile's title is redacted before it's derived", tileTitle)
+        // petal_view with no path: the run's own document, else the only one, never one of two by a guess.
+        do {
+        var pdf = NoteStick(kind: .file)
+        pdf.path = "/Users/x/a.pdf"
+        var deck = NoteStick(kind: .file)
+        deck.path = "/Users/x/b.key"
+        var page = NoteStick(kind: .tab)
+        page.url = "https://example.com"
+        expect(NoteHelp.helperDocument(required: deck, places: [pdf, deck], isFile: ViewerFiles.namesFile) == .one(deck), "the document the run is bound to")
+        expect(NoteHelp.helperDocument(required: page, places: [page, pdf], isFile: ViewerFiles.namesFile) == .one(pdf), "the note's only document")
+        expect(NoteHelp.helperDocument(required: page, places: [pdf, deck, page], isFile: ViewerFiles.namesFile) == .several([pdf, deck])
+               && NoteHelp.helperDocument(required: nil, places: [pdf, deck], isFile: ViewerFiles.namesFile) == .several([pdf, deck]), "two documents, none bound: which, never a pick")
+        expect(NoteHelp.helperDocument(required: nil, places: [page], isFile: ViewerFiles.namesFile) == .none, "no document")
+        }
+        expect(NoteShield.previewTitle(body: "# Plain", index: nil, fallback: "Safari") == "Safari"
+               && NoteShield.previewTitle(body: "# Plain", index: .unavailable, fallback: "Safari") == "Safari", "no index, or one that can't be read: the app's name")
         told.place = ""
         expect(NoteHelp.brief(told).text.contains("isn't on a window now"), "a note on no window is told not to look in front")
         let literal: Shielded = "Go on where you stopped."
@@ -409,7 +654,7 @@ struct NoteHelpCheck {
         systemTold.instructions = notes[0]
         systemTold.memory = notes[1]
         let system = NoteHelp.system(systemTold, provider: "Claude", computerUse: true, brief: NoteHelp.brief(systemTold))
-        expect(!system.text.contains(digits) && system.text.contains("You are Claude") && system.text.contains("The note is on:") && system.text.contains("Use metric (hidden)"),
+        expect(!system.text.contains(digits) && system.text.contains("You are Petal AI (running on Claude)") && system.text.contains("The note is on:") && system.text.contains("Use metric (hidden)"),
                "the system prompt: shielded place, notes and memory, then the brief", system.text.prefix(300).description)
         // Checking against a notebook: each note shielded whole, then titled and cut.
         let longSecretNote = "# Plan \(secret)\n" + String(repeating: "y", count: 1995) + secret + " end"
@@ -769,6 +1014,8 @@ struct NoteHelpCheck {
         var providerGone = facts
         providerGone.available = ["codex"]
         expect(NoteHelp.admit(providerGone) == .fail("Claude Code isn't set up in Petal."), "the pinned AI disabled while it waited: fails, never another", "\(NoteHelp.admit(providerGone))")
+        providerGone.available = []
+        expect(NoteHelp.admit(providerGone) == .fail("Petal AI isn't set up yet."), "no AI chosen at all: Petal AI, not an app never picked")
         var unmodelled = facts
         unmodelled.provider = "codex"; unmodelled.available = ["codex"]; unmodelled.model = "gpt-6.1-sol"; unmodelled.models = ["gpt-6"]
         if case .fail = NoteHelp.admit(unmodelled) { expect(true, "") } else { expect(false, "its pinned model gone: fails") }

@@ -48,8 +48,42 @@ extension Viewers {
         // for the notes to be ready, as the note tools do: never a count or comments from notes not read yet.
         if ["petal_view", "petal_note_pdf_comments"].contains(name), !app.paper.acceptsChanges { return fail(NoteStore.gettingReady) }
         let path = args["path"] as? String ?? ""
+        // A note's helper naming no file means its note's own document: found by the one resolver the margin uses
+        // (off the main thread), then asked again with that path.
+        // The run's own document, never a guess between two.
+        if path.isEmpty, ["petal_view", "petal_view_versions", "petal_note_pdf_comments"].contains(name),
+           let paperID = app.claude.note(withID: caller)?.paper {
+            let stick: NoteStick
+            switch app.paper.helpers.document(for: paperID) {
+            case .one(let one): stick = one
+            case .none: return fail("This note isn't on a document: pass the file's path.")
+            case .several(let files):
+                let names = files.map { ($0.path as NSString).lastPathComponent }.filter { !$0.isEmpty }
+                return fail("This note is on \(files.count) documents (\(names.joined(separator: ", "))): pass the path of the one you mean.")
+            }
+            let mac = app.paper.local.mac
+            nonisolated(unsafe) let args = args
+            DispatchQueue.global(qos: .userInitiated).async {
+                let found = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard let found else { return fail("Petal can't find this note's document now (moved or deleted?): pass its path.") }
+                        var named = args
+                        named["path"] = found
+                        self.handle(name, named, caller: caller, live: live, answer, refuse)
+                    }
+                }
+            }
+            return
+        }
         switch name {
         case "petal_view":
+            // Every page's words at once (pages: "all"), up to `allLimit`.
+            if args["pages"] as? String == "all" {
+                let from = ViewerPages.requested(args["from"])
+                if args["from"] != nil, from == nil { return fail("from counts from 1 (a whole number).") }
+                return viewAll(path: path, from: (from ?? 1) - 1, caller: caller, live: live, told: told, fail: fail)
+            }
             // A page counts from 1; a number that isn't one is refused before anything is worked out from it.
             let page = ViewerPages.requested(args["page"])
             if args["page"] != nil, page == nil { return fail("page counts from 1 (a whole number).") }
@@ -79,6 +113,8 @@ extension Viewers {
                                 if let words, !words.isEmpty, !model.loading, model.text === source, model.current == shown {
                                     told[model.unit.word] = shown + 1
                                     told["text"] = words
+                                } else if words != nil, !model.loading, model.text === source, model.current == shown {
+                                    told["textNote"] = Self.noWords(model.unit.word)
                                 }
                                 return Told(told, state: model.shownState)
                             }, fit: Self.fitText)
@@ -213,6 +249,69 @@ extension Viewers {
 
     /// A page's words in `petal_view`'s answer, made to fit once the whole answer is redacted (never cut before).
     static let textLimit = 12_000
+    /// The most of every page's words `pages: "all"` tells at once.
+    nonisolated static let allLimit = 40_000
+
+    /// Every page's words, in order, each under its number, read one page at a time off the main thread; told with
+    /// the rest, redacted whole with the answer, then cut to `allLimit` (saying which page it reached).
+    /// What the AI hears when a page has no words to read (a scan, a picture).
+    nonisolated static func noWords(_ unit: String) -> String {
+        "No words could be read from this \(unit) (a scan or a picture): petal_look with screenshot: \"window\" shows it."
+    }
+
+    private func viewAll(path: String, from first: Int = 0, caller: String, live: @escaping @Sendable () -> Bool,
+                         told: @escaping (@escaping @MainActor () -> Told, Int, @escaping @MainActor (Any) -> Any) -> Void,
+                         fail: @escaping (String) -> Void) {
+        open(path: path, page: nil, live: live) { result in
+            guard live() else { return }
+            switch result {
+            case .failure(let refusal): fail(refusal.description)
+            case .success(let model):
+                model.whenLoaded(within: Self.loadLimit) { _ in
+                    guard let source = model.text, !model.loading, !model.live, model.pageCount > 0 else {
+                        return told({ model.isClosed ? Told(refusal: Self.closedText) : Told(self.told(model, caller: caller), state: model.shownState) }, 0, { $0 })
+                    }
+                    let count = model.pageCount, word = model.unit.word
+                    guard first < count else { return fail("It has \(count) \(word)s; from \(first + 1) is past its end.") }
+                    var pages: [String] = []
+                    var size = 0
+                    // `reached`: the first page not told (count: all of them were).
+                    func finish(_ reached: Int) {
+                        told({
+                            guard !model.isClosed else { return Told(refusal: Self.closedText) }
+                            var answer = self.told(model, caller: caller)
+                            guard !model.loading, model.text === source else { return Told(answer, state: model.shownState) }
+                            answer["text"] = pages.joined(separator: "\n\n")
+                            if pages.isEmpty { answer["textNote"] = Self.noWords(word) }
+                            if reached < count {
+                                answer["textCut"] = "This goes to \(word) \(reached) of \(count); pages: \"all\" with from: \(reached + 1) gives the next."
+                            }
+                            return Told(answer, state: model.shownState)
+                        }, 0, { out in
+                            guard var all = out as? [String: Any], let text = all["text"] as? String, text.count > Self.allLimit else { return out }
+                            all["text"] = String(text.prefix(Self.allLimit)) + "…"
+                            all["textCut"] = "This is the start of these \(word)s' words; ask with page for the rest."
+                            return all
+                        })
+                    }
+                    func next(_ index: Int) {
+                        guard live() else { return }
+                        guard index < count else { return finish(index) }
+                        source.read(page: index, selected: NSRange(location: NSNotFound, length: 0), paragraph: { _ in nil }) { text, _, _ in
+                            guard let text, !text.isEmpty else { return next(index + 1) }
+                            let piece = "— \(word) \(index + 1) —\n" + text
+                            // A page that would go past the limit waits for the next call (the first is told whatever it is).
+                            if !pages.isEmpty, size + piece.count > Self.allLimit { return finish(index) }
+                            pages.append(piece)
+                            size += piece.count + 2
+                            next(index + 1)
+                        }
+                    }
+                    next(first)
+                }
+            }
+        }
+    }
     static func fitText(_ answer: Any) -> Any {
         guard var told = answer as? [String: Any], let text = told["text"] as? String, text.count > textLimit else { return answer }
         told["text"] = String(text.prefix(textLimit)) + "…"

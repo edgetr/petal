@@ -14,7 +14,7 @@
   ],
   "redirects": [
     { "source": "/install.sh", "destination": "https://raw.githubusercontent.com/edgetr/petal/main/get.sh", "permanent": false },
-    { "source": "/download/mac", "destination": "https://github.com/edgetr/petal/releases/download/macos-v2.1.3/Petal-2.1.3-macos.zip", "permanent": false },
+    { "source": "/download/mac", "destination": "https://github.com/edgetr/petal/releases/download/macos-v2.1.4/Petal-2.1.4-macos.zip", "permanent": false },
     { "source": "/github", "destination": "https://github.com/edgetr/petal", "permanent": false }
   ]
 }

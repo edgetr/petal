@@ -183,6 +183,13 @@ extension NoteFile {
         set { set("ink", newValue.isEmpty ? nil : .list(newValue.map(\.value))) }
     }
 
+    /// `asks:`: what the person sent to Petal from this note, in the order they sent it (each line Return took out of
+    /// the writing), each with what came back. Shown as bubbles after the writing; never run by being here.
+    var asks: [NoteHelp.Ask] {
+        get { value("asks")?.items.compactMap(NoteHelp.Ask.init) ?? [] }
+        set { set("asks", newValue.isEmpty ? nil : .list(newValue.map(\.value))) }
+    }
+
     var steps: [String] {
         get { value("steps")?.items.compactMap(\.string) ?? [] }
         set { set("steps", newValue.isEmpty ? nil : .list(newValue.suffix(NoteHelp.stepsKept).map { .text($0) })) }
@@ -267,6 +274,142 @@ enum NoteHelp {
             if let at { pairs.append(("at", .text(NoteFile.stamp(at)))) }
             return .map(pairs)
         }
+    }
+
+    /// One request the person sent from a note (`asks:`): Return at the end of their own @Petal line took it out of
+    /// the writing. It keeps the line as they wrote it (`words`), when and on which Mac it was sent, and once it's
+    /// over, how it ended and what came back (`said`: the answer, Petal's own reply, or why it didn't finish), all of
+    /// it shielded before it's kept. Being in a file never runs anything: only Try again, pressed by the person, does.
+    struct Ask: Equatable, Sendable {
+        /// `done`: answered (`said` is the answer); `replied`: Petal answered without a helper ("Remembered …");
+        /// `refused`: Petal didn't send it, and says why; `failed`: it ran and couldn't finish; `stopped`.
+        enum End: String, Sendable { case done, replied, refused, failed, stopped }
+        var id: String
+        var words: String
+        var at: Date? = nil
+        var mac = ""
+        var end: End? = nil
+        var said = ""
+        var who = ""
+        /// Its reason is a key or a sign-in to fix (Settings › Petal AI's button on the bubble).
+        var settings = false
+
+        init(id: String, words: String, at: Date? = nil, mac: String = "") {
+            self.id = id; self.words = words; self.at = at; self.mac = mac
+        }
+
+        init?(_ value: NoteValue) {
+            guard case .map = value, !value.text("id").isEmpty else { return nil }
+            self.init(id: value.text("id"), words: value.text("words"), at: NoteFile.date(value.text("at")), mac: value.text("mac"))
+            end = End(rawValue: value.text("end"))
+            said = value.text("said")
+            who = value.text("who")
+            settings = value.text("settings") == "true"
+        }
+
+        var value: NoteValue {
+            var pairs: [(String, NoteValue)] = [("id", .text(id)), ("words", .text(words))]
+            if let at { pairs.append(("at", .text(NoteFile.stamp(at)))) }
+            if !mac.isEmpty { pairs.append(("mac", .text(mac))) }
+            if let end { pairs.append(("end", .text(end.rawValue))) }
+            if !said.isEmpty { pairs.append(("said", .text(said))) }
+            if !who.isEmpty { pairs.append(("who", .text(who))) }
+            if settings { pairs.append(("settings", .text("true"))) }
+            return .map(pairs)
+        }
+
+        /// Try again and Edit are offered: Petal didn't send it, or it didn't finish (stopped, failed, or never ended:
+        /// a Petal that quit while it worked).
+        var again: Bool { end == nil || end == .refused || end == .failed || end == .stopped }
+
+        /// How a request ended, as a run's result carries it (`Result.asks`): set on the request with this id, if the
+        /// note still has it (one taken back with Edit meanwhile is gone, and nothing is added for it).
+        struct Outcome: Equatable, Sendable {
+            var id: String
+            /// Nil: sent again (Try again), its last ending cleared.
+            var end: End?
+            var said = ""
+            var who = ""
+            var settings = false
+
+            init(id: String, end: End?, said: Shielded = "", who: String = "", settings: Bool = false) {
+                self.init(stored: id, end: end, said: said.text, who: who, settings: settings)
+            }
+
+            /// What a run's ink says (ink is made only from `Shielded`), as its request's ending.
+            init(id: String, end: End, ink: Ink, settings: Bool = false) {
+                self.init(stored: id, end: end, said: ink.text, who: ink.heading, settings: settings || ink.link == NoteHelp.settingsLink)
+            }
+
+            fileprivate init(stored id: String, end: End?, said: String, who: String, settings: Bool) {
+                self.id = id; self.end = end; self.said = said; self.who = who; self.settings = settings
+            }
+
+            init?(_ value: NoteValue) {
+                guard case .map = value, !value.text("id").isEmpty else { return nil }
+                self.init(stored: value.text("id"), end: End(rawValue: value.text("end")), said: value.text("said"), who: value.text("who"),
+                          settings: value.text("settings") == "true")
+            }
+
+            var value: NoteValue {
+                var pairs: [(String, NoteValue)] = [("id", .text(id))]
+                if let end { pairs.append(("end", .text(end.rawValue))) }
+                if !said.isEmpty { pairs.append(("said", .text(said))) }
+                if !who.isEmpty { pairs.append(("who", .text(who))) }
+                if settings { pairs.append(("settings", .text("true"))) }
+                return .map(pairs)
+            }
+
+            func apply(to asks: inout [Ask]) {
+                guard let index = asks.firstIndex(where: { $0.id == id }) else { return }
+                asks[index].end = end
+                asks[index].said = said
+                asks[index].who = who
+                asks[index].settings = settings
+            }
+        }
+    }
+
+    /// Where a line's request is: from its first @Petal to the end of the line (a chain's words, with no @Petal, are
+    /// the whole line). `cut` is where the writing ends before it (the blanks just before the @Petal go with the
+    /// request); `keepsBefore`: something other than blanks is before it (a task's checkbox, words, a picture), which
+    /// stays in the writing as it was. In UTF-16 offsets, as the editor counts.
+    static func request(in line: String) -> (start: Int, cut: Int, keepsBefore: Bool) {
+        let ns = line as NSString
+        guard let at = mentions(line).first(where: { $0.name.caseInsensitiveCompare(petal) == .orderedSame })?.range.location else {
+            return (0, 0, false)
+        }
+        var cut = at
+        while cut > 0, let blank = Unicode.Scalar(ns.character(at: cut - 1)), blank == " " || blank == "\t" { cut -= 1 }
+        let before = ns.substring(to: cut).trimmingCharacters(in: CharacterSet(charactersIn: " \t"))
+        return (at, cut, !before.isEmpty)
+    }
+
+    /// Try again is offered, and done, only for a request this Mac sent itself: the request says it was sent from
+    /// this Mac, and this Mac's own record (`NoteLocal.sent`, never synced) holds it with the very same words. What a
+    /// file says alone (synced, imported, written by hand or by a tool) never runs anything: Edit, then Return.
+    static func mayRetry(_ ask: Ask, mac: String, sent: [String: String]?) -> Bool {
+        ask.again && !mac.isEmpty && ask.mac == mac && sent?[ask.id] == ask.words
+    }
+
+    /// Sent from another Mac and not over there yet: it's at work (or waiting) on that Mac, not "didn't finish" here.
+    static func askedElsewhere(_ ask: Ask, mac: String) -> Bool { ask.end == nil && !ask.mac.isEmpty && ask.mac != mac }
+
+    /// A note with nothing in it at all: no writing of the person's (`untouched`), and nothing of a helper's (no
+    /// request, answer, helper line, steps, stamps, task, sum, watcher, chain or time to come back). Only such a note
+    /// is ever let go by itself.
+    static func holdsNothing(_ file: NoteFile, untouched: Bool) -> Bool {
+        untouched && file.asks.isEmpty && file.ink.isEmpty && file.helper == nil && file.steps.isEmpty && file.stamps.isEmpty
+            && file.task.isEmpty && file.calc == nil && file.watch == nil && file.chain == nil && file.back == nil
+    }
+
+    /// What a paper shows under each request, in order: whether its answer is the note's ink as it is now (the last
+    /// one answered, which shows the whole ink: its proof, a second opinion), and whether the note's ink comes
+    /// before every request (ink from before requests were bubbles, or with none answered yet).
+    static func askLayout(_ asks: [Ask], ink: [Ink]) -> (inkFirst: Bool, inkUnder: String?) {
+        guard !ink.isEmpty else { return (false, nil) }
+        guard let last = asks.last(where: { $0.end == .done }) else { return (true, nil) }
+        return (false, last.id)
     }
 
     /// One block of a helper's ink on the note's front: who wrote it, its words, and for a coding helper its proof
@@ -825,7 +968,7 @@ enum NoteHelp {
     /// Requests handled on the note at once, never sent to a helper at work as a follow-up.
     static func isControl(_ request: Request) -> Bool {
         switch request {
-        case .stopWatching, .stopMorning, .pause, .remember, .forget, .bringBack, .putAway: true
+        case .stopWatching, .stopMorning, .pause, .remember, .forget, .bringBack, .askWhen, .putAway: true
         default: false
         }
     }
@@ -905,14 +1048,15 @@ enum NoteHelp {
     // MARK: Times said in words
 
     /// A day and time in words: "Friday", "Friday 9:00", "tomorrow at 3pm", "tonight", "in 2 hours", "next week",
-    /// "Monday morning". A day without a time is at 9:00; a weekday that's today and past is next week's.
+    /// "Monday morning", "this evening". A day without a time is at 9:00; a weekday that's today and past is next
+    /// week's. Never a time already past: one said for today that has gone by isn't taken (Petal asks when).
     static func when(_ text: String, now: Date, calendar: Calendar = .current) -> (date: Date, label: String)? {
         timeWords(text, now: now, calendar: calendar).first.map { ($0.date, $0.label) }
     }
 
     static func timeWords(_ text: String, now: Date, calendar: Calendar = .current) -> [(range: NSRange, date: Date, label: String)] {
         let days = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
-        let pattern = #"(?i)\b(?:in\s+(\d+|an?|one|two|three)\s+(minutes?|mins?|hours?|days?|weeks?)|(next\s+week)|(today|tonight|tomorrow|(?:next\s+)?(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))(?:\s+(morning|afternoon|evening|night))?(?:\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon))?)\b"#
+        let pattern = #"(?i)\b(?:in\s+(\d+|an?|one|two|three|half\s+an)\s+(minutes?|mins?|hours?|hrs?|days?|weeks?)|(next\s+week)|(today|tonight|tomorrow|this(?=\s+(?:morning|afternoon|evening))|(?:next\s+)?(?:sunday|monday|tuesday|wednesday|thursday|friday|saturday))(?:\s+(morning|afternoon|evening|night))?(?:\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midnight))?)\b"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString
         var out: [(NSRange, Date, String)] = []
@@ -923,10 +1067,13 @@ enum NoteHelp {
         for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
             let group = { (i: Int) -> String? in match.range(at: i).location == NSNotFound ? nil : ns.substring(with: match.range(at: i)).lowercased() }
             if let count = group(1), let unit = group(2) {
-                let n = ["a": 1, "an": 1, "one": 1, "two": 2, "three": 3][count] ?? Int(count) ?? 1
-                let seconds: Double = unit.hasPrefix("min") ? 60 : unit.hasPrefix("hour") ? 3600 : unit.hasPrefix("day") ? 86400 : 7 * 86400
-                let date = now.addingTimeInterval(Double(n) * seconds)
-                out.append((match.range, date, unit.hasPrefix("min") || unit.hasPrefix("hour") ? clockLabel(date) : dayLabel(date, now: now, calendar: calendar)))
+                let half = count.hasPrefix("half")
+                let n: Double = half ? 0.5 : Double(["a": 1, "an": 1, "one": 1, "two": 2, "three": 3][count] ?? Int(count) ?? 1)
+                // "in 0 minutes" is now: no time to bring anything back at.
+                guard n > 0 else { continue }
+                let seconds: Double = unit.hasPrefix("min") ? 60 : unit.hasPrefix("h") ? 3600 : unit.hasPrefix("day") ? 86400 : 7 * 86400
+                let date = now.addingTimeInterval(n * seconds)
+                out.append((match.range, date, unit.hasPrefix("min") || unit.hasPrefix("h") ? clockLabel(date) : dayLabel(date, now: now, calendar: calendar)))
                 continue
             }
             if group(3) != nil {
@@ -945,8 +1092,12 @@ enum NoteHelp {
             default: break
             }
             if word == "tonight" { hour = 20 }
+            // "tonight at 9", "Friday evening at 7": the evening's 9 and 7, never the morning's.
+            let later = word == "tonight" || ["afternoon", "evening", "night"].contains(group(5) ?? "")
+            var bare = false
+            var midnight = false
             if let clock = group(6) {
-                if clock == "noon" { hour = 12; minute = 0 } else {
+                if clock == "noon" { hour = 12; minute = 0 } else if clock == "midnight" { hour = 0; minute = 0; midnight = true } else {
                     let pm = clock.hasSuffix("pm"), am = clock.hasSuffix("am")
                     let digits = clock.replacingOccurrences(of: "am", with: "").replacingOccurrences(of: "pm", with: "").trimmingCharacters(in: .whitespaces)
                     let parts = digits.split(separator: ":")
@@ -955,25 +1106,123 @@ enum NoteHelp {
                     minute = parts.count > 1 ? Int(parts[1]) ?? 0 : 0
                     if pm, hour < 12 { hour += 12 }
                     if am, hour == 12 { hour = 0 }
-                    // "Friday 3" means the afternoon; "Friday 9" the morning.
-                    if !pm, !am, parts.count == 1, (1...7).contains(hour) { hour += 12 }
+                    if !pm, !am, hour < 12 {
+                        if later { hour += 12 }
+                        // "Friday 3" means the afternoon; "Friday 9" the morning ("Friday morning at 7" too).
+                        else if group(5) == nil, parts.count == 1, (1...7).contains(hour) { hour += 12 }
+                        else { bare = group(5) == nil }
+                    }
                 }
             }
             var day: Date
             let nextOne = word.hasPrefix("next ")
             let name = nextOne ? String(word.dropFirst(5)) : word
             switch name {
-            case "today", "tonight": day = now
+            case "today", "tonight", "this": day = now
             case "tomorrow": day = calendar.date(byAdding: .day, value: 1, to: now) ?? now
             default:
                 guard let index = days.firstIndex(of: name), let found = next(weekday: index + 1, after: now, calendar: calendar, strictly: nextOne) else { continue }
                 day = found
             }
             guard var date = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: day) else { continue }
+            // Midnight on a day is the end of it.
+            if midnight { date = calendar.date(byAdding: .day, value: 1, to: date) ?? date }
+            // "today at 9" once 9 in the morning has gone by: 9 in the evening.
+            if bare, date <= now, ["today", "this"].contains(name), let evening = calendar.date(byAdding: .hour, value: 12, to: date),
+               calendar.isDate(evening, inSameDayAs: date) { date = evening }
             // A weekday that's today and already past: next week's.
-            if date <= now, !["today", "tonight", "tomorrow"].contains(name) { date = calendar.date(byAdding: .day, value: 7, to: date) ?? date }
+            if date <= now, !["today", "tonight", "tomorrow", "this"].contains(name) { date = calendar.date(byAdding: .day, value: 7, to: date) ?? date }
             let label = group(6) != nil || group(5) != nil || name == "tonight" ? clockLabel(date) : "9:00"
             out.append((match.range, date, label))
+        }
+        out += moreTimeWords(text, now: now, calendar: calendar, taken: out.map(\.0))
+        // A time already gone by is no time to bring anything back at: Petal asks when instead.
+        return out.filter { $0.1 > now }.sorted { $0.0.location < $1.0.location }
+    }
+
+    /// The other ways of saying when, where none of `timeWords`' own is: "Dec 1", "1 December", "the 20th" (each
+    /// with a time or at 9:00, the next one to come), "next month" (this day next month, at its time or 9:00), and a time alone
+    /// ("at 5", "5pm", "17:30": today, or tomorrow once it's past; "at 5" alone is the afternoon, as "Friday 5" is).
+    private static func moreTimeWords(_ text: String, now: Date, calendar: Calendar, taken: [NSRange]) -> [(NSRange, Date, String)] {
+        let time = #"(?:\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midnight))?(?!\w)"#
+        let month = "(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\\.?"
+        let patterns: [(kind: Int, pattern: String)] = [
+            (0, "(?i)\\b" + month + "\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b" + time),
+            (1, "(?i)\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?" + month + "(?=\\W|$)" + time),
+            (2, "(?i)\\b(?:on\\s+)?the\\s+(\\d{1,2})(?:st|nd|rd|th)\\b" + time),
+            (3, #"(?i)\bnext\s+month"# + time),
+            (4, #"(?i)\b(?:at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon|midnight)|(\d{1,2}(?::\d{2})?\s*(?:am|pm))|(\d{1,2}:\d{2}))\b"#),
+        ]
+        let ns = text as NSString
+        var taken = taken
+        var out: [(NSRange, Date, String)] = []
+        let clockLabel = { (date: Date) -> String in
+            let parts = calendar.dateComponents([.hour, .minute], from: date)
+            return String(format: "%d:%02d", parts.hour ?? 0, parts.minute ?? 0)
+        }
+        // A clock said ("5", "5pm", "17:30", "noon"): "5" alone, 1 to 7, is the afternoon.
+        func clock(_ said: String) -> (hour: Int, minute: Int)? {
+            guard var parts = clockParts(said) else { return nil }
+            let lower = said.lowercased()
+            if !lower.contains("am"), !lower.contains("pm"), !lower.contains(":"), (1...7).contains(parts.hour) { parts.hour += 12 }
+            return parts
+        }
+        func monthNumber(_ word: String) -> Int? {
+            let names = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+            return names.firstIndex { word.lowercased().hasPrefix($0) }.map { $0 + 1 }
+        }
+        // That day (of `month`, or the next month that has it) at the time said, the next one to come.
+        func date(month wanted: Int?, day: Int, at clock: (hour: Int, minute: Int)) -> Date? {
+            let parts = calendar.dateComponents([.year, .month], from: now)
+            for step in 0...24 {
+                guard let base = calendar.date(from: DateComponents(year: parts.year, month: parts.month, day: 1)),
+                      let first = calendar.date(byAdding: .month, value: step, to: base) else { return nil }
+                let shown = calendar.dateComponents([.year, .month], from: first)
+                if let wanted, shown.month != wanted { continue }
+                guard let found = calendar.date(from: DateComponents(year: shown.year, month: shown.month, day: day, hour: clock.hour, minute: clock.minute)),
+                      calendar.component(.day, from: found) == day else { continue }
+                if found > now { return found }
+            }
+            return nil
+        }
+        for (kind, pattern) in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                guard !taken.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { continue }
+                let group = { (i: Int) -> String? in
+                    i < match.numberOfRanges && match.range(at: i).location != NSNotFound ? ns.substring(with: match.range(at: i)) : nil
+                }
+                var found: (Date, String)?
+                switch kind {
+                case 0, 1, 2:
+                    let dayText = kind == 0 ? group(2) : group(1)
+                    let monthText = kind == 0 ? group(1) : kind == 1 ? group(2) : nil
+                    let timeText = kind == 2 ? group(2) : group(3)
+                    guard let day = dayText.flatMap({ Int($0) }), (1...31).contains(day) else { continue }
+                    let at = timeText.flatMap(clock) ?? (9, 0)
+                    if let made = date(month: monthText.flatMap(monthNumber), day: day, at: at) {
+                        found = (made, dayLabel(made, now: now, calendar: calendar) + " " + clockLabel(made))
+                    }
+                case 3:
+                    let at = group(1).flatMap(clock) ?? (9, 0)
+                    if let later = calendar.date(byAdding: .month, value: 1, to: now),
+                       let made = calendar.date(bySettingHour: at.hour, minute: at.minute, second: 0, of: later) {
+                        found = (made, dayLabel(made, now: now, calendar: calendar) + " " + clockLabel(made))
+                    }
+                default:
+                    guard let said = group(1) ?? group(2) ?? group(3), let at = clock(said),
+                          var made = calendar.date(bySettingHour: at.hour, minute: at.minute, second: 0, of: now) else { continue }
+                    // "at 8" in the evening, its morning gone by: 8 tonight, not tomorrow morning.
+                    let lower = said.lowercased()
+                    if made <= now, at.hour < 12, !lower.contains("am"), !lower.contains(":"), lower != "midnight",
+                       let evening = calendar.date(byAdding: .hour, value: 12, to: made), evening > now, calendar.isDate(evening, inSameDayAs: made) { made = evening }
+                    if made <= now { made = calendar.date(byAdding: .day, value: 1, to: made) ?? made }
+                    found = (made, clockLabel(made))
+                }
+                guard let found else { continue }
+                taken.append(match.range)
+                out.append((match.range, found.0, found.1))
+            }
         }
         return out
     }
@@ -1012,6 +1261,8 @@ enum NoteHelp {
     enum Request: Equatable {
         /// "bring this back Friday" (with any other notes named).
         case bringBack(Date, label: String, others: [String])
+        /// "remind me to call Sam", "bring this back" with no time said: Petal asks when, nothing starts.
+        case askWhen
         case remember(String)
         case forget(String)
         case putAway
@@ -1087,7 +1338,12 @@ enum NoteHelp {
     /// What `line` would ask, before the gate.
     private static func candidate(_ line: String, now: Date, calendar: Calendar) -> Request {
         if let chain = chainWords(line) { return .chain(after: chain.after, ask: chain.ask, then: chain.then) }
-        let words = spoken(line)
+        var words = spoken(line)
+        // "remember: …", "forget, …": the same as without the mark.
+        for verb in ["remember", "forget"] where words.lowercased().hasPrefix(verb) {
+            let rest = words.dropFirst(verb.count)
+            if let mark = rest.first, ":,-–—".contains(mark) { words = verb + " " + rest.dropFirst().trimmingCharacters(in: .whitespaces) }
+        }
         let lower = words.lowercased()
         if lower.hasPrefix("remember ") || lower == "remember" {
             var item = String(words.dropFirst(9)).trimmingCharacters(in: .whitespaces)
@@ -1112,6 +1368,13 @@ enum NoteHelp {
                 let others = mentions(line).map(\.name).filter { $0.caseInsensitiveCompare(petal) != .orderedSame && !["this", "here"].contains($0.lowercased()) && self.when($0, now: now, calendar: calendar) == nil }
                 return .bringBack(when.date, label: when.label, others: others)
             }
+            // No time said: asked when, rather than handed to a helper that can't set one. "Remind me what this
+            // was" is a question, not a reminder.
+            // "Remind me later", "remind me in 5", a time already gone by: asked when too.
+            let after = lower.hasPrefix("remind me") ? lower.dropFirst(9).trimmingCharacters(in: .whitespaces).trimmingCharacters(in: .punctuationCharacters) : ""
+            let question = ["what", "who", "whom", "whose", "how", "why", "when", "where", "which", "whether", "if"]
+                .contains { after == $0 || after.hasPrefix($0 + " ") || after.hasPrefix($0 + "'") }
+            if !lower.hasPrefix("remind me") || !question { return .askWhen }
         }
         if let against = lower.range(of: "against "), lower.contains("check") || lower.contains("compare") {
             let after = String(words[against.upperBound...])
@@ -1188,6 +1451,7 @@ enum NoteHelp {
     static func clockParts(_ words: String) -> (hour: Int, minute: Int)? {
         let text = words.lowercased().trimmingCharacters(in: .whitespaces)
         if text == "noon" { return (12, 0) }
+        if text == "midnight" { return (0, 0) }
         let pm = text.hasSuffix("pm"), am = text.hasSuffix("am")
         let digits = text.replacingOccurrences(of: "am", with: "").replacingOccurrences(of: "pm", with: "").trimmingCharacters(in: .whitespaces)
         let parts = digits.split(separator: ":")
@@ -1201,7 +1465,7 @@ enum NoteHelp {
 
     /// The line a watcher waits for: "under $300", "below ¥12k", "over 50".
     static func condition(_ text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: #"(?i)\b(under|below|less than|cheaper than|drops below|falls below|over|above|more than|goes over|rises above)\s+([$€£¥₺]?\s?\d[\d.,]*\s?(?:k|K)?\s?(?:[$€£¥₺]|usd|eur|gbp|jpy|try|tl)?)"#) else { return nil }
+        guard let regex = try? NSRegularExpression(pattern: #"(?i)\b(under|below|less than|cheaper than|drops below|falls below|over|above|more than|goes over|rises above)\s+([$€£¥₺]?\s?\d[\d.,]*\s?(?:(?:million|billion|bn|k|m|b)\b)?\s?(?:[$€£¥₺]|usd|eur|gbp|jpy|try|tl)?)"#) else { return nil }
         let ns = text as NSString
         guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { return nil }
         return ns.substring(with: match.range).trimmingCharacters(in: .whitespaces)
@@ -1216,10 +1480,10 @@ enum NoteHelp {
         var thousands = false
     }
 
-    /// Prices and numbers with a currency in `text`: "$1,299.99", "¥12,800", "€12", "300 TL", "¥12k".
+    /// Prices and numbers with a currency in `text`: "$1,299.99", "¥12,800", "€12", "300 TL", "¥12k", "$1.5M".
     static func amounts(_ text: String, needCurrency: Bool = true) -> [Amount] {
         let symbols = "$€£¥₺"
-        let pattern = #"(?i)([$€£¥₺]|usd|eur|gbp|jpy|try)?\s?(\d{1,3}(?:[,.\x{202F}\x{00A0} ]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s?(k\b)?\s?([$€£¥₺]|usd\b|eur\b|gbp\b|jpy\b|try\b|tl\b)?"#
+        let pattern = #"(?i)([$€£¥₺]|usd|eur|gbp|jpy|try)?\s?(\d{1,3}(?:[,.\x{202F}\x{00A0} ]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s?(million\b|billion\b|bn\b|k\b|m\b|b\b)?\s?([$€£¥₺]|usd\b|eur\b|gbp\b|jpy\b|try\b|tl\b)?"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString
         return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
@@ -1228,8 +1492,10 @@ enum NoteHelp {
             let currency = symbols.contains(raw) && !raw.isEmpty ? raw : ["usd": "$", "eur": "€", "gbp": "£", "jpy": "¥", "try": "₺", "tl": "₺"][raw] ?? ""
             if needCurrency && currency.isEmpty { return nil }
             guard var value = number(group(2) ?? "") else { return nil }
-            let thousands = group(3) != nil
-            if thousands { value *= 1000 }
+            // "k", "m" or "million", "b", "bn" or "billion" after the number.
+            let suffix = group(3)?.lowercased() ?? ""
+            let thousands = suffix == "k"
+            value *= ["k": 1e3, "m": 1e6, "million": 1e6, "b": 1e9, "bn": 1e9, "billion": 1e9][suffix] ?? 1
             return Amount(value: value, currency: currency, text: ns.substring(with: match.range).trimmingCharacters(in: .whitespaces),
                           range: match.range, thousands: thousands)
         }
@@ -1524,11 +1790,56 @@ enum NoteHelp {
         var number: Int?
     }
 
+    static let githubPages: Set<String> = ["settings", "orgs", "organizations", "marketplace", "notifications", "explore", "topics",
+                                           "sponsors", "login", "logout", "signup", "features", "pulls", "issues", "new", "about",
+                                           "enterprise", "pricing", "search", "apps", "codespaces", "collections", "trending",
+                                           "dashboard", "account", "security", "customer-stories", "readme", "github-copilot", "copilot"]
+
+    /// Whether a line on a repository's note asks for work in it (a coding helper in a worktree), rather than a
+    /// question about it: fix, change, add, implement, write, make or build something, a pull request, a commit or a
+    /// push, or a checkout named ("in ~/x"), said plainly or politely ("please fix", "can you add a test", "could you
+    /// please rename it"). A question ("what does this change?", "can you explain why this fails?", "summarize this
+    /// PR") is answered.
+    static func asksForWork(_ line: String) -> Bool {
+        let lower = spoken(line).lowercased()
+        if lower.range(of: #"\bin\s+~/"#, options: .regularExpression) != nil { return true }
+        var words = lower.split(whereSeparator: { !$0.isLetter && $0 != "'" }).map(String.init)
+        // A request's opener, taken off before its verb: "please", "can you", "could you please", "would you mind".
+        var opened = false
+        while let first = words.first {
+            if ["please", "pls", "kindly", "ok", "okay", "hey"].contains(first) { words.removeFirst(); opened = true; continue }
+            if words.count >= 2, ["can", "could", "would", "will"].contains(first), ["you", "we"].contains(words[1]) {
+                words.removeFirst(2)
+                opened = true
+                if words.first == "mind" { words.removeFirst() }
+                continue
+            }
+            break
+        }
+        // Work on the note itself ("fix the typo in this note", "add the PR's summary to my note", "rewrite the
+        // note"), not on the repository.
+        let note = #"(this|the|my)\s+note\b"#
+        if lower.range(of: #"\b(in|to|into|on|onto)\s+"# + note, options: .regularExpression) != nil
+            || (words.count >= 3 && words[1...2].joined(separator: " ").range(of: "^" + note, options: .regularExpression) != nil) { return false }
+        let first = words.first ?? ""
+        let verbs = ["fix", "change", "implement", "add", "write", "refactor", "rename", "remove", "update", "make", "build",
+                     "port", "migrate", "bump", "upgrade", "commit", "push", "merge", "rebase", "resolve", "address", "finish", "continue",
+                     "fixing", "changing", "adding", "writing", "updating", "making", "removing", "renaming"]
+        if verbs.contains(first) { return true }
+        if !opened, ["what", "why", "how", "who", "when", "where", "which", "is", "are", "does", "do", "can", "could", "should", "summarize",
+                     "explain", "describe", "tell", "show", "list", "read", "review", "check", "compare"].contains(first) { return false }
+        return ["open a pr", "open a pull request", "make a pr", "pull request for", "send a pr"].contains { lower.contains($0) }
+    }
+
     static func repository(url: String) -> Repository? {
         guard let parts = URLComponents(string: url), let host = parts.host?.lowercased(), host == "github.com" || host == "www.github.com" else { return nil }
         let path = parts.path.split(separator: "/").map(String.init)
-        guard path.count >= 2 else { return nil }
-        let slug = (path[0] + "/" + path[1]).lowercased().replacingOccurrences(of: ".git", with: "")
+        // GitHub's own pages (settings, notifications, …) are no repository.
+        guard path.count >= 2, !githubPages.contains(path[0].lowercased()) else { return nil }
+        // "owner/repo.git" is "owner/repo"; "owner/owner.github.io" stays itself.
+        var name = path[1]
+        if name.lowercased().hasSuffix(".git") { name.removeLast(4) }
+        let slug = (path[0] + "/" + name).lowercased()
         if path.count >= 4, let number = Int(path[3]) {
             if path[2] == "pull" { return Repository(slug: slug, kind: .pull, number: number) }
             if path[2] == "issues" { return Repository(slug: slug, kind: .issue, number: number) }
@@ -2192,7 +2503,7 @@ extension NoteHelp {
     }
 
     static func admit(_ f: GateFacts) -> Admission {
-        guard f.paperFound else { return .fail("This note isn't here as one paper now (gone, or changed in two places): nothing was sent.") }
+        guard f.paperFound else { return .fail("This note has two versions, or was moved. Keep one, then ask again.") }
         guard f.notebook == f.startNotebook else { return .fail("This note moved to another notebook while it waited, so what it was told is out of date. Ask again.") }
         // An app made private: a run on that app's place stops; any other change is made again from the line.
         guard !f.placePrivate else { return .fail("This note's place is in an app you keep private now, so its helper stopped.") }
@@ -2204,6 +2515,8 @@ extension NoteHelp {
         if f.landing { return .go }
         guard f.notesReady else { return .wait("Petal Notes are getting ready.") }
         guard f.available.contains(f.provider) else {
+            // No AI chosen at all: Petal AI, not an app the person never picked.
+            if f.available.isEmpty { return .fail("Petal AI isn't set up yet.") }
             return .fail("\(f.provider == "codex" ? "Codex" : "Claude Code") isn't set up in Petal.")
         }
         if let models = f.models, !f.model.isEmpty, !models.contains(f.model) { return .fail("\(f.model) isn't available in Petal now.") }
@@ -2313,18 +2626,21 @@ extension NoteHelp {
         private(set) var calc: Calc?
         private(set) var task: [TaskItem]?
         private(set) var helper: HelperChange
+        /// How the requests it answered ended (the person's bubbles): set on each one the note still has.
+        private(set) var asks: [Ask.Outcome] = []
 
         /// A primary run's result (a chat helper's, a coding one's, a quick one's).
-        init(answer ink: Ink?, steps: [Shielded]? = nil, calc: Calc? = nil, task: [TaskItem]? = nil, helper: HelperChange) {
+        init(answer ink: Ink?, steps: [Shielded]? = nil, calc: Calc? = nil, task: [TaskItem]? = nil, helper: HelperChange, asks: [Ask.Outcome] = []) {
             self.ink = ink
             self.steps = steps.map { $0.map(\.text) }
             self.calc = calc
             self.task = task
             self.helper = helper
+            self.asks = asks
         }
 
         /// A reviewer's result: only its own opinion, with the answer it reviewed (`reviewed`: that primary ink's hash).
-        init(opinion ink: Ink?, reviewed: String, steps: [Shielded]? = nil, helper: HelperChange) {
+        init(opinion ink: Ink?, reviewed: String, steps: [Shielded]? = nil, helper: HelperChange, asks: [Ask.Outcome] = []) {
             if var ink {
                 ink.opinion = true
                 ink.reviewed = reviewed
@@ -2332,6 +2648,7 @@ extension NoteHelp {
                 said = (steps ?? []).map { "\(ink.who): \($0.text)" }
             }
             self.helper = helper
+            self.asks = asks
         }
 
         /// On the note as it is now, all of it in one change.
@@ -2343,6 +2660,11 @@ extension NoteHelp {
             if let calc { file.calc = calc }
             if let task { file.task = task }
             helper.apply(to: &file)
+            if !asks.isEmpty {
+                var all = file.asks
+                for outcome in asks { outcome.apply(to: &all) }
+                file.asks = all
+            }
         }
 
         /// This, then `later`, as one result: what landing each in turn would leave (two held for one note are one entry).
@@ -2355,6 +2677,7 @@ extension NoteHelp {
             if let calc = later.calc { all.calc = calc }
             if let task = later.task { all.task = task }
             if later.helper != .keep { all.helper = later.helper }
+            for outcome in later.asks { all.asks = all.asks.filter { $0.id != outcome.id } + [outcome] }
             return all
         }
 
@@ -2367,6 +2690,7 @@ extension NoteHelp {
             if !said.isEmpty { file.set("said", .list(said.map { .text($0) })) }
             file.calc = calc
             if let task { file.task = task }
+            if !asks.isEmpty { file.set("askEnds", .list(asks.map(\.value))) }
             switch helper {
             case .keep: file.set("result", .text("keep"))
             case .clear: file.set("result", .text("clear"))
@@ -2385,6 +2709,7 @@ extension NoteHelp {
             said = file.value("said")?.items.compactMap(\.string) ?? []
             calc = file.calc
             task = file.task.isEmpty ? nil : file.task
+            asks = file.value("askEnds")?.items.compactMap(Ask.Outcome.init) ?? []
             switch mode {
             case "keep": helper = .keep
             case "clear": helper = .clear
@@ -2570,6 +2895,22 @@ extension NoteHelp {
         return available.first.map(ProviderChoice.use) ?? .none
     }
 
+    /// Which document a note's helper means when it names none (`petal_view` with no path): the file place its run is
+    /// bound to (`required`), else the note's only file place; on several with none bound, which they are, for the
+    /// helper to name one by its path; none, when the note is on no file.
+    enum DocumentChoice: Equatable { case one(NoteStick), several([NoteStick]), none }
+
+    /// `isFile`: whether a place names a file (`ViewerFiles.namesFile`).
+    static func helperDocument(required: NoteStick?, places: [NoteStick], isFile: (NoteStick) -> Bool) -> DocumentChoice {
+        if let required, isFile(required) { return .one(required) }
+        let files = places.filter(isFile)
+        switch files.count {
+        case 0: return .none
+        case 1: return .one(files[0])
+        default: return .several(files)
+        }
+    }
+
     /// A coding helper's ink: its answer, its proof only from its own "Proof:" line, its finish line apart.
     static func codeInk(who: String, answer: Shielded, finish: Shielded?) -> Ink {
         Ink(who: who, text: answer.derive(inkText), proof: answer.deriveAll(proof(in:)), link: answer.derive { pullRequest(in: $0) ?? "" }, code: true, finish: finish ?? "")
@@ -2623,12 +2964,13 @@ extension NoteHelp {
     /// is, Petal's tools, its place, the person's notes and memory, then the brief.
     static func system(_ t: Told, provider: Shielded, computerUse: Bool, runDisplays: Bool = false, brief: Shielded) -> Shielded {
         var words: Shielded = """
-        You are \(provider), running inside Petal on the user's Mac as a helper in one of their Petal Notes. Petal's tools (the petal MCP server) are yours: petal_look and petal_ui look at the note's own place, petal_act uses it (in the background when it can; when it says the window must be in front, ask the user), petal_apps and petal_windows open and arrange apps, petal_notes and petal_note_read read their notes (a Private notebook's only from inside it), petal_vault fills logins, addresses and cards without you seeing a secret (paying shows the user a Buy card first; never type a password, card or key yourself), petal_trash moves files to the Trash (never delete files any other way). Petal asks the user before what changes things; if they say no, don't find another way.
+        You are Petal AI (running on \(provider)), inside Petal on the user's Mac, as a helper in one of their Petal Notes; to the user you are Petal AI. Petal's tools (the petal MCP server) are yours: petal_look and petal_ui look at the note's own place, petal_act uses it (in the background when it can; when it says the window must be in front, ask the user), petal_apps and petal_windows open and arrange apps, petal_notes and petal_note_read read their notes (a Private notebook's only from inside it), petal_vault fills logins, addresses and cards without you seeing a secret (paying shows the user a Buy card first; never type a password, card or key yourself), petal_trash moves files to the Trash (never delete files any other way). Petal asks the user before what changes things; if they say no, don't find another way.
         """
+        words = words + "\n\nTo answer about or summarize what's on the note's page, document or thread, read its words: petal_look with text: true (long ones in parts; find: a word gives the passages around it); petal_look with screenshot: \"window\" shows you the window (read the PNG). For a video, read its page (title, description, chapters) and, when the page offers a transcript, open it with petal_ui and petal_act and read that (a transcript's button is often under the description's “…more”: press that first, then petal_ui again). With no transcript, answer from the title, description and chapters, and say that's what it's from. A public page you may also open yourself by its address (your own web tools, or petal_browser) when the user's window doesn't show enough. Do what the tools can before asking the user to do it. When asked to reply or write to someone, put the words in the field and stop; send only when the user said to send."
         if computerUse { words = words + "\n\nYou may use the user's apps with petal_ui and petal_act; call petal_ui first and again after anything changes the window." }
         if runDisplays { words = words + "\n\n" + ownDisplay }
         if t.placeIsFile {
-            words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look reads it there, and petal_view gives the words of the page it shows (page: another one); petal_ui and petal_act never read or use Petal's own windows. Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
+            words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look reads it there, and petal_view (no path needed: it's this note's document) gives the words of the page it shows (page: another one; pages: \"all\" every page's); petal_ui and petal_act never read or use Petal's own windows. Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
         }
         if !t.place.isEmpty {
             words = words + "\n\nThe note is on: \(t.place). This, here, this page and this sentence mean that place, even after the user has gone elsewhere."
@@ -2639,7 +2981,7 @@ extension NoteHelp {
     }
 
     /// What a run is told about its own hidden display (`runDisplays`): Petal's own words, the same for the chat.
-    static let ownDisplay: Shielded = "The user has turned on hidden displays: what you open with petal_apps (action: open, with an app, a file or an address) goes on a display of your own that they don't see, so your work never shows up in front of them; the first open may wait its turn for a display. The reply says where it went. Read and use a window there with petal_ui (app: its app, or display: true for the one you opened last) and petal_act, which work in it with no pointer and nothing brought forward; petal_look with screenshot: \"screen\" shows you your display. The display goes when you're done: an app you started (it wasn't open) that the user never used, with nothing unsaved, is quit; a window you opened and left empty is closed; anything else comes to the user's screen then. What the user should keep, show them first (petal_windows, action: show): what you showed is theirs and stays. Another helper may be using the same app on its display: your open or act there then waits its turn, and you never see its windows. Where you need real keys in an app the user is using, Petal waits for them to leave it. Pass on: \"screen\" only for what the user asked to see themselves. Petal's questions, Buy and the vault's card still show to the user where they are; never ask them to look at your display. If something can only be done in front of them, say so in one line and ask them to press Show me. For the web, use petal_browser instead of opening an address with petal_apps: a browser of your own on that display (a fresh one, signed in to nothing), driven directly with no pointer or keyboard. open an address, read the page as text with an id on each control, then click, type, select and check by id; petal_vault fills logins and cards into it by those ids. It isn't for the page the user is looking at: when they mean their own page (this page, here), that's petal_look and petal_ui on the note's place."
+    static let ownDisplay: Shielded = "The user has turned on hidden displays: what you open with petal_apps (action: open, with an app, a file or an address) goes on a display of your own that they don't see, so your work never shows up in front of them; the first open may wait its turn for a display. The reply says where it went. Read and use a window there with petal_ui (app: its app, or display: true for the one you opened last) and petal_act, which work in it with no pointer and nothing brought forward; petal_look with screenshot: \"screen\" shows you your display. The display goes when you're done: an app you started (it wasn't open) that the user never used, with nothing unsaved, is quit; a window you opened and left empty is closed; anything else comes to the user's screen then. What the user should keep, show them first (petal_windows, action: show): what you showed is theirs and stays. Another helper may be using the same app on its display: your open or act there then waits its turn, and you never see its windows. Where you need real keys in an app the user is using, Petal waits for them to leave it. Pass on: \"screen\" only for what the user asked to see themselves. Petal's questions, Buy and the vault's card still show to the user where they are; never ask them to look at your display. If something can only be done in front of them, say so in one line and ask them to press Show me. For the web, use petal_browser instead of opening an address with petal_apps: a browser of your own on that display (a fresh one, signed in to nothing), driven directly with no pointer or keyboard. open an address, read the page as text with an id on each control, then click, type, select and check by id; petal_vault fills logins and cards into it by those ids. For the page the user is looking at (this page, here), read it with petal_look (text: true) and act on it with petal_ui and petal_act on the note's place; open a public page's address here when you need more of it."
 
     /// "Check this against @Notebook": each of its notes shielded whole first, then its title derived and its words
     /// cut, and the whole limited.

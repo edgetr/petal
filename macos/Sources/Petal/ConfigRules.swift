@@ -10,6 +10,17 @@ enum ConfigRules {
         ((value as? [Any]) ?? []).compactMap { $0 as? String }.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
     }
 
+    /// The furthest any number setting is taken from 0. No setting means anything near it, and everything that rounds
+    /// a setting to a whole number (a slider's label, the displays' limit) traps on one past Int's range.
+    static let numberBound = 1_000_000.0
+
+    /// A number setting as Petal goes by it: the file's number (a JSON true or false counts as 1 or 0), else the
+    /// default, and one written by hand past `numberBound` either way taken as that bound.
+    static func number(_ value: Any?, default fallback: Any?) -> Double {
+        let read = (value as? NSNumber)?.doubleValue ?? (fallback as? NSNumber)?.doubleValue ?? 0
+        return read.isFinite ? min(numberBound, max(-numberBound, read)) : 0
+    }
+
     /// A file read again: what it holds, nothing when it isn't there any more, and what was read before when it's
     /// there but doesn't read as JSON (an editor halfway through writing it, a typo), until it does again.
     static func reread(_ parsed: [String: Any]?, exists: Bool, before: [String: Any]) -> [String: Any] {

@@ -99,7 +99,10 @@ extension NoteTextView {
         var end = NSMaxRange(line)
         if end > line.location, end <= text.length, text.character(at: end - 1) == 10 { end -= 1 }
         guard selection.location == end else { return nil }
-        let words = text.substring(with: NSRange(location: line.location, length: end - line.location))
+        // The request is the line from its @Petal on (what's before it, a task's checkbox or words, stays writing).
+        let content = text.substring(with: NSRange(location: line.location, length: end - line.location))
+        let request = NoteHelp.request(in: content)
+        let words = (content as NSString).substring(from: request.start)
             .replacingOccurrences(of: "\u{FFFC}", with: "").trimmingCharacters(in: .whitespaces)
         // Only the line as the person wrote or edited it (its mark still runnable): an untouched line makes a new line.
         guard NoteHelp.calls(words), let runnable = runnableLine(NSRange(location: line.location, length: end - line.location)) else { return nil }
@@ -166,6 +169,7 @@ extension NoteTextView {
         closeMentionMenu()
         guard end >= start else { return true }
         insertText(NoteHelp.mention(choice.name) + " ", replacementRange: NSRange(location: start, length: end - start))
+        if choice.kind == .petal { petalPicked() }
         return true
     }
 
@@ -245,7 +249,7 @@ struct MentionMenuView: View {
     }
 
     private func hint(_ kind: MentionChoice.Kind) -> String {
-        switch kind { case .petal: "does it here"; case .note: ""; case .notebook: "notebook" }
+        switch kind { case .petal: "ask, then Return"; case .note: ""; case .notebook: "notebook" }
     }
 }
 

@@ -579,6 +579,11 @@ extension NoteRoom {
             return note.open && !note.moved
         }
     }
+
+    /// Whether a window keeps (or gets) room beside it: made when a note there opens, then kept while any paper of
+    /// that window shows beside it, folded or open, so it's resized once and a folded paper never covers the page;
+    /// given back once none does.
+    static func keepsRoom(opening: Bool, showing: Bool, narrowed: Bool) -> Bool { opening || (showing && narrowed) }
 }
 
 // MARK: - A notebook's cover, field by field

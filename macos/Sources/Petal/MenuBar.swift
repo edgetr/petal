@@ -3,7 +3,8 @@ import Observation
 import SwiftUI
 
 /// Petal in the menu bar (`menuBarIcon`): Petal's mark, with a menu of Petal Notes, settings, which dock, and
-/// updates. When a new Petal is ready, the mark turns blue with a dot and the menu offers the restart and what's new.
+/// updates, with what's new in this Petal. When a new Petal is ready, the mark turns blue with a dot and the menu
+/// offers the restart and what's new in that one.
 @MainActor
 final class MenuBar: NSObject, NSMenuDelegate {
     private var item: NSStatusItem?
@@ -59,14 +60,29 @@ final class MenuBar: NSObject, NSMenuDelegate {
             menu.addItem(Menus.header("Petal \(ready) is ready"))
             menu.addItem(ClosureMenuItem(title: "Restart to Update") { [weak self] in self?.app.relaunch() })
             menu.addItem(ClosureMenuItem(title: "What’s New in \(ready)") { [weak self] in self?.app.releaseNotes.show(ready) })
+        } else if let available = app.updater.available?.version {
+            menu.addItem(Menus.header("Petal \(available) is available"))
+            menu.addItem(ClosureMenuItem(title: "Install Petal \(available)") { [weak self] in
+                self?.app.updater.installAvailable()
+                self?.app.settings.show(.about)
+            })
+            menu.addItem(ClosureMenuItem(title: "What’s New in \(available)") { [weak self] in self?.app.releaseNotes.show(available) })
         } else {
-            let check = ClosureMenuItem(title: "Check for Updates") { [weak self] in self?.app.updater.check(manual: true) }
+            // Its answer shows in Settings › About as it comes: the menu is gone by then.
+            let check = ClosureMenuItem(title: "Check for Updates") { [weak self] in
+                self?.app.updater.check(manual: true)
+                self?.app.settings.show(.about)
+            }
             menu.addItem(check)
             let status = app.updater.status
             if !status.isEmpty {
                 let line = NSMenuItem(title: status, action: nil, keyEquivalent: "")
                 line.isEnabled = false
                 menu.addItem(line)
+            }
+            let running = app.version
+            if UpdateTrust.plainVersion(running) {
+                menu.addItem(ClosureMenuItem(title: "What’s New in \(running)") { [weak self] in self?.app.releaseNotes.show(running) })
             }
         }
         menu.addItem(.separator())
@@ -129,12 +145,58 @@ final class MenuBar: NSObject, NSMenuDelegate {
 
 // MARK: - What's new
 
-/// The release notes for a version: the GitHub release's text for its macos-v tag, as Markdown.
+/// What's new in Petal: each version's notes as the app holds them (`Resources/notes/<version>.md`, which build.sh
+/// copies from `macos/notes/`, the same files the release workflow makes each release's text from), or, for a version
+/// the app doesn't hold (an update that's ready), the GitHub release's text. It opens by itself once after Petal
+/// updated (`afterLaunch`), and from the menu bar and Settings › About.
 @MainActor
 final class ReleaseNotes {
     private var window: NSWindow?
 
-    func show(_ version: String) {
+    /// One version's notes as the app shows them (`WhatsNew.inApp`), or nil until they're fetched.
+    struct Section: Sendable, Identifiable, Equatable {
+        let version: String
+        var body: String?
+        var id: String { version }
+    }
+
+    /// `state.json`'s record of the version Petal last ran as on this Mac.
+    nonisolated static let lastKey = "lastVersion"
+
+    func show(_ version: String) { show([version], forward: true) }
+
+    /// Opens the window with these versions' notes, newest first. What the app holds is read off the main thread;
+    /// the rest is fetched by the window. Asked for (`forward`), it comes forward and takes the keyboard; opened by
+    /// itself after an update, it shows over the other windows and leaves the keyboard where it is.
+    func show(_ versions: [String], forward: Bool) {
+        guard !versions.isEmpty else { return }
+        Task.detached(priority: .userInitiated) {
+            let sections = versions.map { Section(version: $0, body: Self.carried($0)) }
+            await self.open(sections, forward: forward)
+        }
+    }
+
+    /// Once, a moment after the dock is up: when Petal started as a newer version than it last ran as, What's New
+    /// opens by itself with each version missed since (`WhatsNew.versions`). The version is kept whatever shows, so
+    /// it opens once for a version, and a first install (not `welcomed` when Petal started) shows nothing. When it
+    /// can't be kept (state.json can't be written), nothing opens: it would open again at every start. Never in a
+    /// headless run, and never over the welcome.
+    func afterLaunch(running: String, welcomed: Bool) {
+        guard !Headless.on else { return }
+        Task.detached(priority: .utility) {
+            let last = PetalState.read()[Self.lastKey] as? String
+            let versions = WhatsNew.versions(last: last, running: running, welcomed: welcomed, carried: Self.carriedVersions())
+            let kept = WhatsNew.keeps(last: last, running: running) && PetalState.set(Self.lastKey, running)
+            guard WhatsNew.opens(versions, kept: kept) else { return }
+            await MainActor.run {
+                guard !PetalApp.shared.welcome.isOpen else { return }
+                self.show(versions, forward: false)
+            }
+        }
+    }
+
+    private func open(_ sections: [Section], forward: Bool) {
+        guard !Headless.on else { return }
         let window = self.window ?? {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
                                   styleMask: [.titled, .closable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -147,65 +209,85 @@ final class ReleaseNotes {
             return window
         }()
         self.window = window
-        window.title = "What’s New in Petal \(version)"
-        window.setGlassContent(ReleaseNotesView(version: version).environment(PetalApp.shared))
-        window.center()
-        PetalWindow.bringForward(window)
+        window.title = ReleaseNotesView.title(sections)
+        window.setGlassContent(ReleaseNotesView(sections: sections).environment(PetalApp.shared))
+        if !window.isVisible { window.center() }
+        if forward { PetalWindow.bringForward(window) } else { window.orderFrontRegardless() }
     }
 
-    struct Notes: Sendable { let body: String; let link: URL? }
+    /// The notes this app holds for a version, as the app shows them; nil when it holds none.
+    nonisolated static func carried(_ version: String) -> String? {
+        guard UpdateTrust.plainVersion(version), let folder = Bundle.main.resourceURL?.appending(path: "notes"),
+              let text = try? String(contentsOf: folder.appending(path: "\(version).md"), encoding: .utf8) else { return nil }
+        return WhatsNew.inApp(text)
+    }
 
-    static func fetch(_ version: String) async -> Notes? {
-        guard let url = URL(string: "https://api.github.com/repos/edgetr/petal/releases/tags/macos-v\(version)") else { return nil }
+    /// The versions whose notes this app holds.
+    nonisolated static func carriedVersions() -> [String] {
+        guard let folder = Bundle.main.resourceURL?.appending(path: "notes"),
+              let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path) else { return [] }
+        return names.compactMap(WhatsNew.version(ofFile:))
+    }
+
+    /// A version's notes from its GitHub release (the tag macos-v<version>), as the app shows them.
+    static func fetch(_ version: String) async -> String? {
+        guard UpdateTrust.plainVersion(version),
+              let url = URL(string: "https://api.github.com/repos/edgetr/petal/releases/tags/macos-v\(version)") else { return nil }
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         guard let (data, response) = try? await URLSession.shared.data(for: request), (response as? HTTPURLResponse)?.statusCode == 200,
               let release = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
-        return Notes(body: release["body"] as? String ?? "", link: (release["html_url"] as? String).flatMap(URL.init(string:)))
+        return WhatsNew.inApp(release["body"] as? String ?? "")
     }
 }
 
+/// The What's New window: its title, each version's notes (under its version when there are several, newest first),
+/// and one button at most: Restart to update while that version waits, Install while it's available with updates off,
+/// or the release page when notes couldn't load.
 struct ReleaseNotesView: View {
     @Environment(PetalApp.self) private var app
-    let version: String
-    var preloaded: ReleaseNotes.Notes?
-    @State private var notes: ReleaseNotes.Notes?
-    @State private var failed = false
+    let sections: [ReleaseNotes.Section]
+    @State private var fetched: [String: String] = [:]
+    @State private var failed: Set<String> = []
+
+    static func title(_ sections: [ReleaseNotes.Section]) -> String {
+        sections.count == 1 ? "What’s new in \(sections[0].version)" : "What’s new in Petal"
+    }
 
     var body: some View {
         ZStack {
             Backdrop()
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 18) {
                 HStack(spacing: 14) {
                     Image(nsImage: NSApp.applicationIconImage).resizable().frame(width: 52, height: 52)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("What’s new in \(version)").font(.system(size: TextSize.title, weight: .bold))
-                        Text(app.updater.ready == version ? "Ready: restart Petal to finish." : "Petal for macOS")
-                            .font(.system(size: TextSize.callout)).foregroundStyle(.secondary)
-                    }
+                    Text(Self.title(sections)).font(.system(size: TextSize.title, weight: .bold))
                 }
                 Scroll {
-                    Group {
-                        if let notes = notes ?? preloaded {
-                            MarkdownView(text: notes.body.isEmpty ? "No notes for this one." : notes.body)
-                        } else if failed {
-                            Text("Couldn’t load the notes. They’re on GitHub too.").foregroundStyle(.secondary)
-                        } else {
-                            ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(.vertical, 30)
+                    VStack(alignment: .leading, spacing: 18) {
+                        ForEach(Array(sections.enumerated()), id: \.element.id) { index, section in
+                            if index > 0 { Divider() }
+                            notes(section)
                         }
                     }
-                    .padding(18)
+                    .padding(.vertical, 4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .glassEffect(.regular, in: .rect(cornerRadius: Radius.panel))
-                HStack {
-                    if let link = (notes ?? preloaded)?.link ?? URL(string: "https://github.com/edgetr/petal/releases") {
-                        Button("On GitHub") { NSWorkspace.shared.open(link) }.buttonStyle(.glass)
+                if let ready = app.updater.ready, ready == sections.first?.version {
+                    HStack {
+                        Spacer()
+                        AccentButton(title: "Restart to update") { app.relaunch() }.keyboardShortcut(.defaultAction)
                     }
-                    Spacer()
-                    if app.updater.ready == version {
-                        Button("Restart to update") { app.relaunch() }
-                            .buttonStyle(.glassProminent).tint(SettingsSection.dock.tint).keyboardShortcut(.defaultAction)
+                } else if let available = app.updater.available, available.version == sections.first?.version {
+                    HStack {
+                        Spacer()
+                        AccentButton(title: "Install") { app.updater.installAvailable() }.keyboardShortcut(.defaultAction)
+                    }
+                } else if !failed.isEmpty {
+                    HStack {
+                        Spacer()
+                        Button("Read them online") {
+                            NSWorkspace.shared.open(URL(string: "https://github.com/edgetr/petal/releases")!)
+                        }.buttonStyle(.glass)
                     }
                 }
             }
@@ -214,9 +296,24 @@ struct ReleaseNotesView: View {
         }
         .frame(minWidth: 460, minHeight: 360)
         .task {
-            guard preloaded == nil else { return }
-            notes = await ReleaseNotes.fetch(version)
-            failed = notes == nil
+            for section in sections where section.body == nil {
+                if let body = await ReleaseNotes.fetch(section.version) { fetched[section.version] = body } else { failed.insert(section.version) }
+            }
+        }
+    }
+
+    @ViewBuilder private func notes(_ section: ReleaseNotes.Section) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if sections.count > 1 {
+                Text("Petal \(section.version)").font(.system(size: TextSize.subtitle, weight: .semibold))
+            }
+            if let body = section.body ?? fetched[section.version] {
+                MarkdownView(text: body.isEmpty ? "No notes for this one." : body)
+            } else if failed.contains(section.version) {
+                Text("Couldn’t load these notes.").foregroundStyle(.secondary)
+            } else {
+                ProgressView().controlSize(.small).frame(maxWidth: .infinity).padding(.vertical, 30)
+            }
         }
     }
 }

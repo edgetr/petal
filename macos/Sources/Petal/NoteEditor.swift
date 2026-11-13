@@ -846,14 +846,19 @@ final class NoteTextView: NSTextView {
     var changed: () -> Void = {}
     /// Helpers (NoteHelpers): Return at the end of a line that calls one runs it; the names the @ menu offers and
     /// chips bind to; the notebook's color the mentions are drawn in. The @ menu and the chips' state.
-    var helperReturn: (String, NoteLine) -> Void = { _, _ in }
+    /// Answers whether the line was sent (it leaves the writing and becomes a bubble): false, Return makes a new line.
+    var helperReturn: (String, NoteLine) -> Bool = { _, _ in false }
     /// Which lines may run on Return, by their identity here (`NoteLine.mark`, an attribute on the line's characters),
-    /// never by their words: a line the person typed or pasted into gets a new mark that can run; undo, redo,
-    /// autocorrect and text from outside take the mark off the lines they touch and never give one. In memory only.
+    /// never by their words: a line the person typed or pasted into gets a new mark that can run; undo, redo and text
+    /// from outside take the mark off the lines they touch and never give one; an automatic correction (spelling,
+    /// capitals, a text replacement) neither gives nor takes one: it only changes what the person just typed. In
+    /// memory only.
     private(set) var runnable: Set<String> = []
-    /// The changes about to be made (where, in the text after them, what's inserted, and whether the person made it),
-    /// read in `didChangeText`.
-    private var pendingEdits: [(location: Int, inserted: String, person: Bool)] = []
+    /// The changes about to be made (where, in the text after them, what's inserted, whether the person made it, and
+    /// whether it was an automatic correction), read in `didChangeText`.
+    private var pendingEdits: [(location: Int, inserted: String, person: Bool, correction: Bool)] = []
+    /// A sent line being taken out of the writing (`sendLine`): Petal's own change, which marks nothing.
+    private var sending = false
     /// Inside an automatic correction (spelling, quotes, dashes): not the person's typing.
     private var correcting = false
     /// Inside a change made through Accessibility (another program setting this editor's text or its selection's):
@@ -910,19 +915,30 @@ final class NoteTextView: NSTextView {
 
     private func record(_ ranges: [NSRange], _ strings: [String]) {
         // The person's own change: not an undo or redo, not an automatic correction, not text set through Accessibility.
-        let person = !history.isUndoing && !history.isRedoing && !correcting && setFromOutside == 0
+        let undoing = history.isUndoing || history.isRedoing
+        let person = !undoing && !correcting && setFromOutside == 0 && !sending
+        // A correction of what the person just typed (never one made inside an undo, or through Accessibility).
+        let correction = correcting && !undoing && setFromOutside == 0
         var delta = 0
         for (range, text) in zip(ranges, strings).sorted(by: { $0.0.location < $1.0.location }) {
-            pendingEdits.append((range.location + delta, text, person))
+            pendingEdits.append((range.location + delta, text, person, correction))
             delta += (text as NSString).length - range.length
         }
     }
 
     override func handleTextCheckingResults(_ results: [NSTextCheckingResult], forRange range: NSRange, types checkingTypes: NSTextCheckingTypes,
                                             options: [NSSpellChecker.OptionKey: Any] = [:], orthography: NSOrthography, wordCount: Int) {
+        asCorrection {
+            super.handleTextCheckingResults(results, forRange: range, types: checkingTypes, options: options, orthography: orthography, wordCount: wordCount)
+        }
+    }
+
+    /// A change macOS makes by itself as the person types (a word corrected, a text replacement, a capital, an inline
+    /// prediction taken away): made as an automatic correction, which keeps a line's mark and never gives one.
+    func asCorrection(_ change: () -> Void) {
         correcting = true
         defer { correcting = false }
-        super.handleTextCheckingResults(results, forRange: range, types: checkingTypes, options: options, orthography: orthography, wordCount: wordCount)
+        change()
     }
 
     // Text and selections set through Accessibility: each one changes the editor as before, but as text from
@@ -944,12 +960,24 @@ final class NoteTextView: NSTextView {
 
     /// The lines a change touched lose their mark (they can't run any more); the lines the person's own typing or
     /// pasting put characters on get a new one that can (NoteHelp.editedLines).
-    private func remark(_ edits: [(location: Int, inserted: String, person: Bool)]) {
+    private func remark(_ edits: [(location: Int, inserted: String, person: Bool, correction: Bool)]) {
         guard let storage = textStorage else { return }
         let text = string
         for edit in edits {
             for (line, marks) in NoteHelp.editedLines(after: text, location: edit.location, inserted: edit.inserted, person: edit.person)
             where NSMaxRange(line) <= storage.length {
+                if edit.correction {
+                    // An automatic correction (a word corrected or capitalized as the person typed it): the line keeps
+                    // the mark it had, over all of it again, still runnable if it was; it never gains one.
+                    var kept: String?
+                    storage.enumerateAttribute(NoteLine.key, in: line) { value, _, stop in
+                        if let mark = value as? String, runnable.contains(mark) { kept = mark; stop.pointee = true }
+                    }
+                    guard let kept, line.length > 0 else { continue }
+                    storage.removeAttribute(NoteLine.key, range: line)
+                    storage.addAttribute(NoteLine.key, value: kept, range: line)
+                    continue
+                }
                 storage.enumerateAttribute(NoteLine.key, in: line) { value, _, _ in if let old = value as? String { runnable.remove(old) } }
                 storage.removeAttribute(NoteLine.key, range: line)
                 guard marks, line.length > 0 else { continue }
@@ -984,6 +1012,96 @@ final class NoteTextView: NSTextView {
     /// Ran: the line as it is now won't run again until the person edits it.
     func ran(_ mark: String) { runnable.remove(mark) }
 
+    /// A line sent (Return on the person's own @Petal line): its request leaves the writing, from its @Petal to the end
+    /// of the line (NoteHelp.request). With nothing but blanks before it, the line stays, empty, with the cursor on it;
+    /// with something before it (a task's checkbox and its tick, a heading, words, a picture), that stays exactly as
+    /// it was and the cursor goes to a fresh line after it. Petal's change, not the person's: it marks nothing, and
+    /// it's saved with the request in one write (`NoteHelpers.returned`). It's one undo step of its own, which ⌘Z
+    /// takes back together with the typing that wrote the request (`sendUndone`): the request never comes back into
+    /// the writing, and every step before it is kept.
+    func sendLine(_ mark: String) {
+        guard let storage = textStorage else { return }
+        var found: NSRange?
+        storage.enumerateAttribute(NoteLine.key, in: NSRange(location: 0, length: storage.length)) { value, range, stop in
+            if value as? String == mark { found = range; stop.pointee = true }
+        }
+        guard let found else { return }
+        let ns = storage.string as NSString
+        let whole = ns.lineRange(for: found)
+        var line = whole
+        if line.length > 0, ns.character(at: NSMaxRange(line) - 1) == 10 { line.length -= 1 }
+        let split = NoteHelp.request(in: ns.substring(with: line))
+        runnable.remove(mark)
+        sending = true
+        defer { sending = false }
+        if hasMarkedText() { unmarkText() }
+        // What leaves, and what takes its place: the whole line's words; or the request, the line kept before it and
+        // a fresh line of words after it (its own break too, so the line after the kept one is plain words).
+        let range: NSRange
+        let replacement: NSAttributedString
+        let cursor: Int
+        if split.keepsBefore {
+            let terminated = NSMaxRange(whole) > NSMaxRange(line)
+            range = NSRange(location: line.location + split.cut, length: NSMaxRange(whole) - line.location - split.cut)
+            replacement = NSAttributedString(string: terminated ? "\n\n" : "\n", attributes: NoteRich.attributes("text", style))
+            cursor = range.location + 1
+        } else {
+            range = line
+            replacement = NSAttributedString(string: "")
+            cursor = line.location
+        }
+        let request = ns.substring(with: range)
+        breakUndoCoalescing()
+        guard shouldChangeText(in: range, replacementString: replacement.string) else { return }
+        storage.replaceCharacters(in: range, with: replacement)
+        didChangeText()
+        history.registerUndo(withTarget: self) { view in MainActor.assumeIsolated { view.sendUndone(request, at: range.location, length: replacement.length) } }
+        setSelectedRange(NSRange(location: cursor, length: 0))
+        typingAttributes = NoteRich.attributes("text", style)
+        changed()
+    }
+
+    /// ⌘Z on a send: AppKit puts the request's words back (its own step, undone with this one), and right after, the
+    /// steps that typed them are undone too, until the words are no longer there: the request never comes back into
+    /// the writing. (A step registered for it again on redo, so the next ⌘Z after a redo does the same.)
+    func sendUndone(_ request: String, at location: Int, length: Int) {
+        history.registerUndo(withTarget: self) { view in MainActor.assumeIsolated { view.sendRedone(request, at: location, length: length) } }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let size = (request as NSString).length
+                for _ in 0..<12 {
+                    let ns = self.string as NSString
+                    guard size > 0, location + size <= ns.length, ns.substring(with: NSRange(location: location, length: size)) == request,
+                          self.history.canUndo, !self.history.isUndoing, !self.history.isRedoing, self.history.groupingLevel == 0 else { return }
+                    self.history.undo()
+                }
+            }
+        }
+    }
+
+    /// ⌘⇧Z on a send: AppKit takes the words out again; the next ⌘Z is a send's again.
+    func sendRedone(_ request: String, at location: Int, length: Int) {
+        history.registerUndo(withTarget: self) { view in MainActor.assumeIsolated { view.sendUndone(request, at: location, length: length) } }
+    }
+
+    /// Edit on a request's bubble: its words back in the writing, as a line of the person's own at the end with the
+    /// cursor after them (Return sends it again).
+    func putBack(_ words: String) {
+        guard let storage = textStorage else { return }
+        window?.makeFirstResponder(self)
+        let ns = storage.string as NSString
+        let end = ns.length
+        // A line of its own: the last line when it holds nothing (a blank line, the end after a break), else a new one.
+        var last = ns.lineRange(for: NSRange(location: end, length: 0))
+        if last.length > 0, ns.character(at: NSMaxRange(last) - 1) == 10 { last.length -= 1 }
+        let blank = ns.substring(with: last).trimmingCharacters(in: .whitespaces).isEmpty
+        setSelectedRange(blank ? last : NSRange(location: end, length: 0))
+        typingAttributes = NoteRich.attributes("text", style)
+        if !blank { insertText("\n", replacementRange: selectedRange()) }
+        insertText(words, replacementRange: selectedRange())
+    }
+
     /// Typed, pasted, undone: the pictures it contains may have changed (the holding rule weighs them again).
     override func didChangeText() {
         let edits = pendingEdits
@@ -995,6 +1113,8 @@ final class NoteTextView: NSTextView {
             decorateMentions()
             updateMentionMenu()
         }
+        // The placeholder comes and goes with the first character.
+        if (textStorage?.length ?? 0) <= 1 { needsDisplay = true }
     }
 
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
@@ -1010,8 +1130,36 @@ final class NoteTextView: NSTextView {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        MainActor.assumeIsolated { drawMentionChips() }
+        MainActor.assumeIsolated {
+            drawMentionChips()
+            drawPlaceholder()
+        }
     }
+
+    /// An empty note says what it's for, faintly, where the words will go.
+    static let placeholder = "Write, or type @ to ask Petal AI"
+
+    private func drawPlaceholder() {
+        guard string.isEmpty, !hasMarkedText() else { return }
+        let words = NSAttributedString(string: Self.placeholder, attributes: [.font: NoteRich.Style.body, .foregroundColor: style.ink.withAlphaComponent(0.35)])
+        words.draw(at: NSPoint(x: textContainerOrigin.x + (textContainer?.lineFragmentPadding ?? 0), y: textContainerOrigin.y))
+    }
+
+    /// "@Petal " on a line of its own at the end of the note, the cursor after it, as if typed (the corner's @). The
+    /// line break is put in as words, never as Return, so a helper line above it never runs.
+    func startPetalLine() {
+        guard let storage = textStorage else { return }
+        window?.makeFirstResponder(self)
+        let end = storage.length
+        setSelectedRange(NSRange(location: end, length: 0))
+        if end > 0, !storage.string.hasSuffix("\n") { insertText("\n", replacementRange: selectedRange()) }
+        typingAttributes = NoteRich.attributes("text", style)
+        insertText(NoteHelp.mention(NoteHelp.petal) + " ", replacementRange: selectedRange())
+        petalPicked()
+    }
+
+    /// "@Petal " was put in (picked from the @ menu, or the corner's @): the paper says what to do next.
+    var petalPicked: () -> Void = {}
 
     /// Remove on the paper, while this editor is open: those pictures' attachments deleted here, as an edit saved
     /// like any typing (so nothing typed and not saved yet brings them back): only the attachment, and its line's
@@ -1178,15 +1326,15 @@ final class NoteTextView: NSTextView {
     override func insertNewline(_ sender: Any?) {
         // The @ menu open: Return picks what's selected in it.
         if MainActor.assumeIsolated({ pickMention() }) { return }
-        // Return at the very end of a line that calls a helper (only here, the person's own key): it's asked, once the
-        // line is saved.
-        let calling = MainActor.assumeIsolated { helperLine() }
-        defer {
-            if let calling {
-                flushNow()
-                let ask = helperReturn
-                DispatchQueue.main.async { ask(calling.words, calling.line) }
-            }
+        // macOS's inline prediction (its suggestion after the cursor, shown as marked text) isn't the person's: Return
+        // there ends it, so the line is what they typed and the cursor is at its end.
+        dismissPrediction()
+        // Return at the very end of a line of the person's own that calls a helper (only here, their own key): it's
+        // sent, and leaves the writing (NoteHelpers.returned takes it out, with the request, in one write). A bare
+        // "@Petal" isn't sent: it says what to do, and Return makes a new line.
+        if let calling = MainActor.assumeIsolated({ helperLine() }) {
+            if !NoteHelp.bare(calling.words), helperReturn(calling.words, calling.line) { return }
+            if NoteHelp.bare(calling.words) { _ = helperReturn(calling.words, calling.line) }
         }
         let kind = lineKind
         let line = lineRange
@@ -1214,6 +1362,21 @@ final class NoteTextView: NSTextView {
             }
         }
         changed()
+    }
+
+    /// An inline prediction showing at the cursor (marked text that starts where the cursor is): taken away, as an
+    /// automatic change (it keeps the line's mark and never gives one). A composition the person is typing (an input
+    /// method's, with the cursor inside or after it) is left alone.
+    private func dismissPrediction() {
+        guard hasMarkedText() else { return }
+        let marked = markedRange()
+        guard marked.location != NSNotFound, marked.length > 0, selectedRange() == NSRange(location: marked.location, length: 0) else { return }
+        asCorrection {
+            setMarkedText("", selectedRange: NSRange(location: 0, length: 0), replacementRange: marked)
+            unmarkText()
+        }
+        inputContext?.discardMarkedText()
+        setSelectedRange(NSRange(location: marked.location, length: 0))
     }
 
     private func replace(line: NSRange, with text: NSAttributedString, kind: String) {
@@ -1470,6 +1633,10 @@ final class NoteEditorHandle {
     var take: () -> (body: String, base: String?)? = { nil }
     /// That one write was made: its text is what the editor's next save is made on.
     var landed: (String?) -> Void = { _ in }
+    /// "@Petal " on a line of its own at the end, the cursor after it (the corner's @).
+    var startPetal: () -> Void = {}
+    /// A request's words back in the writing (Edit on its bubble), at the end, the cursor after them.
+    var putBack: (String) -> Void = { _ in }
 }
 
 /// One @ line in an open editor, known by its identity there (a mark on its characters), never by its words: what
@@ -1480,16 +1647,27 @@ final class NoteLine: @unchecked Sendable {
     static let key = NSAttributedString.Key("petal.helperLine")
     let mark: String
     weak var view: NoteTextView?
+    /// The request it was sent as (`asks:`), once it's sent: what came back is kept on it. Try again sends a request
+    /// with no line in an editor (no mark, no view).
+    var ask = ""
 
     init(mark: String, view: NoteTextView?) {
         self.mark = mark
         self.view = view
     }
 
+    /// A request sent again with Try again: the person's press on its bubble, never a line in the writing.
+    init(ask: String) {
+        mark = ""
+        self.ask = ask
+    }
+
     /// Ran: it won't run again until the person edits it.
     @MainActor func take() { view?.ran(mark) }
     /// May run again (if it's still there as it was).
     @MainActor func again() { view?.runnableAgain(mark) }
+    /// Sent: its words leave the writing (the editor's own change, saved with the request).
+    @MainActor func leaveWriting() { if !mark.isEmpty { view?.sendLine(mark) } }
 }
 
 /// The editor in SwiftUI: the note's lines in, the note's lines out (saved a moment after the person stops typing).
@@ -1519,10 +1697,12 @@ struct NoteEditorView: NSViewRepresentable {
     /// Back at what's saved after a refused save (the person undid it): the journal's snapshot of the refused typing
     /// is settled (`saved`: the note's file as this editor last had it).
     var settled: (String?) -> Void = { _ in }
-    /// Return at the end of a line that calls a helper (@Petal): the line.
-    var helperReturn: (String, NoteLine) -> Void = { _, _ in }
+    /// Return at the end of a line that calls a helper (@Petal): the line. True: it was sent (it leaves the writing).
+    var helperReturn: (String, NoteLine) -> Bool = { _, _ in false }
     /// What the @ menu offers and the chips bind to.
     var names: () -> (notes: [String], notebooks: [String], place: String) = { ([], [], "") }
+    /// "@Petal " was put in: the paper says what to do next.
+    var petalPicked: () -> Void = {}
     var accent: NSColor = .controlAccentColor
     var tint = NoteInk.RGB(r: 0, g: 0.48, b: 1)
 
@@ -1727,6 +1907,9 @@ struct NoteEditorView: NSViewRepresentable {
             MainActor.assumeIsolated { _ = text.removePictures(named: names, restore: restore, retire: retire) }
         }
         text.say = say
+        text.petalPicked = petalPicked
+        handle.startPetal = { [weak text] in MainActor.assumeIsolated { text?.startPetalLine() } }
+        handle.putBack = { [weak text] words in MainActor.assumeIsolated { text?.putBack(words) } }
         text.helperReturn = helperReturn
         text.mentionNames = names
         text.tint = tint
@@ -1758,6 +1941,7 @@ struct NoteEditorView: NSViewRepresentable {
         text.escape = escape
         text.noteID = paper.noteID
         text.noteFolder = paper.url.deletingLastPathComponent()
+        text.petalPicked = petalPicked
         text.helperReturn = helperReturn
         text.mentionNames = names
         text.tint = tint

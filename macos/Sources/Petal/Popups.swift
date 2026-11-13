@@ -40,7 +40,7 @@ final class GlassPanel: NSPanel {
         }
         let screen = dock?.screenRef ?? Screens.main ?? Screens.all[0]
         let area = screen.frame.insetBy(dx: gap, dy: gap)
-        let edge = dock?.glassFrame ?? slot
+        let edge = dock?.popupEdge ?? slot
         var origin: CGPoint
         switch PetalApp.shared.config.position {
         case "left": origin = CGPoint(x: edge.maxX + gap, y: slot.midY - size.height / 2)
@@ -124,11 +124,12 @@ final class Tooltips {
     /// Room around the glass, as the SwiftUI pills keep for its edge.
     private static let margin: CGFloat = 6
 
-    func show(_ text: String?, over id: String, in dock: ScreenDock?) {
+    /// `always`: shown whether or not names show on hover (what Petal Notes says).
+    func show(_ text: String?, over id: String, in dock: ScreenDock?, always: Bool = false) {
         let app = PetalApp.shared
         if text == nil && id != shownFor { return }   // leaving one icon after entering the next
         shownFor = id
-        guard let text, !text.isEmpty, app.config.bool("tooltips"), let dock, dock.dragging == nil, dock.openPopup == nil,
+        guard let text, !text.isEmpty, always || app.config.bool("tooltips"), let dock, dock.dragging == nil, dock.openPopup == nil,
               !app.popups.anyOpen, let panelRef = dock.panel, let slot = panelRef.screenFrame(of: id) else {
             hide()
             return
@@ -187,11 +188,27 @@ final class Popups {
                 if !self.panel.frame.contains(NSEvent.mouseLocation) { self.closeAll() }
             }
         }
-        // Escape answers the question Don't (it never takes the keyboard from the app in front).
+        // A click on the dock itself (its glass, another icon) closes an open stack too; one on the stack's own
+        // icon is left to toggle it.
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] event in
+            MainActor.assumeIsolated {
+                guard let self, self.kind == "stack", event.window is DockPanel, !self.panel.frame.contains(NSEvent.mouseLocation),
+                      let anchor = self.anchor, let dock = self.openDock?.panel else { return }
+                if !(dock.screenFrame(of: anchor)?.contains(NSEvent.mouseLocation) ?? false) { self.closeAll() }
+            }
+            return event
+        }
+        // Escape answers the question Don't, and closes an open stack (it never takes the keyboard from the app in
+        // front).
         keys = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            MainActor.assumeIsolated { if event.keyCode == 53 { self?.closeAsk() } }
+            MainActor.assumeIsolated {
+                guard event.keyCode == 53, let self else { return }
+                self.closeAsk()
+                if self.kind == "stack" { self.closeAll() }
+            }
         }
     }
+    @ObservationIgnored private var localMonitor: Any?
 
     func closeAll() {
         let wasPreview = kind == "preview"
@@ -673,7 +690,9 @@ struct PreviewView: View {
             }
             if !windows.isEmpty {
                 if app.previews.pictures {
-                    HStack(spacing: 12) {
+                    // A row over a dock at the bottom, a column beside one on a side.
+                    let layout = app.config.position == "bottom" ? AnyLayout(HStackLayout(spacing: 12)) : AnyLayout(VStackLayout(spacing: 12))
+                    layout {
                         ForEach(windows) { window in
                             PreviewTile(window: window, image: app.previews.thumbnails[window.id], done: done)
                         }
