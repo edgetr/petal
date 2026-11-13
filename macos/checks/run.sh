@@ -828,6 +828,12 @@ n=$(grep -c 'replaceItemAt' Sources/Petal/Updater.swift || true)
 grep -q 'guard try UpdateTrust\.install(app, in: bundle, is: release\.version, over: running) else' Sources/Petal/Updater.swift && [ "$n" = 0 ] \
     || { echo "update trust: the updater puts an update in place without looking at it there"; exit 1; }
 echo "update trust: an update is looked at again once it's in place"
+# WhatsNew.swift: after an update What's New opens once, with each version missed since the last one Petal ran as,
+# never on a first install; and every notes file in macos/notes leaves its release-page-only lines out of the app.
+swiftc -parse-as-library -O -o "$out/whatsnew" Sources/Petal/UpdateTrust.swift Sources/Petal/WhatsNew.swift checks/WhatsNewCheck.swift
+"$out/whatsnew" notes
+grep -q 'cp "$ROOT"/macos/notes/\*.md "$APP/Contents/Resources/notes/"' build.sh \
+    || { echo "what's new: build.sh doesn't put the notes in the app"; exit 1; }
 # An update rebuilt with the person's own changes to Petal's code takes its source from the release Petal checked:
 # Personal.update asks the updater for the commit that release's own Petal.app says (Updater.source, which checks the
 # download as an installed update is and reads the commit through UpdateTrust.source) and hands petal-personal that

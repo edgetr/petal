@@ -67,7 +67,7 @@ enum BenchTargets {
             .init(name: "Chats list", view: { AnyView(ClaudePanelView(panel: chats)) }),
             .init(name: "Welcome", size: CGSize(width: 640, height: WelcomeView.height), view: { AnyView(WelcomeView {}) }),
             .init(name: "What's New", size: CGSize(width: 560, height: 600),
-                  view: { AnyView(ReleaseNotesView(version: "1.0.0", preloaded: .init(body: notesText, link: nil))) }),
+                  view: { AnyView(ReleaseNotesView(sections: notesText)) }),
             .init(name: "Vault editor", size: CGSize(width: 640, height: 520), view: { AnyView(VaultEditor(item: login, isNew: false) {}) }),
             .init(name: "Notes preview", view: {
                 app.previews.preview(notes: notes, thumbnails: [ids[0]: picture, ids[1]: picture])
@@ -89,11 +89,9 @@ enum BenchTargets {
         return targets
     }
 
-    /// Twelve releases' notes, for a long What's New.
-    static let releaseNotes = (1...12).map { n in
-        """
-        ## Petal 1.\(n)
-
+    /// Twelve releases' notes, newest first, for a long What's New.
+    static let releaseNotes = (1...12).reversed().map { n in
+        ReleaseNotes.Section(version: "1.\(n)", body: """
         Your dock holds **your notes** now, and a *note pad* to take a paper from.
 
         - Drag a paper off the note pad and let go anywhere
@@ -103,8 +101,8 @@ enum BenchTargets {
         ### Fixes
         * A note no longer covers the update notice
         * The vault fills addresses in Safari again
-        """
-    }.joined(separator: "\n\n")
+        """)
+    }
 
     /// A conversation: a question, a few steps, and a markdown-heavy answer, `count` times.
     static func conversation(_ count: Int) -> [Agent.Message] {

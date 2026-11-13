@@ -136,10 +136,16 @@ final class PetalApp {
         Skill.install()
         Windows.startManaging()
         runBrowsers.sweep()   // browsers a Petal that crashed left for its runs are ended, their profiles removed
-        if !config.welcomed {
+        let welcomed = config.welcomed
+        if !welcomed {
             welcome.show()
         } else {
             useDock(config.whichDock)
+        }
+        // After an update, What's New opens by itself once, a moment after the dock is up (never on a first install).
+        let running = version
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.releaseNotes.afterLaunch(running: running, welcomed: welcomed)
         }
         ModesLeftovers.settle()
     }

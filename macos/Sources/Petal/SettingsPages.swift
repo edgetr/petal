@@ -901,7 +901,7 @@ struct AboutRow: View {
     }
 }
 
-/// A new version waiting (restart, and what's new in it), or a look for one now.
+/// A new version waiting (restart, and what's new in it), or what's new in this one and a look for a newer one now.
 struct UpdateRow: View {
     @Environment(PetalApp.self) private var app
     let title: String
@@ -914,6 +914,9 @@ struct UpdateRow: View {
             }
         } else {
             SettingRow(title: title, help: app.updater.status.isEmpty ? nil : app.updater.status) {
+                if UpdateTrust.plainVersion(app.version) {
+                    Button("What’s new") { app.releaseNotes.show(app.version) }.buttonStyle(.glass)
+                }
                 Button("Check now") { app.updater.check(manual: true) }.buttonStyle(.glass)
             }
         }
