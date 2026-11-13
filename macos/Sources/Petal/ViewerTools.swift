@@ -50,9 +50,17 @@ extension Viewers {
         let path = args["path"] as? String ?? ""
         // A note's helper naming no file means its note's own document: found by the one resolver the margin uses
         // (off the main thread), then asked again with that path.
+        // The run's own document, never a guess between two.
         if path.isEmpty, ["petal_view", "petal_view_versions", "petal_note_pdf_comments"].contains(name),
-           let paperID = app.claude.note(withID: caller)?.paper, let paper = app.paper.helpers.paper(paperID),
-           let stick = paper.file.places.first(where: ViewerFiles.namesFile) {
+           let paperID = app.claude.note(withID: caller)?.paper {
+            let stick: NoteStick
+            switch app.paper.helpers.document(for: paperID) {
+            case .one(let one): stick = one
+            case .none: return fail("This note isn't on a document: pass the file's path.")
+            case .several(let files):
+                let names = files.map { ($0.path as NSString).lastPathComponent }.filter { !$0.isEmpty }
+                return fail("This note is on \(files.count) documents (\(names.joined(separator: ", "))): pass the path of the one you mean.")
+            }
             let mac = app.paper.local.mac
             nonisolated(unsafe) let args = args
             DispatchQueue.global(qos: .userInitiated).async {
