@@ -248,7 +248,7 @@ struct PaperView: View {
             NoteEditorView(paper: paper, style: desk.style(color, glass: glass), focus: keyboard,
                            height: { desk.measured(paper.key, $0) },
                            // Saved through the note's identity: renamed or moved meanwhile, it lands on that note.
-                           save: { desk.write(paper.key, noteID: paper.noteID, instance: paper.instance, body: $0, base: $1) },
+                           save: { desk.helpers.edited(paper.noteID); return desk.write(paper.key, noteID: paper.noteID, instance: paper.instance, body: $0, base: $1) },
                            register: { [editorToken] in desk.editorRegistered(paper.key, $0, token: editorToken) },
                            importPictures: { desk.importPictures($0, into: paper.key) },
                            idle: { desk.store.takeDeferred(paper.key) },

@@ -98,6 +98,22 @@ struct NoteHelpCheck {
 
         let ask = { (text: String) in NoteHelp.request(text, now: now, calendar: calendar) }
         if case .bringBack(let date, _, let others) = ask(line) { expect(parts(date).weekday == 6 && others == ["Bus card"], "bring back, with another note", "\(others)") } else { expect(false, "bring back") }
+        // More ways to say when, from Monday 9 November 2026, 10:30.
+        let full = { (date: Date) in calendar.dateComponents([.month, .day, .hour, .minute], from: date) }
+        let whenOf = { (text: String) in NoteHelp.when(text, now: now, calendar: calendar).map { full($0.date) } }
+        expect(whenOf("remind me at 5pm") == DateComponents(month: 11, day: 9, hour: 17, minute: 0), "a time alone, later today", "\(String(describing: whenOf("remind me at 5pm")))")
+        expect(whenOf("remind me at 5") == DateComponents(month: 11, day: 9, hour: 17, minute: 0), "“at 5” is the afternoon")
+        expect(whenOf("remind me at 9:15") == DateComponents(month: 11, day: 10, hour: 9, minute: 15), "a time already past today: tomorrow")
+        expect(whenOf("bring this back on the 20th") == DateComponents(month: 11, day: 20, hour: 9, minute: 0), "the 20th: this month")
+        expect(whenOf("bring this back the 3rd at 2pm") == DateComponents(month: 12, day: 3, hour: 14, minute: 0), "the 3rd, past: next month, at its time")
+        expect(whenOf("remind me Dec 1") == DateComponents(month: 12, day: 1, hour: 9, minute: 0), "a month and day")
+        expect(whenOf("remind me 14 February at 8am") == DateComponents(month: 2, day: 14, hour: 8, minute: 0), "a day and month, next year's")
+        expect(whenOf("bring this back next month") == DateComponents(month: 12, day: 9, hour: 9, minute: 0), "next month")
+        expect(whenOf("bring this back Friday 9:00") == DateComponents(month: 11, day: 13, hour: 9, minute: 0), "the old ways still the same")
+        expect(whenOf("bring this back in 3 days") != nil && whenOf("what was in 3") == nil && whenOf("page 20 of the report") == nil, "a number alone is no time")
+        if case .bringBack = ask("@Petal remind me at 5pm to call the bank") { expect(true, "") } else { expect(false, "remind me at a time alone") }
+        expect(ask("@Petal remind me to call the bank") == .askWhen && ask("@Petal bring this back") == .askWhen, "no time said: asked when")
+        if case .ask = ask("@Petal remind me what this project was about") { expect(true, "") } else { expect(false, "“remind me what …” is a question") }
         expect(ask("@Petal remember that Sam takes no sugar") == .remember("Sam takes no sugar"), "remember")
         expect(ask("@Petal forget the hotel") == .forget("the hotel"), "forget")
         expect(ask("@Petal put this away") == .putAway, "put away")
@@ -120,6 +136,11 @@ struct NoteHelpCheck {
         expect(NoteHelp.hint(before: found[0], in: page) == "· from", "the words before it", NoteHelp.hint(before: found[0], in: page))
         expect(NoteHelp.crossed(11900, line: "under ¥12k") && !NoteHelp.crossed(12800, line: "under ¥12k"), "under the line")
         expect(NoteHelp.crossed(51, line: "over 50") && !NoteHelp.crossed(50, line: "over 50"), "over the line")
+        expect(NoteHelp.condition("tell me when it's over 1 million") == "over 1 million" && NoteHelp.crossed(1_200_000, line: "over 1 million")
+               && !NoteHelp.crossed(900_000, line: "over 1 million"), "millions said in words", NoteHelp.condition("tell me when it's over 1 million") ?? "nil")
+        expect(NoteHelp.crossed(1_400_000, line: "under 1.5M") && !NoteHelp.crossed(1_600_000, line: "under 1.5M")
+               && NoteHelp.crossed(3e9, line: "over $2b") && NoteHelp.crossed(3e9, line: "over 2 billion"), "m, b and billion")
+        expect(NoteHelp.condition("over 50 mph") == "over 50", "a word that only starts with m isn't millions", NoteHelp.condition("over 50 mph") ?? "nil")
         expect(NoteHelp.format(12800, currency: "¥", thousands: true) == "¥13k" && NoteHelp.format(1299.5, currency: "$", thousands: false) == "$1,299.50", "values as the line writes them")
         expect(NoteHelp.number("1.299,99") == 1299.99 && NoteHelp.number("96.400") == 96400 && NoteHelp.number("12,5") == 12.5, "numbers as people write them")
         expect(NoteHelp.pageText("<p>From <b>¥12,800</b></p><script>var x = '¥1';</script>") == "From ¥12,800", "a page's words")
@@ -397,6 +418,15 @@ struct NoteHelpCheck {
         guard let hidden = NoteShield.place(privateStick, appPrivate: true, index: index) else { return expect(false, "a private place") }
         expect(!hidden.words.text.contains("secret window") && hidden.quote.isEmpty, "a private app's place: its words and sentence never told", hidden.words.text)
         expect(NoteShield.shield(["x"], index: .unavailable) == nil && NoteShield.place(stick, appPrivate: false, index: .unavailable) == nil, "the vault unreadable: nothing told")
+        // A tab's page: its title and whole address (a video's id with it), redacted; from a private app, neither.
+        var tabStick = NoteStick(kind: .tab)
+        tabStick.url = "https://www.youtube.com/watch?v=abc123&key=\(secret.replacingOccurrences(of: " ", with: ""))"
+        tabStick.title = "A video"
+        guard let tabPlace = NoteShield.place(tabStick, appPrivate: false, index: index),
+              let privateTab = NoteShield.place(tabStick, appPrivate: true, index: index) else { return expect(false, "a tab's place") }
+        expect(tabPlace.words.text.hasPrefix("The page “A video” at https://www.youtube.com/watch?v=abc123") && !tabPlace.words.text.contains(digits),
+               "a tab's page told with its title and whole address, redacted", tabPlace.words.text)
+        expect(!privateTab.words.text.contains("youtube") && !privateTab.words.text.contains("A video"), "a private app's tab: neither", privateTab.words.text)
         told.place = ""
         expect(NoteHelp.brief(told).text.contains("isn't on a window now"), "a note on no window is told not to look in front")
         let literal: Shielded = "Go on where you stopped."
@@ -409,7 +439,7 @@ struct NoteHelpCheck {
         systemTold.instructions = notes[0]
         systemTold.memory = notes[1]
         let system = NoteHelp.system(systemTold, provider: "Claude", computerUse: true, brief: NoteHelp.brief(systemTold))
-        expect(!system.text.contains(digits) && system.text.contains("You are Claude") && system.text.contains("The note is on:") && system.text.contains("Use metric (hidden)"),
+        expect(!system.text.contains(digits) && system.text.contains("You are Petal AI (running on Claude)") && system.text.contains("The note is on:") && system.text.contains("Use metric (hidden)"),
                "the system prompt: shielded place, notes and memory, then the brief", system.text.prefix(300).description)
         // Checking against a notebook: each note shielded whole, then titled and cut.
         let longSecretNote = "# Plan \(secret)\n" + String(repeating: "y", count: 1995) + secret + " end"

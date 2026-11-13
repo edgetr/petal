@@ -825,7 +825,7 @@ enum NoteHelp {
     /// Requests handled on the note at once, never sent to a helper at work as a follow-up.
     static func isControl(_ request: Request) -> Bool {
         switch request {
-        case .stopWatching, .stopMorning, .pause, .remember, .forget, .bringBack, .putAway: true
+        case .stopWatching, .stopMorning, .pause, .remember, .forget, .bringBack, .askWhen, .putAway: true
         default: false
         }
     }
@@ -975,6 +975,89 @@ enum NoteHelp {
             let label = group(6) != nil || group(5) != nil || name == "tonight" ? clockLabel(date) : "9:00"
             out.append((match.range, date, label))
         }
+        out += moreTimeWords(text, now: now, calendar: calendar, taken: out.map(\.0))
+        return out.sorted { $0.0.location < $1.0.location }
+    }
+
+    /// The other ways of saying when, where none of `timeWords`' own is: "Dec 1", "1 December", "the 20th" (each
+    /// with a time or at 9:00, the next one to come), "next month" (this day next month, 9:00), and a time alone
+    /// ("at 5", "5pm", "17:30": today, or tomorrow once it's past; "at 5" alone is the afternoon, as "Friday 5" is).
+    private static func moreTimeWords(_ text: String, now: Date, calendar: Calendar, taken: [NSRange]) -> [(NSRange, Date, String)] {
+        let time = #"(?:\s+(?:at\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon))?(?!\w)"#
+        let month = "(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec)\\.?"
+        let patterns: [(kind: Int, pattern: String)] = [
+            (0, "(?i)\\b" + month + "\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b" + time),
+            (1, "(?i)\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(?:of\\s+)?" + month + "(?=\\W|$)" + time),
+            (2, "(?i)\\b(?:on\\s+)?the\\s+(\\d{1,2})(?:st|nd|rd|th)\\b" + time),
+            (3, #"(?i)\bnext\s+month\b"#),
+            (4, #"(?i)\b(?:at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?|noon)|(\d{1,2}(?::\d{2})?\s*(?:am|pm))|(\d{1,2}:\d{2}))\b"#),
+        ]
+        let ns = text as NSString
+        var taken = taken
+        var out: [(NSRange, Date, String)] = []
+        let clockLabel = { (date: Date) -> String in
+            let parts = calendar.dateComponents([.hour, .minute], from: date)
+            return String(format: "%d:%02d", parts.hour ?? 0, parts.minute ?? 0)
+        }
+        // A clock said ("5", "5pm", "17:30", "noon"): "5" alone, 1 to 7, is the afternoon.
+        func clock(_ said: String) -> (hour: Int, minute: Int)? {
+            guard var parts = clockParts(said) else { return nil }
+            let lower = said.lowercased()
+            if !lower.contains("am"), !lower.contains("pm"), !lower.contains(":"), (1...7).contains(parts.hour) { parts.hour += 12 }
+            return parts
+        }
+        func monthNumber(_ word: String) -> Int? {
+            let names = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+            return names.firstIndex { word.lowercased().hasPrefix($0) }.map { $0 + 1 }
+        }
+        // That day (of `month`, or the next month that has it) at the time said, the next one to come.
+        func date(month wanted: Int?, day: Int, at clock: (hour: Int, minute: Int)) -> Date? {
+            let parts = calendar.dateComponents([.year, .month], from: now)
+            for step in 0...24 {
+                guard let base = calendar.date(from: DateComponents(year: parts.year, month: parts.month, day: 1)),
+                      let first = calendar.date(byAdding: .month, value: step, to: base) else { return nil }
+                let shown = calendar.dateComponents([.year, .month], from: first)
+                if let wanted, shown.month != wanted { continue }
+                guard let found = calendar.date(from: DateComponents(year: shown.year, month: shown.month, day: day, hour: clock.hour, minute: clock.minute)),
+                      calendar.component(.day, from: found) == day else { continue }
+                if found > now { return found }
+            }
+            return nil
+        }
+        for (kind, pattern) in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+                guard !taken.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) else { continue }
+                let group = { (i: Int) -> String? in
+                    i < match.numberOfRanges && match.range(at: i).location != NSNotFound ? ns.substring(with: match.range(at: i)) : nil
+                }
+                var found: (Date, String)?
+                switch kind {
+                case 0, 1, 2:
+                    let dayText = kind == 0 ? group(2) : group(1)
+                    let monthText = kind == 0 ? group(1) : kind == 1 ? group(2) : nil
+                    let timeText = kind == 2 ? group(2) : group(3)
+                    guard let day = dayText.flatMap({ Int($0) }), (1...31).contains(day) else { continue }
+                    let at = timeText.flatMap(clock) ?? (9, 0)
+                    if let made = date(month: monthText.flatMap(monthNumber), day: day, at: at) {
+                        found = (made, dayLabel(made, now: now, calendar: calendar) + " " + clockLabel(made))
+                    }
+                case 3:
+                    if let later = calendar.date(byAdding: .month, value: 1, to: now),
+                       let made = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: later) {
+                        found = (made, dayLabel(made, now: now, calendar: calendar) + " 9:00")
+                    }
+                default:
+                    guard let said = group(1) ?? group(2) ?? group(3), let at = clock(said),
+                          var made = calendar.date(bySettingHour: at.hour, minute: at.minute, second: 0, of: now) else { continue }
+                    if made <= now { made = calendar.date(byAdding: .day, value: 1, to: made) ?? made }
+                    found = (made, clockLabel(made))
+                }
+                guard let found else { continue }
+                taken.append(match.range)
+                out.append((match.range, found.0, found.1))
+            }
+        }
         return out
     }
 
@@ -1012,6 +1095,8 @@ enum NoteHelp {
     enum Request: Equatable {
         /// "bring this back Friday" (with any other notes named).
         case bringBack(Date, label: String, others: [String])
+        /// "remind me to call Sam", "bring this back" with no time said: Petal asks when, nothing starts.
+        case askWhen
         case remember(String)
         case forget(String)
         case putAway
@@ -1112,6 +1197,10 @@ enum NoteHelp {
                 let others = mentions(line).map(\.name).filter { $0.caseInsensitiveCompare(petal) != .orderedSame && !["this", "here"].contains($0.lowercased()) && self.when($0, now: now, calendar: calendar) == nil }
                 return .bringBack(when.date, label: when.label, others: others)
             }
+            // No time said: asked when, rather than handed to a helper that can't set one. "Remind me what this
+            // was" is a question, not a reminder.
+            let after = lower.hasPrefix("remind me") ? lower.dropFirst(9).trimmingCharacters(in: .whitespaces).trimmingCharacters(in: .punctuationCharacters) : ""
+            if !lower.hasPrefix("remind me") || after.isEmpty || after.hasPrefix("to ") || after.hasPrefix("about ") { return .askWhen }
         }
         if let against = lower.range(of: "against "), lower.contains("check") || lower.contains("compare") {
             let after = String(words[against.upperBound...])
@@ -1201,7 +1290,7 @@ enum NoteHelp {
 
     /// The line a watcher waits for: "under $300", "below ¥12k", "over 50".
     static func condition(_ text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: #"(?i)\b(under|below|less than|cheaper than|drops below|falls below|over|above|more than|goes over|rises above)\s+([$€£¥₺]?\s?\d[\d.,]*\s?(?:k|K)?\s?(?:[$€£¥₺]|usd|eur|gbp|jpy|try|tl)?)"#) else { return nil }
+        guard let regex = try? NSRegularExpression(pattern: #"(?i)\b(under|below|less than|cheaper than|drops below|falls below|over|above|more than|goes over|rises above)\s+([$€£¥₺]?\s?\d[\d.,]*\s?(?:(?:million|billion|bn|k|m|b)\b)?\s?(?:[$€£¥₺]|usd|eur|gbp|jpy|try|tl)?)"#) else { return nil }
         let ns = text as NSString
         guard let match = regex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) else { return nil }
         return ns.substring(with: match.range).trimmingCharacters(in: .whitespaces)
@@ -1216,10 +1305,10 @@ enum NoteHelp {
         var thousands = false
     }
 
-    /// Prices and numbers with a currency in `text`: "$1,299.99", "¥12,800", "€12", "300 TL", "¥12k".
+    /// Prices and numbers with a currency in `text`: "$1,299.99", "¥12,800", "€12", "300 TL", "¥12k", "$1.5M".
     static func amounts(_ text: String, needCurrency: Bool = true) -> [Amount] {
         let symbols = "$€£¥₺"
-        let pattern = #"(?i)([$€£¥₺]|usd|eur|gbp|jpy|try)?\s?(\d{1,3}(?:[,.\x{202F}\x{00A0} ]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s?(k\b)?\s?([$€£¥₺]|usd\b|eur\b|gbp\b|jpy\b|try\b|tl\b)?"#
+        let pattern = #"(?i)([$€£¥₺]|usd|eur|gbp|jpy|try)?\s?(\d{1,3}(?:[,.\x{202F}\x{00A0} ]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)\s?(million\b|billion\b|bn\b|k\b|m\b|b\b)?\s?([$€£¥₺]|usd\b|eur\b|gbp\b|jpy\b|try\b|tl\b)?"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString
         return regex.matches(in: text, range: NSRange(location: 0, length: ns.length)).compactMap { match in
@@ -1228,8 +1317,10 @@ enum NoteHelp {
             let currency = symbols.contains(raw) && !raw.isEmpty ? raw : ["usd": "$", "eur": "€", "gbp": "£", "jpy": "¥", "try": "₺", "tl": "₺"][raw] ?? ""
             if needCurrency && currency.isEmpty { return nil }
             guard var value = number(group(2) ?? "") else { return nil }
-            let thousands = group(3) != nil
-            if thousands { value *= 1000 }
+            // "k", "m" or "million", "b", "bn" or "billion" after the number.
+            let suffix = group(3)?.lowercased() ?? ""
+            let thousands = suffix == "k"
+            value *= ["k": 1e3, "m": 1e6, "million": 1e6, "b": 1e9, "bn": 1e9, "billion": 1e9][suffix] ?? 1
             return Amount(value: value, currency: currency, text: ns.substring(with: match.range).trimmingCharacters(in: .whitespaces),
                           range: match.range, thousands: thousands)
         }
@@ -2192,7 +2283,7 @@ extension NoteHelp {
     }
 
     static func admit(_ f: GateFacts) -> Admission {
-        guard f.paperFound else { return .fail("This note isn't here as one paper now (gone, or changed in two places): nothing was sent.") }
+        guard f.paperFound else { return .fail("This note has two versions, or was moved. Keep one, then ask again.") }
         guard f.notebook == f.startNotebook else { return .fail("This note moved to another notebook while it waited, so what it was told is out of date. Ask again.") }
         // An app made private: a run on that app's place stops; any other change is made again from the line.
         guard !f.placePrivate else { return .fail("This note's place is in an app you keep private now, so its helper stopped.") }
@@ -2623,9 +2714,9 @@ extension NoteHelp {
     /// is, Petal's tools, its place, the person's notes and memory, then the brief.
     static func system(_ t: Told, provider: Shielded, computerUse: Bool, runDisplays: Bool = false, brief: Shielded) -> Shielded {
         var words: Shielded = """
-        You are \(provider), running inside Petal on the user's Mac as a helper in one of their Petal Notes. Petal's tools (the petal MCP server) are yours: petal_look and petal_ui look at the note's own place, petal_act uses it (in the background when it can; when it says the window must be in front, ask the user), petal_apps and petal_windows open and arrange apps, petal_notes and petal_note_read read their notes (a Private notebook's only from inside it), petal_vault fills logins, addresses and cards without you seeing a secret (paying shows the user a Buy card first; never type a password, card or key yourself), petal_trash moves files to the Trash (never delete files any other way). Petal asks the user before what changes things; if they say no, don't find another way.
+        You are Petal AI (running on \(provider)), inside Petal on the user's Mac, as a helper in one of their Petal Notes; to the user you are Petal AI. Petal's tools (the petal MCP server) are yours: petal_look and petal_ui look at the note's own place, petal_act uses it (in the background when it can; when it says the window must be in front, ask the user), petal_apps and petal_windows open and arrange apps, petal_notes and petal_note_read read their notes (a Private notebook's only from inside it), petal_vault fills logins, addresses and cards without you seeing a secret (paying shows the user a Buy card first; never type a password, card or key yourself), petal_trash moves files to the Trash (never delete files any other way). Petal asks the user before what changes things; if they say no, don't find another way.
         """
-        words = words + "\n\nTo answer about or summarize what's on the note's page, document or thread, read its words: petal_look with text: true (long ones in parts; find: a word gives the passages around it). For a video, read its page (title, description, chapters) and, when the page offers a transcript, open it with petal_ui and petal_act and read that. Do what the tools can before asking the user to do it."
+        words = words + "\n\nTo answer about or summarize what's on the note's page, document or thread, read its words: petal_look with text: true (long ones in parts; find: a word gives the passages around it); petal_look with screenshot: \"window\" shows you the window (read the PNG). For a video, read its page (title, description, chapters) and, when the page offers a transcript, open it with petal_ui and petal_act and read that. A public page you may also open yourself by its address (your own web tools, or petal_browser) when the user's window doesn't show enough. Do what the tools can before asking the user to do it. When asked to reply or write to someone, put the words in the field and stop; send only when the user said to send."
         if computerUse { words = words + "\n\nYou may use the user's apps with petal_ui and petal_act; call petal_ui first and again after anything changes the window." }
         if runDisplays { words = words + "\n\n" + ownDisplay }
         if t.placeIsFile {
@@ -2640,7 +2731,7 @@ extension NoteHelp {
     }
 
     /// What a run is told about its own hidden display (`runDisplays`): Petal's own words, the same for the chat.
-    static let ownDisplay: Shielded = "The user has turned on hidden displays: what you open with petal_apps (action: open, with an app, a file or an address) goes on a display of your own that they don't see, so your work never shows up in front of them; the first open may wait its turn for a display. The reply says where it went. Read and use a window there with petal_ui (app: its app, or display: true for the one you opened last) and petal_act, which work in it with no pointer and nothing brought forward; petal_look with screenshot: \"screen\" shows you your display. The display goes when you're done: an app you started (it wasn't open) that the user never used, with nothing unsaved, is quit; a window you opened and left empty is closed; anything else comes to the user's screen then. What the user should keep, show them first (petal_windows, action: show): what you showed is theirs and stays. Another helper may be using the same app on its display: your open or act there then waits its turn, and you never see its windows. Where you need real keys in an app the user is using, Petal waits for them to leave it. Pass on: \"screen\" only for what the user asked to see themselves. Petal's questions, Buy and the vault's card still show to the user where they are; never ask them to look at your display. If something can only be done in front of them, say so in one line and ask them to press Show me. For the web, use petal_browser instead of opening an address with petal_apps: a browser of your own on that display (a fresh one, signed in to nothing), driven directly with no pointer or keyboard. open an address, read the page as text with an id on each control, then click, type, select and check by id; petal_vault fills logins and cards into it by those ids. It isn't for the page the user is looking at: when they mean their own page (this page, here), that's petal_look and petal_ui on the note's place."
+    static let ownDisplay: Shielded = "The user has turned on hidden displays: what you open with petal_apps (action: open, with an app, a file or an address) goes on a display of your own that they don't see, so your work never shows up in front of them; the first open may wait its turn for a display. The reply says where it went. Read and use a window there with petal_ui (app: its app, or display: true for the one you opened last) and petal_act, which work in it with no pointer and nothing brought forward; petal_look with screenshot: \"screen\" shows you your display. The display goes when you're done: an app you started (it wasn't open) that the user never used, with nothing unsaved, is quit; a window you opened and left empty is closed; anything else comes to the user's screen then. What the user should keep, show them first (petal_windows, action: show): what you showed is theirs and stays. Another helper may be using the same app on its display: your open or act there then waits its turn, and you never see its windows. Where you need real keys in an app the user is using, Petal waits for them to leave it. Pass on: \"screen\" only for what the user asked to see themselves. Petal's questions, Buy and the vault's card still show to the user where they are; never ask them to look at your display. If something can only be done in front of them, say so in one line and ask them to press Show me. For the web, use petal_browser instead of opening an address with petal_apps: a browser of your own on that display (a fresh one, signed in to nothing), driven directly with no pointer or keyboard. open an address, read the page as text with an id on each control, then click, type, select and check by id; petal_vault fills logins and cards into it by those ids. For the page the user is looking at (this page, here), read it with petal_look (text: true) and act on it with petal_ui and petal_act on the note's place; open a public page's address here when you need more of it."
 
     /// "Check this against @Notebook": each of its notes shielded whole first, then its title derived and its words
     /// cut, and the whole limited.

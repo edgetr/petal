@@ -236,9 +236,9 @@ struct HelperBar: View {
         let working = run != nil || helper.map { $0.state == .working || $0.state == .waiting } == true
         let denials = run?.sticky?.agent.pendingAsk ?? []
         VStack(alignment: .leading, spacing: 8) {
-            // A faint word (a bare @Petal asks nothing).
+            // What Petal did here without a run, or why it didn't.
             if let hint = desk?.helpers.hints[noteID] {
-                Text(hint).font(.system(size: TextSize.small)).foregroundStyle(glass ? Color.secondary.opacity(0.7) : PaperLook.footer.opacity(0.7))
+                Text(hint).font(.system(size: TextSize.small)).foregroundStyle(glass ? Color.secondary : PaperLook.footer)
             }
             if working {
                 HStack(spacing: 7) {
