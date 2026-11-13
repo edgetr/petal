@@ -71,7 +71,7 @@ final class AppStripView: NSView {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.masksToBounds = false
-        registerForDraggedTypes([.fileURL, .petalNote])
+        registerForDraggedTypes(DockDrops.types + [.petalNote])
         dock.strip = self
         bounced = PetalApp.shared.signals.bounces
     }
@@ -180,6 +180,7 @@ final class AppStripView: NSView {
         let badges: [String: String]
         let dragging: String?
         let dragOffset: CGFloat
+        let dragOut: Bool
         let idle: CGFloat
         let glowStrength: CGFloat
         let showBadges: Bool
@@ -193,6 +194,7 @@ final class AppStripView: NSView {
             self.badges = badges
             dragging = dock.dragging
             dragOffset = dock.dragOffset
+            dragOut = dock.dragOut
             idle = app.config.number("idleOpacity")
             glowStrength = min(1, max(0, app.config.number("glowStrength")))
             showBadges = app.config.bool("badges") || !app.claude.readyApps.isEmpty
@@ -232,6 +234,13 @@ final class AppStripView: NSView {
         return CGRect(x: rect.minX, y: content.bounds.height - rect.maxY, width: rect.width, height: rect.height)
     }
 
+    /// A tile's slot as it's drawn now (grown and moved by magnification), in the same coordinates as `windowRect`.
+    func drawnRect(of id: String) -> CGRect? {
+        guard let tile = row?.tiles[id], let content = window?.contentView else { return nil }
+        let rect = convert(tile.slot.frame, to: nil)
+        return CGRect(x: rect.minX, y: content.bounds.height - rect.maxY, width: rect.width, height: rect.height)
+    }
+
     private var registered: Set<String> = []
 
     func registerFrames() {
@@ -240,10 +249,10 @@ final class AppStripView: NSView {
         for id in row.order {
             guard let rect = windowRect(of: id) else { continue }
             dock.frames[id] = rect
-            if Magnifier.enabled { dock.magnifier.frames[id] = (rect, true) }
+            if Magnifier.enabled { dock.magnifier.register(id, rect, scales: true, owner: nil) }
             now.insert(id)
         }
-        for id in registered.subtracting(now) { dock.magnifier.frames[id] = nil }
+        for id in registered.subtracting(now) { dock.magnifier.unregister(id, owner: nil) }
         registered = now
     }
 
@@ -276,6 +285,12 @@ final class AppStripView: NSView {
             if area.contains(point) { return tile }
         }
         return nil
+    }
+
+    /// The app a click at `point` (window coordinates, top-left origin, as `windowRect`) goes to (`--bench-dock`).
+    func app(atWindow point: CGPoint) -> String? {
+        guard let content = window?.contentView else { return nil }
+        return tile(at: convert(CGPoint(x: point.x, y: content.bounds.height - point.y), from: nil))?.id
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
@@ -344,6 +359,7 @@ final class AppStripView: NSView {
         let name = Perf.span("hover: name") { on ? Apps.name(item.id) : nil }
         Perf.span("hover: tooltip") { app.tooltips.show(name, over: item.id, in: dock) }
         if on && app.config.bool("recentFiles") { Perf.span("hover: recent") { Apps.prefetchRecent(item.id) } }
+        if on && item.running { Perf.span("hover: new item") { Apps.prefetchNewItem(item.id) } }   // what ⌘N is, for its menu
     }
 
     private func applyLift() {
@@ -371,8 +387,10 @@ final class AppStripView: NSView {
             setPressed(nil)
         }
         guard dragging else { return }
+        // Past the glass by more than a slot, one of the dock's own apps is out: let go, it's removed.
+        let out = (dock.panel.map { DockRules.isOut(inward: $0.inward(of: point), slot: Double(look?.slot ?? 44)) } ?? false)
         if dock.dragging == nil {
-            guard abs(delta) >= 6 else { return }
+            guard abs(delta) >= 6 || out else { return }
             app.popups.closeAll()
             app.previews.hover(nil, in: dock, id: id)
             app.tooltips.hide()
@@ -380,6 +398,8 @@ final class AppStripView: NSView {
             dock.dragging = id
         }
         dock.dragOffset = delta
+        let gone = out && app.config.apps.contains(id)
+        if dock.dragOut != gone { dock.dragOut = gone }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -387,21 +407,29 @@ final class AppStripView: NSView {
         setPressed(nil)
         guard let dock, let id = downOn else { return }
         if dragging {
-            if dock.dragging == id, let look, let from = dock.items.firstIndex(where: { $0.id == id }) {
-                let to = min(max(0, from + Int((dock.dragOffset / look.slot).rounded())), dock.items.count - 1)
-                let item = dock.items[from]
-                if to != from || !item.pinned { app.docks.move(id, to: to, in: dock) }
-            }
+            let from = dock.items.firstIndex { $0.id == id } ?? 0
+            let end = DockRules.dragEnd(began: dock.dragging == id, from: from, offset: dock.dragOffset, slot: Double(look?.slot ?? 44),
+                                        count: dock.items.count, kept: app.config.apps.contains(id), out: dock.dragOut)
             dock.dragging = nil
             dock.dragOffset = 0
+            dock.dragOut = false
+            switch end {
+            case .click: click(id)   // a click that slipped is still a click
+            case .move(let to): app.docks.move(id, to: to, in: dock)
+            case .remove: app.config.removeApp(id)
+            case .nothing: break
+            }
             return
         }
         // Released somewhere else: no click.
         guard tile(at: convert(event.locationInWindow, from: nil))?.id == id else { return }
-        if let item = row?.tiles[id]?.item {
-            app.popups.closeAll()
-            app.docks.activate(item)
-        }
+        click(id)
+    }
+
+    private func click(_ id: String) {
+        guard let item = row?.tiles[id]?.item else { return }
+        app.popups.closeAll()
+        app.docks.activate(item)
     }
 
     override func rightMouseDown(with event: NSEvent) {
@@ -431,13 +459,35 @@ final class AppStripView: NSView {
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        // A note (Petal Notes) goes to any app; files only with dropToOpen.
+        // A note (Petal Notes) goes to any app; documents only with dropToOpen, and never to a website shortcut;
+        // an app, a folder or a web address is added to the dock, wherever it's let go.
         let note = sender.draggingPasteboard.types?.contains(.petalNote) == true
-        let target = note || app.config.bool("dropToOpen")
-            ? tile(at: convert(sender.draggingLocation, from: nil)).flatMap { $0.item == nil || (note && Sites.isWeb($0.id)) ? nil : $0.id } : nil
-        setFileOver(target)
-        return target == nil ? [] : .copy
+        let under = tile(at: convert(sender.draggingLocation, from: nil)).flatMap { $0.item == nil || Sites.isWeb($0.id) ? nil : $0.id }
+        if !note {
+            switch DockDrops.action(dropped(sender), onApp: app.config.bool("dropToOpen") ? under : nil) {
+            case .add:
+                setFileOver(nil)
+                return .copy
+            case .open:
+                setFileOver(under)
+                return .copy
+            case nil:
+                setFileOver(nil)
+                return []
+            }
+        }
+        setFileOver(under)
+        return under == nil ? [] : .copy
     }
+
+    /// What the drag under way holds, read once per drag.
+    private func dropped(_ sender: NSDraggingInfo) -> [DockRules.Dropped] {
+        if let held, held.0 == sender.draggingSequenceNumber { return held.1 }
+        let items = DockDrops.items(sender.draggingPasteboard)
+        held = (sender.draggingSequenceNumber, items)
+        return items
+    }
+    private var held: (Int, [DockRules.Dropped])?
 
     override func draggingExited(_ sender: NSDraggingInfo?) { setFileOver(nil) }
 
@@ -448,10 +498,9 @@ final class AppStripView: NSView {
             app.paper.use(id, in: target)
             return true
         }
-        let urls = sender.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-        guard let target, !urls.isEmpty else { return false }
-        app.docks.launch(target, files: urls)
-        return true
+        let items = dropped(sender)
+        held = nil
+        return DockDrops.perform(items, onApp: target)
     }
 
     private func setFileOver(_ id: String?) {
@@ -512,6 +561,7 @@ final class Row {
         func dragShift(_ index: Int, _ id: String) -> CGFloat {
             guard let from else { return 0 }
             if id == state.dragging { return state.dragOffset }
+            if state.dragOut { return index > from ? -look.slot : 0 }   // out of the dock: the apps after it close the gap
             let to = from + Int((state.dragOffset / look.slot).rounded())
             if from < index && index <= to { return -look.slot }
             if to <= index && index < from { return look.slot }
@@ -741,7 +791,10 @@ final class Tile {
             }
         }
         if animateDot { ease(dot, "bounds", to: NSValue(rect: dotBounds), from: NSValue(rect: fromBounds), duration: 0.15) }
-        setOpacity(dot, item.windows > 0 && !dragged ? (item.here || item.active ? 1 : 0.4) : 0, duration: old == nil ? 0 : 0.15)
+        setOpacity(dot, dragged ? 0 : Float(DockRules.dot(running: item.running, here: item.here, active: item.active)),
+                   duration: old == nil ? 0 : 0.15)
+        // Out of the dock while dragged: faint, since letting go removes it.
+        setOpacity(hop, dragged && state.dragOut ? 0.4 : 1, duration: old == nil ? 0 : 0.12)
         // Dragged, or under a file: it grows.
         let grow = dragged || fileOver
         if grow != grown {

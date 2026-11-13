@@ -1703,16 +1703,21 @@ final class AppSearch {
         return list
     }
 
+    /// A stack by the folder it really shows (a missing Screenshots folder shows where screenshots go).
     func added(_ result: Result) -> Bool {
         let config = PetalApp.shared.config
-        return result.isFolder ? config.strings("stackFolders").contains(result.path) : config.apps.contains(result.id)
+        return result.isFolder ? Stacks.resolve(config.strings("stackFolders")).contains(result.path) : config.apps.contains(result.id)
     }
 
     func toggle(_ result: Result) {
         let config = PetalApp.shared.config
         if result.isFolder {
             var folders = config.strings("stackFolders")
-            if folders.contains(result.path) { folders.removeAll { $0 == result.path } } else { folders.append(result.path) }
+            if added(result) {
+                folders.removeAll { $0 == result.path || Stacks.resolve([$0]).first == result.path }
+            } else {
+                folders.append(result.path)
+            }
             config.set("stackFolders", folders)
         } else if config.apps.contains(result.id) {
             config.removeApp(result.id)
@@ -1821,7 +1826,8 @@ struct SearchRow: View {
             }
             Text(result.name).font(.system(size: TextSize.body)).lineLimit(1).truncationMode(.middle)
             Spacer()
-            Text(result.isFolder ? (added ? "Stack ✓" : "+ Stack") : (added ? "In dock ✓" : "+ Add"))
+            // On the selected row, what Return or a click does: "Remove" for what's already there.
+            Text(added && selected ? "Remove" : result.isFolder ? (added ? "Stack ✓" : "+ Stack") : (added ? "In dock ✓" : "+ Add"))
                 .font(.system(size: TextSize.callout, weight: .medium)).foregroundStyle(added ? accent : .secondary)
         }
         .padding(.horizontal, 8)
