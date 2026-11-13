@@ -693,7 +693,7 @@ struct NotebookBar: View {
         HStack(spacing: 12) {
             if book.isPrivate { Text("Private").font(.system(size: TextSize.small)).foregroundStyle(look.dim) }
             if model.inDock(book) { Text("In the dock").font(.system(size: TextSize.small)).foregroundStyle(look.dim) }
-            Button { app.paper.newOnDesktop(in: book.name, fromLibrary: true) } label: {
+            Button { app.paper.newOnDesktop(in: book.name) } label: {
                 Label("Note", systemImage: "plus").font(.system(size: TextSize.callout)).foregroundStyle(look.text)
             }
             .buttonStyle(.plain)
