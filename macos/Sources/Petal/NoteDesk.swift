@@ -1462,6 +1462,7 @@ final class NoteDesk {
     private func closeStandalone(_ key: String, escape: Bool) {
         keyboardWanted.cancel(key)
         editors[key]?.flush()
+        petalWanted.remove(key)
         let fromLibrary = standalone.removeValue(forKey: key)?.fromLibrary == true
         faces[key] = nil
         if keyboard == key { keyboard = nil }
@@ -1629,6 +1630,7 @@ final class NoteDesk {
         }
         Self.roomTurn.cancel()
         editors[key]?.flush()
+        petalWanted.remove(key)
         faces[key] = .folded
         if keyboard == key { keyboard = nil }
         // (An empty new note stays: it's let go of only once its window is left or it's put away.)
@@ -1706,6 +1708,8 @@ final class NoteDesk {
     /// The corner's @: the paper open (it opens first when folded or turned over), and a new "@Petal " line at the end
     /// of its writing with the cursor after it.
     func askPetal(_ key: String) {
+        // A read-only paper (one of a conflict's) has no editor to write the line in: nothing waits for one.
+        guard let paper = store.paper(key), !store.readOnly(paper) else { return }
         if faces[key] != .open { open(key) }
         guard faces[key] == .open else { return }
         if let editor = editors[key] { return editor.startPetal() }
@@ -1744,6 +1748,7 @@ final class NoteDesk {
     func hide(_ key: String) {
         standalone[key] = nil
         keyboardWanted.cancel(key)
+        petalWanted.remove(key)
         Self.roomTurn.cancel()
         editors[key]?.flush()
         faces[key] = nil
