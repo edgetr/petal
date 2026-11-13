@@ -11,7 +11,7 @@ import Foundation
 /// second dock by it, or the installed one quits at its next start.
 enum PetalProcess {
     /// Flags that start Petal as something other than a dock (main.swift handles each before the dock starts).
-    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--notes-desk-check", "--display-check", "--browser-check", "--look-check", "--mcp", "--restore-dock"]
+    static let notDockFlags: Set<String> = ["--snapshot", "--routines-check", "--viewer-check", "--helpers-check", "--notes-desk-check", "--dock-check", "--display-check", "--browser-check", "--look-check", "--mcp", "--restore-dock"]
     /// Every benchmark: --bench, --bench-dock, --bench-settings, --bench-windows, --bench-windows-child, -idle, --bench-notes.
     static let benchPrefix = "--bench"
 
@@ -41,6 +41,9 @@ enum PetalProcess {
         /// `Petal --notes-desk-check`: the notes on the screen driven as the person uses them, headless, on throwaway
         /// folders (NotesDeskCheck.swift).
         case notesDeskCheck
+        /// `Petal --dock-check`: the real dock driven headless with made-up apps: where clicks go, and that it moves
+        /// once for one change (DockCheck.swift).
+        case dockCheck
         /// `Petal --display-check <folder> [--full]`: makes one real hidden display and puts a TextEdit window on it;
         /// with `--full`, three runs on two displays with TextEdit and Calculator (DisplayCheck.swift, which reads
         /// `--full` itself). It changes the screens for a while: only ever run on purpose, by a person.
@@ -109,6 +112,7 @@ enum PetalProcess {
         if words.contains("--routines-check") { return .routinesCheck(ai: words.contains("--ai")) }
         if words.contains("--helpers-check") { return .helpersCheck(ai: words.contains("--ai")) }
         if words.contains("--notes-desk-check") { return .notesDeskCheck }
+        if words.contains("--dock-check") { return .dockCheck }
         if words.contains("--viewer-check") { return .viewerCheck }
         if words.contains("--snapshot") {
             guard let folder = value(after: "--snapshot") else { return usage("--snapshot") }

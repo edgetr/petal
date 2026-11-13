@@ -206,7 +206,7 @@ struct Magnified: ViewModifier {
     }
 }
 
-/// The dock's glass: with magnification on, it's drawn behind the icons and stretched to hold them as they spread.
+/// The dock's glass, drawn behind the icons; with magnification on, stretched to hold them as they spread.
 struct DockGlass: ViewModifier {
     let dock: ScreenDock
     let glass: Glass
@@ -214,20 +214,24 @@ struct DockGlass: ViewModifier {
 
     func body(content: Content) -> some View {
         let magnifier = dock.magnifier
-        if magnifier.on {
-            let stretch = magnifier.glassStretch
-            let vertical = magnifier.vertical
-            content
-                .background {
-                    Color.clear
-                        .glassEffect(glass, in: .rect(cornerRadius: radius))
-                        .scaleEffect(x: vertical ? 1 : stretch.scale, y: vertical ? stretch.scale : 1,
-                                     anchor: vertical ? UnitPoint(x: 0.5, y: stretch.anchor) : UnitPoint(x: stretch.anchor, y: 0.5))
-                }
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { magnifier.glass = $0 }
-        } else {
-            content.glassEffect(glass, in: .rect(cornerRadius: radius))
+        // The glass's shape is the row's own frame: read there, before the glass (a glass effect's own frame reaches
+        // well past its shape).
+        let measured = content.onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: {
+            if magnifier.on { magnifier.glass = $0 }
+            dock.drawnGlass = $0
         }
+        // Always drawn behind the row, never around it: with the glass effect on the row itself, its size and its
+        // slots' places changed at once while only the centring animated, so an app appearing threw the dock's end out
+        // a whole slot and slid it back (`Petal --dock-check`).
+        let stretch = magnifier.on ? magnifier.glassStretch : (scale: 1, anchor: 0.5)
+        let vertical = magnifier.vertical
+        measured
+            .background {
+                Color.clear
+                    .glassEffect(glass, in: .rect(cornerRadius: radius))
+                    .scaleEffect(x: vertical ? 1 : stretch.scale, y: vertical ? stretch.scale : 1,
+                                 anchor: vertical ? UnitPoint(x: 0.5, y: stretch.anchor) : UnitPoint(x: stretch.anchor, y: 0.5))
+            }
     }
 }
 
@@ -241,14 +245,42 @@ extension View {
     func slotMouse(_ mouse: SlotMouse) -> some View { modifier(SlotMouseArea(mouse: mouse)) }
 }
 
+/// A slot's mouse: its whole slot, reaching inward over its grown or lifted icon, out to the screen's edge (the glass's
+/// padding, the room under it and the gap to the edge are the slot's, as with macOS's Dock), and, for the first and
+/// last slot, along to the end of the dock.
 struct SlotMouseArea: ViewModifier {
     @Environment(\.snapshotting) private var snapshotting
+    @Environment(\.dockEnds) private var ends
     let mouse: SlotMouse
 
     func body(content: Content) -> some View {
         let config = PetalApp.shared.config
-        let reach = Magnifier.enabled ? max(16, config.number("iconSize")) * Magnifier.amount * 1.3 : 0
-        let edge: Edge.Set = switch config.position { case "left": .trailing; case "right": .leading; default: .top }
-        if snapshotting { content } else { content.overlay(mouse.padding(edge, -reach)) }
+        let reach = DockView.inwardReach(config, icon: max(16, config.number("iconSize")))
+        let toEdge = DockView.edgeRoom(config)
+        let along = DockView.endRoom(config, icon: max(16, config.number("iconSize")))
+        let vertical = config.position != "bottom"
+        let (inward, outward): (Edge.Set, Edge.Set) = switch config.position {
+        case "left": (.trailing, .leading)
+        case "right": (.leading, .trailing)
+        default: (.top, .bottom)
+        }
+        let start: Edge.Set = vertical ? .top : .leading, end: Edge.Set = vertical ? .bottom : .trailing
+        // The whole slot, not only the button or icon drawn in it (the dock gives every slot its frame).
+        let mouse = { var mouse = self.mouse; mouse.ends = ends; return mouse }()
+        if snapshotting { content } else {
+            content.frame(maxWidth: .infinity, maxHeight: .infinity).overlay(mouse.padding(inward, -reach).padding(outward, -toEdge)
+                .padding(start, ends.contains(.start) ? -along : 0).padding(end, ends.contains(.end) ? -along : 0))
+        }
     }
+}
+
+/// Which ends of the dock a slot is at: its mouse reaches along to that end of the dock.
+struct DockEnds: OptionSet {
+    let rawValue: Int
+    static let start = DockEnds(rawValue: 1)
+    static let end = DockEnds(rawValue: 2)
+}
+
+extension EnvironmentValues {
+    @Entry var dockEnds: DockEnds = []
 }
