@@ -175,7 +175,9 @@ enum TabCheck: Equatable, Sendable { case same, another, unknown }
 /// another tab showing, or Petal can't tell which, and why: no answer it could be sure of, or the browser hasn't been
 /// asked yet whether Petal may see its tabs, or said no.
 enum TabShown: Equatable, Sendable {
-    enum Unsure: Equatable, Sendable { case unknown, notAsked, refused }
+    /// `noWindow`: the note's window isn't among its browser's windows here (closed, on another Desktop, or the
+    /// browser quit).
+    enum Unsure: Equatable, Sendable { case unknown, notAsked, refused, noWindow }
 
     case shown(tab: NoteTab, window: UInt32)
     case another
