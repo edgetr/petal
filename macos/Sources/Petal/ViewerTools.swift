@@ -79,7 +79,11 @@ extension Viewers {
         switch name {
         case "petal_view":
             // Every page's words at once (pages: "all"), up to `allLimit`.
-            if args["pages"] as? String == "all" { return viewAll(path: path, caller: caller, live: live, told: told, fail: fail) }
+            if args["pages"] as? String == "all" {
+                let from = ViewerPages.requested(args["from"])
+                if args["from"] != nil, from == nil { return fail("from counts from 1 (a whole number).") }
+                return viewAll(path: path, from: (from ?? 1) - 1, caller: caller, live: live, told: told, fail: fail)
+            }
             // A page counts from 1; a number that isn't one is refused before anything is worked out from it.
             let page = ViewerPages.requested(args["page"])
             if args["page"] != nil, page == nil { return fail("page counts from 1 (a whole number).") }
@@ -109,6 +113,8 @@ extension Viewers {
                                 if let words, !words.isEmpty, !model.loading, model.text === source, model.current == shown {
                                     told[model.unit.word] = shown + 1
                                     told["text"] = words
+                                } else if words != nil, !model.loading, model.text === source, model.current == shown {
+                                    told["textNote"] = Self.noWords(model.unit.word)
                                 }
                                 return Told(told, state: model.shownState)
                             }, fit: Self.fitText)
@@ -248,7 +254,12 @@ extension Viewers {
 
     /// Every page's words, in order, each under its number, read one page at a time off the main thread; told with
     /// the rest, redacted whole with the answer, then cut to `allLimit` (saying which page it reached).
-    private func viewAll(path: String, caller: String, live: @escaping @Sendable () -> Bool,
+    /// What the AI hears when a page has no words to read (a scan, a picture).
+    nonisolated static func noWords(_ unit: String) -> String {
+        "No words could be read from this \(unit) (a scan or a picture): petal_look with screenshot: \"window\" shows it."
+    }
+
+    private func viewAll(path: String, from first: Int = 0, caller: String, live: @escaping @Sendable () -> Bool,
                          told: @escaping (@escaping @MainActor () -> Told, Int, @escaping @MainActor (Any) -> Any) -> Void,
                          fail: @escaping (String) -> Void) {
         open(path: path, page: nil, live: live) { result in
@@ -261,31 +272,42 @@ extension Viewers {
                         return told({ model.isClosed ? Told(refusal: Self.closedText) : Told(self.told(model, caller: caller), state: model.shownState) }, 0, { $0 })
                     }
                     let count = model.pageCount, word = model.unit.word
+                    guard first < count else { return fail("It has \(count) \(word)s; from \(first + 1) is past its end.") }
                     var pages: [String] = []
+                    var size = 0
+                    // `reached`: the first page not told (count: all of them were).
+                    func finish(_ reached: Int) {
+                        told({
+                            guard !model.isClosed else { return Told(refusal: Self.closedText) }
+                            var answer = self.told(model, caller: caller)
+                            guard !model.loading, model.text === source else { return Told(answer, state: model.shownState) }
+                            answer["text"] = pages.joined(separator: "\n\n")
+                            if pages.isEmpty { answer["textNote"] = Self.noWords(word) }
+                            if reached < count {
+                                answer["textCut"] = "This goes to \(word) \(reached) of \(count); pages: \"all\" with from: \(reached + 1) gives the next."
+                            }
+                            return Told(answer, state: model.shownState)
+                        }, 0, { out in
+                            guard var all = out as? [String: Any], let text = all["text"] as? String, text.count > Self.allLimit else { return out }
+                            all["text"] = String(text.prefix(Self.allLimit)) + "…"
+                            all["textCut"] = "This is the start of these \(word)s' words; ask with page for the rest."
+                            return all
+                        })
+                    }
                     func next(_ index: Int) {
                         guard live() else { return }
-                        guard index < count, pages.reduce(0, { $0 + $1.count }) < Self.allLimit else {
-                            let reached = index
-                            return told({
-                                guard !model.isClosed else { return Told(refusal: Self.closedText) }
-                                var answer = self.told(model, caller: caller)
-                                guard !model.loading, model.text === source else { return Told(answer, state: model.shownState) }
-                                answer["text"] = pages.joined(separator: "\n\n")
-                                if reached < count { answer["textCut"] = "This goes to \(word) \(reached); ask with page for the rest." }
-                                return Told(answer, state: model.shownState)
-                            }, 0, { out in
-                                guard var all = out as? [String: Any], let text = all["text"] as? String, text.count > Self.allLimit else { return out }
-                                all["text"] = String(text.prefix(Self.allLimit)) + "…"
-                                all["textCut"] = "This is the start of the document's words; ask with page for the rest."
-                                return all
-                            })
-                        }
+                        guard index < count else { return finish(index) }
                         source.read(page: index, selected: NSRange(location: NSNotFound, length: 0), paragraph: { _ in nil }) { text, _, _ in
-                            if let text, !text.isEmpty { pages.append("— \(word) \(index + 1) —\n" + text) }
+                            guard let text, !text.isEmpty else { return next(index + 1) }
+                            let piece = "— \(word) \(index + 1) —\n" + text
+                            // A page that would go past the limit waits for the next call (the first is told whatever it is).
+                            if !pages.isEmpty, size + piece.count > Self.allLimit { return finish(index) }
+                            pages.append(piece)
+                            size += piece.count + 2
                             next(index + 1)
                         }
                     }
-                    next(0)
+                    next(first)
                 }
             }
         }
