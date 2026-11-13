@@ -560,38 +560,33 @@ final class Assist {
             let reading = Reader.read(pid: pid, window: window, budget: 3, words: true)
             guard !reading.vaultUnreadable else { return nil }
             if reading.gone || reading.window == nil { return ["textNote": "Petal couldn't find that window to read its words."] }
-            // Each line once more, then the whole (a secret the pieces of a line make together never goes out), kept
-            // under what the vault's index searches whole.
-            var lines: [String] = []
-            var size = 0
-            var cut = reading.timedOut
-            for line in WindowText.lines(reading.nodes) {
-                if size + line.count > WindowText.most { cut = true; break }
-                lines.append(index.redacted(line))
-                size += line.count + 1
-            }
-            lines = index.redacted(lines.joined(separator: "\n")).components(separatedBy: "\n")
+            // What's told (one part, or the passages around a word) checked whole for a secret shown in pieces, whatever
+            // the window's own scan managed (a long page runs out of time), each line and the whole redacted again.
+            let checkBy = Date().addingTimeInterval(1.5)
+            let made = WindowText.told(shown: reading.nodes, raw: reading.raw, part: part, find: find, redact: index.redacted,
+                                       matches: index.matches, spans: index.spans, going: { Date() < checkBy })
             var told: [String: Any] = [:]
-            if cut { told["partial"] = "Petal read what it could of this window in time: the rest of it isn't here." }
-            guard lines.contains(where: { !$0.isEmpty }) else {
+            if made.cut || reading.timedOut { told["partial"] = "Petal read what it could of this window in time: the rest of it isn't here." }
+            guard let text = made.text else {
+                told["textNote"] = "Petal couldn't finish checking this part for saved secrets, so it isn't told: ask again, or find a word to read less."
+                return told
+            }
+            if find.isEmpty, made.parts == 0 || text.isEmpty {
                 told["textNote"] = "Petal found no words in this window: the app may not show its text to Accessibility (a screenshot shows it)."
                 return told
             }
+            told["text"] = text
             if !find.isEmpty {
-                let found = WindowText.find(find, in: lines)
-                told["text"] = found.text
-                told["found"] = found.found
-                if found.found == 0 { told["textNote"] = "No “\(index.redacted(find))” in what Petal read of this window." }
-                if found.left > 0 { told["more"] = "\(found.left) more places with it didn't fit: find a longer phrase, or read the parts." }
+                told["found"] = made.found
+                if made.found == 0 { told["textNote"] = "No “\(index.redacted(find))” in what Petal read of this window." }
+                if made.findLeft > 0 { told["more"] = "\(made.findLeft) more places with it didn't fit: find a longer phrase, or read the parts." }
                 return told
             }
-            let page = WindowText.page(lines.joined(separator: "\n"), part: part)
-            told["text"] = page.text
-            if page.parts > 1 {
-                told["part"] = page.part
-                told["parts"] = page.parts
+            if made.parts > 1 {
+                told["part"] = made.part
+                told["parts"] = made.parts
             }
-            if page.left > 0 { told["more"] = "\(page.left) more characters: petal_look with part: \(page.part + 1) gives the next part (find: a word gives only the passages around it)." }
+            if made.left > 0 { told["more"] = "\(made.left) more characters: petal_look with part: \(made.part + 1) gives the next part (find: a word gives only the passages around it)." }
             return told
         }
         guard case .some(.some(let told)) = made else { return unreadable }
