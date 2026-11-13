@@ -1459,8 +1459,6 @@ final class NoteDesk {
         faces[key] = nil
         if keyboard == key { keyboard = nil }
         panels[key]?.conceal()
-        // A new note put away with nothing written goes.
-        letGoIfEmpty(key)
         layout()
         let library = app.notesWindow.window
         switch NoteShelf.standaloneKeyboard(escape: escape, fromLibrary: fromLibrary, libraryOpen: library?.isVisible == true) {
@@ -1546,6 +1544,7 @@ final class NoteDesk {
             }
             for (index, paper) in notes.enumerated() {
                 showing.insert(paper.key)
+                if fresh.contains(paper.key) { placedOnce.insert(paper.key) }
                 if faces[paper.key] == nil { faces[paper.key] = .folded }
                 let panel = panel(for: paper.key)
                 panel.rest = .desktop
@@ -1558,6 +1557,7 @@ final class NoteDesk {
                 shown(paper.key, panel)
             }
         }
+        leftDesktops()
         for (key, panel) in panels where panel.desktop && !showing.contains(key) {
             panel.rest = .window
             panel.conceal()
@@ -1682,6 +1682,20 @@ final class NoteDesk {
         }
     }
 
+    /// An empty new note on a Desktop only, shown there before, whose Desktop no screen shows now (the person went to
+    /// another): let go, as one on a window is when its window is left.
+    private func leftDesktops() {
+        let showing = Set(Self.spaces.values)
+        guard !showing.isEmpty else { return }
+        for key in Array(fresh) where standalone[key] == nil && placedOnce.contains(key) {
+            guard let places = store.paper(key)?.file.places, !places.isEmpty, places.allSatisfy({ $0.kind == .desktop }),
+                  !places.contains(where: { $0.desktop.map(showing.contains) ?? false }) else { continue }
+            if faces[key] == .open || faces[key] == .back { faces[key] = .folded }
+            if keyboard == key { keyboard = nil }
+            letGoIfEmpty(key)
+        }
+    }
+
     /// The corner's @: the paper open (it opens first when folded or turned over), and a new "@Petal " line at the end
     /// of its writing with the cursor after it.
     func askPetal(_ key: String) {
@@ -1705,7 +1719,8 @@ final class NoteDesk {
     /// Whether a paper can be put away where it shows now: on a window (its tab brings it back), brought up for a
     /// while (a summoned note), or opened on its own. One on its own Desktop or kept on the screen stays there.
     func putsAway(_ key: String) -> Bool {
-        if standalone[key] != nil || helpers.summoned.contains(key) { return true }
+        // An empty new note too, wherever it is: putting it away lets it go.
+        if standalone[key] != nil || helpers.summoned.contains(key) || fresh.contains(key) { return true }
         if case .window = placementNow(key) { return true }
         return false
     }
@@ -2466,12 +2481,12 @@ final class NoteDesk {
     /// `window`: the frame (Accessibility's coordinates) of the window it's made on, when that isn't the one in
     /// front (a drop on a window behind): its spot is recorded against that window.
     /// `open` false: made without opening it on the desk (Petal's viewer opens it in its margin).
-    func make(on stick: NoteStick, body: String = "", quote: String? = nil, chat: String = "", at point: CGPoint? = nil, window: CGRect? = nil,
-              expecting: NoteShelf.KeyboardRequests.Target? = nil, open opening: Bool = true) -> PaperNote? {
+    func make(on stick: NoteStick, in chosen: String? = nil, body: String = "", quote: String? = nil, chat: String = "", at point: CGPoint? = nil,
+              window: CGRect? = nil, expecting: NoteShelf.KeyboardRequests.Target? = nil, open opening: Bool = true) -> PaperNote? {
         var file = NoteFile(body: body)
         file.places = [stick]
         file.chat = chat
-        let notebook = notebook(for: stick)
+        let notebook = chosen.flatMap { store.notebook($0) != nil ? $0 : nil } ?? notebook(for: stick)
         guard let paper = store.make(file, in: notebook) else { return nil }
         remember(paper.notebook, for: stick)
         if body.isEmpty { fresh.insert(paper.key) }
@@ -2497,19 +2512,19 @@ final class NoteDesk {
         return name
     }
 
-    /// A new note on the Desktop showing (under the pointer), in `notebook` (else the one new notes go in), opened on
-    /// its own to write in: "+ Note" in Petal Notes, and the note pad or ⌃⌥N with a window of Petal's in front. Put
-    /// away, it rests on that Desktop; empty, it goes.
-    func newOnDesktop(in notebook: String? = nil, fromLibrary: Bool = false) {
+    /// A new note on the Desktop showing (under the pointer), in `notebook` (else the one new notes go in), open to
+    /// write in near the middle of that screen: "+ Note" in Petal Notes, and the note pad or ⌃⌥N with a window of
+    /// Petal's in front. It's a Desktop note like any other: a click elsewhere folds it there; empty, it goes only
+    /// when it's put away or its Desktop is left.
+    func newOnDesktop(in notebook: String? = nil) {
         guard on, takesChanges() else { return }
+        let mouse = NSEvent.mouseLocation
+        let screen = (Screens.all.first { $0.frame.contains(mouse) } ?? Screens.main)?.visibleFrame ?? .zero
+        let corner = CGPoint(x: screen.midX - PaperLook.openWidth / 2, y: screen.midY + 220)
         resolveDesktop { [weak self] number in
             guard let self else { return }
             guard let desk = NoteShelf.desktopAnchor(number: number) else { return self.say("Petal couldn't tell which Desktop is showing, so no note was made.") }
-            var file = NoteFile(body: "")
-            file.places = [desk]
-            guard let paper = self.store.make(file, in: notebook ?? self.defaultNotebook) else { return }
-            self.fresh.insert(paper.key)
-            self.openStandalone(paper.key, fromLibrary: fromLibrary)
+            self.make(on: desk, in: notebook, at: corner)
         }
     }
 
