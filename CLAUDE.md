@@ -8,6 +8,7 @@
 
 - Claude Code loads `AGENTS.md` only through the import above, because this project has a `CLAUDE.md`. Keep every rule that all agents need in `AGENTS.md`.
 - Claude's auto-memory is only for facts about this machine and session history. A rule every agent should follow goes in `AGENTS.md`, or Codex and Gemini threads in T3 will never see it.
+- **No Codex from 2026-11-14:** the owner's Codex subscription has ended. Don't hand anything to Codex or GPT models (`delegate_task` with the `codex` provider, or the `codex` CLI): reviews, implementation, research, device walks and computer use go to Claude subagents, Claude delegates or your own tools. Older memories and docs that send work to Codex or Sol are history.
 
 ## Petal's own Claude
 
