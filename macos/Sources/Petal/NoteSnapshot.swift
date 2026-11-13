@@ -57,6 +57,9 @@ extension Snapshot {
         var early = NoteFile(id: "S4", created: day, body: "Get there by 7:45 for a seat near the front.")
         early.places = [passage]
         let sentence = PaperNote(file: early, url: root.appending(path: "Inbox/Early.md"), notebook: "Inbox")
+        var blank = NoteFile(id: "S6", created: Date(), body: "")
+        blank.places = [page]
+        let empty = PaperNote(file: blank, url: root.appending(path: "Inbox/Untitled.md"), notebook: "Inbox")
         app.paper.store.preview([folded, open, other, sentence], notebooks: books)
         app.paper.preview(here: [folded.key: 0, open.key: 0, other.key: 0, sentence.key: 0], found: [sentence.key: true])
 
@@ -71,6 +74,7 @@ extension Snapshot {
             ("note-folded", scene(paper(folded, .folded))),
             ("note-open", scene(paper(open, .open))),
             ("note-back", scene(paper(open, .back))),
+            ("note-empty", scene(paper(empty, .open))),
             ("note-glass", scene(HStack(alignment: .top, spacing: 30) { paper(folded, .folded, glass: true); paper(open, .open, glass: true) })),
             ("note-sentence", scene(paper(sentence, .folded))),
             ("note-edge-tabs", scene(edgeScene(app: app, keys: [sentence.key, other.key, folded.key, open.key], sentence: sentence))),
