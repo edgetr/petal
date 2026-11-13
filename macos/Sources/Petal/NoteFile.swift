@@ -2338,11 +2338,13 @@ enum NoteRoom {
 
     /// The window's frame with room for a note `width` wide on its right, or nil when it has room already or can't
     /// make it (narrowed below its minimum: the note then sits over the window's edge instead). It keeps its left
-    /// edge and shrinks; when that's too narrow it moves left first.
-    static func narrowed(window: CGRect, visible: CGRect, note width: CGFloat) -> CGRect? {
-        let needed = width + gap * 2
-        guard room(window: window, visible: visible) < needed else { return nil }
-        let right = visible.maxX - needed
+    /// edge and shrinks; when that's too narrow it moves left first. `margin`: the room the note's panel keeps inside
+    /// the screen (as `stack` takes it). Has room: `beside` puts the note right of the window, not clamped over it.
+    /// Narrowed: to where `beside` put the note while it had no room (the screen's edge, less the margin and a gap),
+    /// so the note doesn't move sideways as the window narrows under it.
+    static func narrowed(window: CGRect, visible: CGRect, note width: CGFloat, margin: CGFloat = 0) -> CGRect? {
+        guard room(window: window, visible: visible) < width + gap + margin else { return nil }
+        let right = visible.maxX - (width + gap * 2 + margin)
         if right - window.minX >= minimumWidth {
             return CGRect(x: window.minX, y: window.minY, width: right - window.minX, height: window.height)
         }
@@ -2423,7 +2425,9 @@ enum NoteRoom {
     }
 
     /// Where a paper sat at the last layout on a window: its top (points down from the window's top), its left edge
-    /// (points from the window's right edge), its column and its size then.
+    /// (points from where `beside` puts a paper of its width: 0 in the column beside the window, so it follows the
+    /// window's edge and the screen's, never a place left from a layout where either was elsewhere), its column and
+    /// its size then.
     struct Was: Equatable, Sendable {
         var top: CGFloat
         var column: Int
@@ -2436,6 +2440,8 @@ enum NoteRoom {
         var frame: CGRect
         /// The column it's in (0 beside the window; -1 for a paper the person moved).
         var column: Int
+        /// What the next layout on this window is given as its `was` (nil for a paper the person moved).
+        var was: Was? = nil
     }
 
     /// Where every paper showing on a window sits (top-left frames, Accessibility's, as `beside`). One rule:
@@ -2456,8 +2462,10 @@ enum NoteRoom {
         let visible = whole.insetBy(dx: margin, dy: margin)
         let free = papers.filter { $0.moved == nil }
         let columns = columns(window: window, visible: visible, width: free.map(\.size.width).max() ?? 0)
+        /// Where `beside` puts a paper `width` wide: what a paper's remembered left edge is counted from.
+        func anchor(_ width: CGFloat) -> CGFloat { beside(window: window, visible: visible, size: CGSize(width: width, height: 0), top: 0).minX }
         func x(_ width: CGFloat, column: Int) -> CGFloat {
-            if column == 0 { return beside(window: window, visible: visible, size: CGSize(width: width, height: 0), top: 0).minX }
+            if column == 0 { return anchor(width) }
             return columns.lefts[column] + (columns.toWindow ? 0 : columns.width - width)
         }
         func fit(_ y: CGFloat, _ height: CGFloat) -> CGFloat { max(visible.minY, min(max(y, visible.minY + gap), visible.maxY - height - gap)) }
@@ -2468,7 +2476,7 @@ enum NoteRoom {
         /// Its remembered left edge, while a paper of its width there stays on the screen.
         func remembered(_ paper: Paper) -> CGFloat? {
             guard let was = paper.was else { return nil }
-            let left = window.maxX + was.x
+            let left = anchor(paper.size.width) + was.x
             return left >= visible.minX + gap - 0.5 && left + paper.size.width <= visible.maxX + 0.5 ? left : nil
         }
         var fixed: [String: Placed] = [:]
@@ -2547,7 +2555,13 @@ enum NoteRoom {
             let first = rest.filter { untouched($0.element) }.sorted(by: byPlace), then = rest.filter { !untouched($0.element) }.sorted(by: byPlace)
             placed = place((first + then).map(\.element), stay: Set(first.map(\.element.id)))
         }
-        return papers.compactMap { fixed[$0.id] ?? placed[$0.id] }
+        return papers.compactMap { paper in
+            guard var spot = fixed[paper.id] ?? placed[paper.id] else { return nil }
+            if spot.column >= 0 {
+                spot.was = Was(top: spot.frame.minY - window.minY, column: spot.column, x: spot.frame.minX - anchor(spot.frame.width), size: spot.frame.size)
+            }
+            return spot
+        }
     }
 
     /// The columns papers `width` wide may go in beside a window: the first beside it (as `beside` puts one), then to

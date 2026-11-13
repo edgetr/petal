@@ -308,9 +308,7 @@ extension Snapshot {
         let before = NoteRoom.stack(window: window, visible: visible, papers: papers.map { NoteRoom.Paper(id: $0.id, size: size($0.folded), top: EdgeLayout.top) },
                                     margin: PaperLook.margin)
         let after = NoteRoom.stack(window: window, visible: visible, papers: papers.map { item in
-            let spot = before.first { $0.id == item.id }!
-            let was = NoteRoom.Was(top: spot.frame.minY - window.minY, column: spot.column, x: spot.frame.minX - window.maxX, size: spot.frame.size)
-            return NoteRoom.Paper(id: item.id, size: size(item.open ?? item.folded), top: EdgeLayout.top, was: was)
+            NoteRoom.Paper(id: item.id, size: size(item.open ?? item.folded), top: EdgeLayout.top, was: before.first { $0.id == item.id }?.was)
         }, margin: PaperLook.margin)
         func half(_ placed: [NoteRoom.Placed], opened: Bool) -> some View {
             ZStack(alignment: .topLeading) {
