@@ -37,6 +37,11 @@ final class NoteDesk {
     @ObservationIgnored private var rootCache: (setting: String, root: URL)?
     @ObservationIgnored private var panels: [String: NotePanel] = [:]
     @ObservationIgnored private var tabPanels: [String: EdgeTabPanel] = [:]
+    /// Tab and pin panels no note uses now, hidden and kept to be used again. A panel that was ever on the screen
+    /// stays alive as long as it stays ordered in (it's hidden by going clear, never ordered out), so one let go of
+    /// would be a window kept for nothing; and a new one costs a few milliseconds each time a window comes forward.
+    @ObservationIgnored private var spareTabs: [EdgeTabPanel] = []
+    @ObservationIgnored private var sparePins: [PinPanel] = []
     @ObservationIgnored private(set) var scene: NoteScene?
     /// The private apps' generation the cached scene was filtered against: every reuse filters it again.
     @ObservationIgnored private var scenePrivacy = 0
@@ -431,8 +436,8 @@ final class NoteDesk {
         for editor in editors.values { editor.seal() }
         editors = [:]
         for panel in panels.values { panel.conceal() }
-        for panel in tabPanels.values { panel.conceal() }
-        for panel in pinPanels.values { panel.conceal() }
+        for panel in tabPanels.values { spareTab(panel) }
+        for pin in pinPanels.values { sparePin(pin) }
         panels = [:]
         tabPanels = [:]
         pinPanels = [:]
@@ -1111,12 +1116,12 @@ final class NoteDesk {
         for tab in tabs {
             let key = tab.ids[0]
             keep.insert(key)
-            let panel = tabPanels[key] ?? EdgeTabPanel(desk: self)
+            let panel = tabPanels[key] ?? spareTabs.popLast() ?? EdgeTabPanel(desk: self)
             tabPanels[key] = panel
             panel.show(tab, outside: outside, window: frame, primaryHeight: primaryHeight)
         }
         for (key, panel) in tabPanels where !keep.contains(key) {
-            panel.conceal()
+            spareTab(panel)
             tabPanels[key] = nil
         }
         // The notes showing on this window, stacked down its right side where nobody moved them.
@@ -1193,15 +1198,27 @@ final class NoteDesk {
             keep.insert(key)
             let words = NoteRules.appKitFrame(rect, primaryHeight: primaryHeight)
             let paperFrame = note.frame.insetBy(dx: PaperLook.margin, dy: PaperLook.margin)
-            let pin = pinPanels[key] ?? PinPanel()
+            let pin = pinPanels[key] ?? sparePins.popLast() ?? PinPanel()
             pinPanels[key] = pin
             pin.show(from: CGPoint(x: words.maxX, y: words.midY), to: CGPoint(x: paperFrame.minX, y: paperFrame.maxY - 28),
                      color: store.color(of: paper.notebook))
         }
         for (key, pin) in pinPanels where !keep.contains(key) {
-            pin.conceal()
+            sparePin(pin)
             pinPanels[key] = nil
         }
+    }
+
+    /// A tab panel no note uses now: hidden, emptied, and kept to be used again (`spareTabs`).
+    private func spareTab(_ panel: EdgeTabPanel) {
+        panel.retire()
+        spareTabs.append(panel)
+    }
+
+    /// A pin no note uses now: hidden and kept to be used again (`sparePins`).
+    private func sparePin(_ pin: PinPanel) {
+        pin.conceal()
+        sparePins.append(pin)
     }
 
     /// A notebook's color as the tabs name it.
@@ -2131,7 +2148,7 @@ final class NoteDesk {
         editors = NoteShelf.rekeyed(editors, old, new)
         editorTokens = NoteShelf.rekeyed(editorTokens, old, new)
         pinPanels = NoteShelf.rekeyed(pinPanels, old, new)
-        if let tab = tabPanels.removeValue(forKey: old) { tab.conceal() }
+        if let tab = tabPanels.removeValue(forKey: old) { spareTab(tab) }
         if let panel = panels.removeValue(forKey: old) { panel.rekey(new); panels[new] = panel }
         app.viewers.rekeyed(old, new)
     }
@@ -2211,7 +2228,11 @@ final class NoteDesk {
         if let helper = file.helper, helper.state == .failed { return "Couldn't finish" }
         if let helper = file.helper, helper.state != .done { return helper.step.isEmpty ? "Working" : helper.step }
         if let back = file.back { return NoteHelp.backLine(back, now: Date()) }
-        if let watch = file.watch { return watch.foot(thisMac: watch.mac == local.mac) }
+        // "This Mac" only for a watcher this Mac looks for: one the person set up here (`NoteLocal.standing`).
+        if let watch = file.watch {
+            let here = local.standing == nil || NoteHelp.stands(NoteHelp.Standing(watch, on: paper.noteID), in: local.standing)
+            return watch.foot(thisMac: watch.mac == local.mac && here)
+        }
         if file.fromPetal { return "From Petal · " + Self.when(file.created) }
         return Self.when(file.modified)
     }
@@ -3357,6 +3378,17 @@ final class EdgeTabPanel: NSPanel {
         guard on != hovering else { return }
         hovering = on
         draw()
+    }
+
+    /// No note's tab any more (kept to be used for another): hidden, holding nothing of the note it showed, and not
+    /// hovered, so the next note's tab starts closed.
+    func retire() {
+        conceal()
+        edgeTab = nil
+        hovering = false
+        hosting.rootView = AnyView(EmptyView())
+        showsPrivate = false
+        sharingType = .readOnly
     }
 }
 

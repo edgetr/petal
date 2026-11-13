@@ -11,7 +11,7 @@ enum CLI {
     petal get                 everything about the dock: settings (with help), its apps, files
     petal set <key> <value>   change a setting (value as JSON: true, 44, "#d9367f", ["~/Downloads"])
     petal dock [petal|macos]  which dock is showing, or switch
-    petal ask | chat <text>   open the AI panel, or ask it something
+    petal ask | chat <text>   open the AI panel, or open it with <text> typed for you to send
     petal chats               your kept chats with Petal AI, to read again or carry on
     petal search | settings   open the "+" search, or Petal's settings (settings privacy: a page by name)
     petal restart | update    restart Petal, or check for a new one
@@ -40,7 +40,7 @@ enum CLI {
         case "help":
             print(help)
         case "apps":
-            for app in MCP.read(MCP.dockFile)?["apps"] as? [String] ?? [] { print(app) }
+            for app in ConfigRules.apps(MCP.read(MCP.dockFile)?["apps"]) { print(app) }
         case "get":
             output(try? MCP.call("petal_get_state", [:]))
         case "set":

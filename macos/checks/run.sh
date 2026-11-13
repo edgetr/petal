@@ -29,8 +29,60 @@ swiftc -parse-as-library -O -o "$out/settings" Sources/Petal/Settings.swift chec
 "$out/settings" Resources/mcp/tools.json Sources/Petal
 swiftc -parse-as-library -O -o "$out/look" Sources/Petal/LookSchedule.swift checks/LookScheduleCheck.swift
 "$out/look"
+# What apps signal to the dock: a badge going up bounces its app once (never every badge when Petal or macOS's Dock
+# starts, and a dot becoming a count is going up), and a player playing shows before one paused (SignalRules).
+swiftc -parse-as-library -O -o "$out/signals" Sources/Petal/SignalRules.swift checks/SignalRulesCheck.swift
+"$out/signals"
+# Clicking an app in front again brings its next window forward, through every one of them and back, whatever order
+# the app lists them in as they come forward (DockRules).
+swiftc -parse-as-library -O -o "$out/dockrules" Sources/Petal/DockRules.swift checks/DockRulesCheck.swift
+"$out/dockrules"
+# Petal's own files: an entry in dock.json's apps that isn't text never empties the dock, a file someone is
+# editing that doesn't read as JSON yet keeps what was read before, and a change in settings.json that would let Petal
+# AI do more (Full access, using apps, more allowed without asking, an app off the private list) isn't taken while
+# Petal runs, while one that lets it do less is (ConfigRules).
+swiftc -parse-as-library -O -o "$out/configrules" Sources/Petal/ConfigRules.swift checks/ConfigRulesCheck.swift
+"$out/configrules"
+# A website shortcut's cached icon: an ask while it's being read waits for that read, so a cached icon is never
+# fetched from the site again (SiteLoads).
+swiftc -parse-as-library -O -o "$out/siteloads" Sources/Petal/SiteLoads.swift checks/SiteLoadsCheck.swift
+"$out/siteloads"
+# A stack's thumbnails: made once at a time, and made again when asked for after the cache let them go (ThumbnailCache).
+swiftc -parse-as-library -O -o "$out/thumbnails" Sources/Petal/ThumbnailCache.swift checks/ThumbnailCacheCheck.swift
+"$out/thumbnails"
 swiftc -parse-as-library -O -o "$out/uimap" Sources/Petal/UIMap.swift checks/UIMapCheck.swift
 "$out/uimap"
+# What petal_act says of a menu is its app's own text (a Window menu lists every window by its title): the items a
+# menu has, the path walked and the item chosen are told only in UIMap's words, every title through the vault's
+# redaction (Acting.menuWords); the title Petal goes by (menuTitle) is never told.
+if grep -nE 'chose = prepared\.menuTitle|\\\((prepared|known)\.menuTitle|It has: |The menus are: ' Sources/Petal/ComputerUse.swift Sources/Petal/BackgroundActing.swift; then
+    echo "petal_act: a menu's titles are told only through Acting.menuWords"; exit 1
+fi
+grep -q 'menuWords { UIMap.noMenu(path\[0\], menus: names, shown: \$0) }' Sources/Petal/ComputerUse.swift \
+    && grep -q 'menuWords { UIMap.noMenuItem(name, in: walked, items: names, shown: \$0) }' Sources/Petal/ComputerUse.swift \
+    && [ "$(grep -c 'menuWords { UIMap.menuShown(' Sources/Petal/ComputerUse.swift)" = 2 ] \
+    && grep -q 'VaultIndex.settled { index in words { index.redacted(\$0) } } ?? words { _ in UIMap.hidden }' Sources/Petal/ComputerUse.swift \
+    || { echo "petal_act: a menu's titles go through the vault's redaction before they're told"; exit 1; }
+# A menu item or key that hands what's selected to another app without the clipboard (UIMap.sends: a Service, Share,
+# Look Up) gets a copy's check right before it, in front and in the background alike; the app's own menu, where
+# Services is in every language, is known by its place (UIMap.ownMenu), for a menu path and a key's item alike; in
+# the background such an item needs the window in front. And the text Services (Ask Petal AI, Add to Petal AI) quote
+# the text only as Petal AI may be told it, each vault secret hidden.
+grep -q 'case .send?: return copyRefusal(map, element, sending: true)' Sources/Petal/ComputerUse.swift \
+    && grep -q 'return UIMap.sends(menu: title ?? own, appMenu: appMenu, character: character, modifiers: modifiers) ? .send : nil' Sources/Petal/ComputerUse.swift \
+    && grep -q 'key.map { UIMap.sends(key: \$0, claimed: false) } ?? UIMap.sends(menu: title, appMenu: appMenu)' Sources/Petal/ComputerUse.swift \
+    && [ "$(grep -c 'UIMap.ownMenu(at:' Sources/Petal/ComputerUse.swift)" = 2 ] \
+    && [ "$(grep -c 'prepared.menuApp = found.appMenu' Sources/Petal/ComputerUse.swift)" = 2 ] \
+    && [ "$(grep -c 'if sends, let why = sendRefusal(map, ' Sources/Petal/BackgroundActing.swift)" = 2 ] \
+    && grep -q '(sends && prepared.menuItem != nil)' Sources/Petal/BackgroundActing.swift \
+    && grep -q 'let shown = Assist.shownText(text, limit: .max)' Sources/Petal/TextServices.swift \
+    && ! grep -q 'app.claude.quote(text, ' Sources/Petal/TextServices.swift \
+    || { echo "petal_act: what hands the selection to another app is checked as a copy; the text Services quote no vault secret"; exit 1; }
+# petal_windows finds a window by its id or by words of the title it told, never by its own title's hidden words.
+if grep -n '\$0\.title\.localizedCaseInsensitiveContains(wanted)' Sources/Petal/Assist.swift; then
+    echo "petal_windows: a window is found only by the title as it was told"; exit 1
+fi
+echo "menus: titles told redacted; handing the selection on checked as a copy"
 swiftc -parse-as-library -O -o "$out/notes" Sources/Petal/NoteLayout.swift checks/NoteLayoutCheck.swift
 "$out/notes"
 # Petal Notes: the note file's round trip, iCloud's conflict copies, the ranked fallback of a note's places, the tabs
@@ -42,7 +94,7 @@ swiftc -parse-as-library -O -o "$out/papernotes" Sources/Petal/NoteFile.swift So
 swiftc -parse-as-library -O -o "$out/notelibrary" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/NoteTasks.swift Sources/Petal/RunApps.swift Sources/Petal/ViewerFile.swift checks/NoteLibraryCheck.swift
 "$out/notelibrary"
 # A note's text in the editor and back: the same Markdown, line for line (AppKit, nothing shown).
-swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/Screens.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/EditMenu.swift Sources/Petal/Scale.swift checks/NoteRichCheck.swift
+swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/Screens.swift Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteMentions.swift Sources/Petal/NoteEditor.swift Sources/Petal/NoteTasks.swift Sources/Petal/RunApps.swift Sources/Petal/ViewerFile.swift Sources/Petal/EditMenu.swift Sources/Petal/Scale.swift checks/NoteRichCheck.swift
 "$out/noterich"
 # Petal Notes' files on throwaway folders in the temporary folder: saves that keep both, names from the disk, no
 # writes through symbolic links, two notebooks' Todo.md, a renamed file's bookmark, the journal's launch recovery
@@ -53,6 +105,29 @@ swiftc -parse-as-library -O -o "$out/noterich" Sources/Petal/Screens.swift Sourc
 # (NoteTasks: real files, a link and a Finder alias in a throwaway folder in the temporary folder; nothing is opened).
 swiftc -parse-as-library -O -o "$out/notehelp" Sources/Petal/NoteFile.swift Sources/Petal/NoteLibrary.swift Sources/Petal/NoteLayout.swift Sources/Petal/UIMap.swift Sources/Petal/NoteShield.swift Sources/Petal/NoteHelp.swift Sources/Petal/NoteTasks.swift Sources/Petal/RunApps.swift Sources/Petal/ViewerFile.swift checks/NoteHelpCheck.swift
 "$out/notehelp"
+# The helpers' clock does only what the person set up on this Mac (NoteLocal.standing, NoteHelp.stands, checked
+# above): a watcher's look, a chain's start and a morning note each ask it first, in the clock and again where the
+# look and the start begin; and each of the three is kept when the person's own line makes it.
+perl -0777 -ne '
+    my @kept = (/keepGoing\(NoteHelp\.Standing\(/g);
+    unless (/if let watch = file\.watch, watch\.mac == mac, stands\(NoteHelp\.Standing\(watch, on: paper\.noteID\)\), NoteHelp\.due\(/
+            && /if let chain = file\.chain, stands\(NoteHelp\.Standing\(chain, on: paper\.noteID\)\),\s*chain\.ready\(/
+            && /if let morning = file\.morning, morning\.mac == mac, stands\(NoteHelp\.Standing\(morning: morning\.time, on: paper\.noteID\)\),/
+            && /guard var chain = paper\.file\.chain, runs\[paper\.noteID\] == nil, stands\(NoteHelp\.Standing\(chain, on: paper\.noteID\)\) else \{ return \}/
+            && /let watch = paper\.file\.watch, watch\.mac == mac, stands\(NoteHelp\.Standing\(watch, on: noteID\)\),/
+            && @kept == 3 && /process\.arguments = NoteHelp\.mergedArguments\(link\)/) {
+        print "NoteHelpers: the clock acts only on a chain, watcher or morning note this Mac keeps\n"; exit 1 }
+    print "helpers: the clock does only what was set up on this Mac\n";
+' Sources/Petal/NoteHelpers.swift
+# A click on a link in a note goes through NoteTasks alone (a web or mail address, a file by Open all's rule, else
+# nothing): the editor and the paper open nothing themselves.
+if grep -n 'NSWorkspace.shared.open' Sources/Petal/NoteEditor.swift Sources/Petal/NoteViews.swift; then echo "A note's link opened outside NoteTasks"; exit 1; fi
+grep -q 'NoteTasks.openLink(link)' Sources/Petal/NoteEditor.swift || { echo "NoteEditor: a clicked link goes through NoteTasks.openLink"; exit 1; }
+echo "notes: a link in a note opens only through NoteTasks"
+# petal_ui, petal_act and a vault fill never read or use Petal's own windows (UIMap.petalsOwn, checked above).
+[ "$(grep -c 'if let own = UIMap.petalsOwn(' Sources/Petal/ComputerUse.swift)" = 2 ] && grep -q 'UIMap.petalsOwn(map.pid) == nil' Sources/Petal/VaultFill.swift \
+    || { echo "ComputerUse: petal_ui, petal_act and vault fills refuse Petal's own process"; exit 1; }
+echo "computer use: never Petal's own windows"
 # The Shielded boundary is the compiler's: what a helper tells an AI can't be made from a raw string. Each of these
 # must fail to compile (a raw string interpolated into a prompt, put into what a helper is told, or made Shielded
 # outside NoteShield), and the shielded way must compile.
@@ -646,15 +721,93 @@ perl -ne '
     END { exit($bad ? 1 : 0) }
 ' Sources/Petal/*.swift
 echo "run browser: the dock, the tools and routines list only the person's own apps"
+# An open through macOS never lands in a run's own browser: wherever Petal opens something in an app it names, for a
+# run's display or the person's screen, a run's copy of that app going means it's opened as a new one; and what an
+# open for a run's display started is asked of the rule, which never gives a run's own browser to another run.
+for file in Dock RunDisplay Assist; do
+    grep -Eq 'if Run(Apps|Browsers)\.running\(bundle: [a-zA-Z.]+\) \{ configuration\.createsNewApplicationInstance = true \}' "Sources/Petal/$file.swift" \
+        || { echo "run browser: $file.swift opens in an app without opening a new copy while a run has its own going"; exit 1; }
+done
+grep -q 'opened.launched = RunDisplayRules.started(' Sources/Petal/RunDisplay.swift \
+    || { echo "run browser: RunDisplays.open doesn't ask RunDisplayRules.started which process it started"; exit 1; }
+grep -q 'personsOnly: true' Sources/Petal/RunDisplay.swift || { echo "run browser: RunDisplays.open may take a run's own browser window for one it made"; exit 1; }
+echo "run browser: an open through macOS never lands in a run's own copy"
+# No page of a run's browser writes or reads the clipboard by itself, and a press is watched: the browser is told
+# what's refused (RunBrowserRules.refused) before its first tab, and ended if it won't take it; every way a press
+# reaches a page (a script run with a gesture, a key) notes the clipboard's count first and hands it to the watch.
+perl -0ne '
+    $bad .= "open() doesn\x27t refuse the clipboard before the first tab\n"
+        unless /for permission in RunBrowserRules\.refused \{\s*guard case \.success = pipe\.call\("Browser\.setPermission", RunBrowserRules\.refusal\(permission\)\) else \{\s*return Problem.*?\n.*?Target\.createTarget/s;
+    $bad .= "a script run with a gesture isn\x27t watched\n" unless /let mark = gesture \? Acting\.CopyMark\.now\(clipboard\) : nil\s*defer \{ if let mark \{ onPress\?\(mark\) \} \}\s*switch pipe\.call\("Runtime\.evaluate"/;
+    $bad .= "a key isn\x27t watched\n" unless /let mark = Acting\.CopyMark\.now\(clipboard\)\s*defer \{ onPress\?\(mark\) \}\s*guard case \.success = pipe\.call\("Input\.dispatchKeyEvent"/;
+    $bad .= "a press isn\x27t handed to the watch\n" unless /browser\.onPress = .*?watchCopy\(mark, browser\)/s && /Acting\.CopyWatch\.start\(mark, wait: RunBrowserRules\.copyWatch, pasteboard: clipboard/;
+    @gestures = /"userGesture"|Input\.dispatch\w+/g;
+    $bad .= "a press reaches a page some other way (" . scalar(@gestures) . " places)\n" unless @gestures == 3;
+    END { print "run browser: $_\n" for split /\n/, $bad; exit($bad ? 1 : 0) }
+' Sources/Petal/RunBrowser.swift
+echo "run browser: no page writes the clipboard by itself, and a press is watched"
 swiftc -parse-as-library -O -o "$out/vault" Sources/Petal/Vault.swift Sources/Petal/UIMap.swift checks/VaultCheck.swift
 "$out/vault"
+# What Petal AI's reads are searched with: every item's secrets, the digit codes its notes name (as secrets), and what
+# reads as a code in its notes (found whole).
+grep -q 'UIMap.SecretIndex(items.flatMap(Vault.secrets) + items.flatMap(Vault.noteNumbers) + extra, words: items.flatMap(Vault.noteCodes))' Sources/Petal/AssistMore.swift \
+    || { echo "VaultIndex: the index holds each item's secrets and its notes' codes"; exit 1; }
 swiftc -parse-as-library -O -o "$out/agents" Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/AgentAccessCheck.swift
 "$out/agents"
+# Who is Petal AI is only what the check above proved, in the app too: each chat's AI process is recorded where it
+# starts, the socket says which function is asked for, a chat's id comes from that record (never from the caller's
+# words), and `petal run` asks for every caller alike (no way round its card for Petal AI).
+grep -qF 'AgentCallers.started(process.processIdentifier, for: noteID.uuidString)' Sources/Petal/Claude.swift \
+    && grep -qF 'AgentCallers.identify(client: client, tools: words.first == "assist")' Sources/Petal/IPC.swift \
+    && grep -qF 'let caller = who.note ?? "mcp-\(who.pid)"' Sources/Petal/App.swift \
+    || { echo "agents: a chat is Petal's own only by Petal's record of the AI process it started"; exit 1; }
+if grep -nE 'agent == \.petal|kind: \.petal|pass\(\.petal' Sources/Petal/AgentVault.swift; then echo "agents: petal run must ask for every caller, Petal's own chats too"; exit 1; fi
+if grep -nE 'who\.agent == \.petal' Sources/Petal/App.swift; then echo "agents: a chat's id comes from Petal's record, never from who claims it"; exit 1; fi
+echo "agents: Petal AI is only the tools of an AI Petal started; petal run always asks"
+# Full access and Always cover Petal AI and the person's own Claude Code and Codex (NoteHelp.autoGrant, checked above
+# with the helpers): Assist.ask works out who a question is for from its owner and what Petal read of that caller,
+# makes the card NoteHelp.card says (who asks; no Always for a caller Petal can't verify), and every card a caller
+# outside Petal can bring up says what it wants.
+perl -0777 -ne '
+    unless (/let asker = NoteHelp\.asker\(owner: owner, known: owner\.map \{ app\.claude\.note\(withID: \$0\) != nil \} \?\? false,\s*verified: owner\.flatMap \{ outside\[\$0\] \}\?\.agent\.verified \?\? false\)/
+            && /NoteHelp\.autoGrant\(kind: kind, [^\n]*, asker: asker\)/
+            && /let card = NoteHelp\.card\(title: title, wants: wants, every: always \|\| warn, asker: asker, label: who\?\.label\)\s*let request = Request\(kind: kind, title: card\.title, detail: detail, every: card\.every,/) {
+        print "Assist.ask: who a question is for decides whether it is asked, and what its card says\n"; exit 1 }
+    print "asking: Full access and Always cover Petal AI and the person\x27s own verified agents; an outside caller\x27s card says who asks\n";
+' Sources/Petal/Assist.swift
+perl -ne '
+    next if $ARGV =~ m{/(AgentVault|VaultFill|NoteHelpers)\.swift$};   # the vault\x27s cards say who asks themselves; a helper\x27s are its own
+    if (/\bask\((RunBrowsers\.kind|"(quit|close|trash|tidy|pdfComments|computer:[^"]*)"),/ && !/wants:/) { print "$ARGV:$.: a card anyone outside Petal can bring up must say what it wants (wants:)\n"; $bad = 1 }
+    $seen++ if /\bask\((RunBrowsers\.kind|"(quit|close|trash|tidy|pdfComments|computer:[^"]*)"),.*wants:/;
+    close ARGV if eof;
+    END { exit 1 if $bad || $seen < 7; print "asking: every card an outside caller can bring up says what it wants\n" }
+' Sources/Petal/*.swift
 # The notes for the AI in the settings window: typing, changes made elsewhere, picks and late answers (no file).
 swiftc -parse-as-library -O -o "$out/instructions" Sources/Petal/InstructionsState.swift checks/InstructionsCheck.swift
 "$out/instructions"
 swiftc -parse-as-library -O -o "$out/routinestop" Sources/Petal/RoutineStop.swift checks/RoutineStopCheck.swift
 "$out/routinestop"
+# Where routines may take files from and file them into: a folder's path as written, and where it really is once
+# every link is followed (a subfolder that is a link, a named folder that leads out of the home folder or into its
+# Library, a link among the files), on throwaway folders in the temporary folder; the rule only answers, nothing moves.
+swiftc -parse-as-library -O -o "$out/routinerules" Sources/Petal/RoutineRules.swift checks/RoutineRulesCheck.swift
+"$out/routinerules"
+# A routine that opens something or runs a Shortcut is the person's to allow: Petal AI's tools reach Petal AI's card
+# (kind `routine`) before one is saved, changed or run by hand (`Petal --routines-check` drives it, answering the
+# card itself), and a routine's open action goes through RoutineRules.opens and NoteTasks.routine, never straight
+# to whatever its text names.
+perl -0777 -ne '
+    my ($save) = /(    private func saveTool\(.*?\n    \}\n)/s;
+    my ($run) = /(    private func runTool\(.*?\n    \}\n)/s;
+    my ($allow) = /(    private func allow\(.*?\n    \}\n)/s;
+    my ($open) = /(        case "open":\n            \/\/ Apps, web addresses and documents only.*?\n        case "hide":)/s;
+    $bad .= "saving a routine never reaches the card\n" unless defined $save && $save =~ /guard RoutineRules\.savingAsks\(.*?else \{ return keep\(\) \}.*?self\.allow\(/s;
+    $bad .= "running a routine never reaches the card\n" unless defined $run && $run =~ /guard !dry, Self\.asksFirst\(routine\) else \{.*?\n        allow\(/s;
+    $bad .= "the card isn\x27t Petal AI\x27s\n" unless defined $allow && $allow =~ /assist\.ask\("routine", title, detail: detail, owner: owner, done: done\)/;
+    $bad .= "open takes more than RoutineRules.opens gives\n"
+        unless defined $open && $open =~ /switch RoutineRules\.opens\(item\)/ && $open =~ /NoteTasks\.routine\(file\)/ && $open !~ /URL\(string: item\)|expandingTildeInPath/;
+    END { if ($bad) { print "routines: $bad"; exit 1 } print "routines: opening and Shortcuts ask on a card, and open takes only what its rule gives\n" }
+' Sources/Petal/Routines.swift
 # Which Petal processes are a dock: a benchmark, snapshot, the AI's tools or a command never count as a second one
 # (PetalProcess; the Dock guard's shell test with pgrep and ps stood in for, never a real Petal).
 swiftc -parse-as-library -O -o "$out/petalprocess" Sources/Petal/PetalProcess.swift checks/PetalProcessCheck.swift
@@ -669,6 +822,43 @@ maker=$(sed -n 's/^    static let maker = #"\(.*\)"#$/\1/p' Sources/Petal/Update
 grep -qF "MAKER='$maker'" ../get.sh || { echo "update trust: get.sh doesn't check the same signature as UpdateTrust.swift"; exit 1; }
 grep -qF "MAKER: '$maker'" ../.github/workflows/release-macos.yml || { echo "update trust: the release workflow doesn't check the same signature as UpdateTrust.swift"; exit 1; }
 echo "update trust: the app, get.sh and the release workflow ask for the same signature"
+# The updater puts a checked update in place only through UpdateTrust.install, which looks at the bundle in place
+# afterwards (the check above runs it on bundles of its own): never a bare move of what was checked a moment before.
+n=$(grep -c 'replaceItemAt' Sources/Petal/Updater.swift || true)
+grep -q 'guard try UpdateTrust\.install(app, in: bundle, is: release\.version, over: running) else' Sources/Petal/Updater.swift && [ "$n" = 0 ] \
+    || { echo "update trust: the updater puts an update in place without looking at it there"; exit 1; }
+echo "update trust: an update is looked at again once it's in place"
+# An update rebuilt with the person's own changes to Petal's code takes its source from the release Petal checked:
+# Personal.update asks the updater for the commit that release's own Petal.app says (Updater.source, which checks the
+# download as an installed update is and reads the commit through UpdateTrust.source) and hands petal-personal that
+# commit. Then petal-personal itself, on a throwaway source with a stand-in for curl: with a commit it asks for that
+# commit's source and nothing else, and a version or commit that isn't plain asks for nothing.
+perl -0777 -ne '
+    if ($ARGV =~ /\/Personal\.swift$/) {
+        my ($update) = /(static func update\(to release: Updater\.Release.*?\n    \})/s;
+        $bad .= "Personal.update does not take its source from the release it checked\n"
+            unless defined $update && $update =~ /let commit = try await Updater\.source\(of: release\).*\["update", "--version", version, "--commit", commit,/s;
+    }
+    if ($ARGV =~ /\/Updater\.swift$/) {
+        my ($source) = /(static func source\(of release: Release\).*?\n    \})/s;
+        $bad .= "Updater.source does not check the release as an update is\n"
+            unless defined $source && $source =~ /Self\.checked\(file, release: release, running: running\).*UpdateTrust\.source\(of: app, is: release\.version, over: running\)/s;
+    }
+    END { if ($bad) { print "personal update: $bad"; exit 1 } print "personal update: its source is the checked release\x27s commit\n" }
+' Sources/Petal/Personal.swift Sources/Petal/Updater.swift
+bash checks/PersonalUpdateCheck.sh
+# The keychain Petal signs the person's own builds with is unlocked only while one build is signed: locked again on
+# every way out, and set to lock by itself (PersonalSigning; no `security` command is run, no keychain touched). And
+# Personal.swift opens it nowhere else: every unlock, lock and setting is PersonalSigning's, and codesign is given
+# the keychain only inside `withIdentity`, which is `PersonalSigning.unlocked`.
+swiftc -parse-as-library -O -o "$out/personalsigning" Sources/Petal/PersonalSigning.swift checks/PersonalSigningCheck.swift
+"$out/personalsigning"
+n=$(grep -c 'unlock-keychain\|lock-keychain\|set-keychain-settings\|create-keychain' Sources/Petal/Personal.swift || true)
+u=$(grep -c 'PersonalSigning\.unlocked(' Sources/Petal/Personal.swift || true)
+k=$(grep -c '"--keychain"' Sources/Petal/Personal.swift || true)
+w=$(awk '/try withIdentity \{ keychain, hash in/,/^        \}$/' Sources/Petal/Personal.swift | grep -c '"--keychain", keychain, "--sign", hash' || true)
+if [ "$n" != 0 ] || [ "$u" != 1 ] || [ "$k" != 1 ] || [ "$w" != 1 ]; then echo "personal signing: the keychain is opened outside PersonalSigning.unlocked"; exit 1; fi
+echo "personal signing: the keychain is open only while a build is signed"
 # IPC.swift on a throwaway socket in the temporary folder (never Petal's): a request whose client hangs up first is
 # never done.
 swiftc -parse-as-library -O -o "$out/ipc" Sources/Petal/IPC.swift Sources/Petal/AgentAccess.swift Sources/Petal/AgentCallers.swift checks/IPCCheck.swift
@@ -739,6 +929,18 @@ echo "pipes: a reader that has gone never ends Petal"
 n=$(grep -n 'CGDisplayIsOnline' Sources/Petal/*.swift | grep -v '^Sources/Petal/DisplayCheck\.swift:\|^Sources/Petal/Screens\.swift:[0-9]*: *///' || true)
 if [ -n "$n" ]; then echo "displays: CGDisplayIsOnline is relied on:"; echo "$n"; exit 1; fi
 echo "displays: online by macOS's own list"
+# What another program on the Mac can ask the running Petal over its socket: these functions, no others. Each one
+# that does something for the person on their own say (a chat, an Allow, a key, a tool) is one of these on purpose;
+# a new one is added here only after weighing what any program could do with it.
+n=$(grep -o 'ipc\.on\(From\)\{0,1\}("[A-Za-z]*")' Sources/Petal/App.swift | sed 's/.*("\(.*\)")/\1/' | sort | tr '\n' ' ')
+want="agentKeys ask assist bench chat chats close desktop dock mcpCall newChat options restart reveal search settings stack testBounce update version "
+if [ "$n" != "$want" ]; then echo "socket: the running Petal's functions changed: $n"; echo "        expected: $want"; exit 1; fi
+echo "socket: only the functions weighed"
+# AGENTS.md and Petal's skill keep each list item and heading on a line of its own (a merge that loses a line break
+# runs them together, and agents read these files).
+n=$(grep -nE '[^ ]\.- [`*A-Za-z]|[^#]\.##+ ' ../AGENTS.md Resources/skill/SKILL.md || true)
+if [ -n "$n" ]; then echo "docs: a list item or heading ran onto the line before it:"; echo "$n"; exit 1; fi
+echo "docs: every list item and heading on its own line"
 # Quitting answers later (notes are saved first), and AppKit waits for the answer inside `terminate`. Called from a
 # block of the main dispatch queue (a signal's handler, an asyncAfter), that wait stops the queue, the answer never
 # arrives and Petal never quits. So the one call to terminate is PetalApp.quit's, from the run loop, and the answer

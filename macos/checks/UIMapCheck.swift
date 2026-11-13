@@ -86,7 +86,75 @@ struct UIMapCheck {
                "\"Order 1234\" is refused when 1234 is in the secret")
     }
 
+    /// What petal_act says of a menu is its app's own text (a Window menu lists window titles): every title goes
+    /// through the vault's redaction before it's told, the items listed, the path walked and the item chosen alike.
+    static func menuWords() {
+        let secret = "S3cretPw!x9"
+        let vault = UIMap.SecretIndex([secret])
+        let shown = { (title: String) in vault.redacted(title) }
+        let window = "psql postgres://app:\(secret)@db.example.com/app"
+        let none = UIMap.noMenuItem("Zoom All", in: ["Window"], items: ["Minimize", "", window, "Bring All to Front"], shown: shown)
+        expect(!none.contains(secret) && none.contains(UIMap.hidden), "a menu's items are listed without a vault secret", none)
+        expect(none.contains("“Zoom All”") && none.contains("Minimize, psql postgres://app:") && none.contains("Bring All to Front")
+               && none.contains("in Window."), "the rest of the list stays, what was asked for too", none)
+        let menus = UIMap.noMenu("Windw", menus: ["File", secret, "Window"], shown: shown)
+        expect(menus == "There's no “Windw” menu. The menus are: File, \(UIMap.hidden), Window.", "the menus there are, redacted", menus)
+        let chose = UIMap.menuShown(["Window", "", window], shown: shown)
+        expect(!chose.contains(secret) && chose.hasPrefix("Window › psql postgres://app:\(UIMap.hidden)"), "the item chosen, redacted", chose)
+        let walked = UIMap.noMenuItem("x", in: ["Window", window], items: ["a"], shown: shown)
+        expect(!walked.contains(secret), "the path walked, redacted", walked)
+        // While the vault can't be read, no title is told.
+        let unread = UIMap.SecretIndex.unavailable
+        let blind = UIMap.noMenuItem("x", in: ["Window"], items: ["Minimize", window], shown: { unread.redacted($0) })
+        expect(!blind.contains("Minimize") && !blind.contains(secret), "no title while the vault can't be read", blind)
+        expect(UIMap.menuShown(["File", "Export…"], shown: { $0 }) == "File › Export…", "a path with nothing to hide is told as it is")
+        let many = UIMap.noMenuItem("x", in: ["View"], items: (1...40).map { "Item \($0)" }, shown: { $0 })
+        expect(many.contains("Item 30") && !many.contains("Item 31"), "at most 30 items listed")
+    }
+
+    /// A menu item or key that hands what's selected to another app without the clipboard (a Service, Share, Look
+    /// Up, Use Selection for Find) is known as one, and so gets a copy's check; ordinary items and keys aren't.
+    static func handOns() {
+        for title in ["Safari › Services › Search With Google", "TextEdit › Services › Add to Petal AI", "File › Share › Mail",
+                      "Edit › Speech › Start Speaking", "Edit › Find › Use Selection for Find", "Edit › Look Up “hunter2”",
+                      "Edit › Translate “hello”…", "File › Share…", "Düzen › Bul › Seçimi Bulmak için Kullan",
+                      "Safari › Servisler › Google ile Ara", "Dosya › Paylaş › Mail", "Düzen › Konuşma › Konuşmaya Başla"] {
+            expect(UIMap.sends(menu: title), "hands the selection on: \(title)")
+        }
+        // Services is a submenu of the app's own menu, in every language.
+        expect(UIMap.sends(menu: "Safari › Dienste › Mit Google suchen", appMenu: true), "a submenu of the app's own menu")
+        // Accessibility lists an app's menu bar as Apple, then the app's own menu (Finder: Apple, Finder, File, Edit).
+        let bar = ["Apple", "Finder", "File", "Edit"]
+        let own = { (top: String) in bar.firstIndex(of: top).map(UIMap.ownMenu(at:)) ?? false }
+        expect(own("Finder") && !own("Apple") && !own("File"), "the app's own menu is the one after the Apple menu")
+        expect(UIMap.sends(menu: "Finder › Dienste › Mit Google suchen", appMenu: own("Finder"))
+               && !UIMap.sends(menu: "Apple › Benutzte Objekte › Notizen", appMenu: own("Apple"))
+               && !UIMap.sends(menu: "Ablage › Exportieren › PDF", appMenu: own("Ablage")),
+               "a Service in any language is known by where it is; other submenus aren't")
+        expect(!UIMap.sends(menu: "Safari › Settings…", appMenu: true) && !UIMap.sends(menu: "Safari › Dienste › Mit Google suchen"),
+               "the app menu's own items aren't; nor a submenu elsewhere, by that alone")
+        // ⌘E is Use Selection for Find in every language; ⇧⌘E and an item with no ⌘ aren't.
+        expect(UIMap.sends(menu: "Bearbeiten › Suchen › Auswahl suchen", character: "E", modifiers: 0), "⌘E by its shortcut")
+        expect(!UIMap.sends(menu: "File › Export…", character: "E", modifiers: 1) && !UIMap.sends(menu: "View › Zoom", character: "E", modifiers: 8),
+               "⇧⌘E, or E without ⌘")
+        for title in ["File › Save", "Edit › Select All", "File › Export…", "View › Show Sidebar", "File › Sharing Settings…",
+                      "Edit › Find › Find…", "Window › Minimize", "Format › Font › Bold"] {
+            expect(!UIMap.sends(menu: title), "an ordinary item: \(title)")
+        }
+        expect(!UIMap.sends(menu: nil) && !UIMap.sends(menu: ""), "no item")
+        // A ⌘ key none of the app's menus has is one macOS offers to Services; a key its menus have is that item.
+        func key(_ text: String, claimed: Bool = false) -> Bool { UIMap.parseKey(text).map { UIMap.sends(key: $0, claimed: claimed) } ?? false }
+        expect(key("cmd-shift-l") && key("cmd-shift-y") && key("cmd-ctrl-d") && key("cmd-e"), "Services' keys, when no menu has them")
+        expect(!key("cmd-shift-l", claimed: true) && !key("cmd-a", claimed: true) && !key("cmd-s", claimed: true), "a key the app's menus have")
+        expect(!key("cmd-left") && !key("cmd-delete") && !key("cmd-return") && !key("a") && !key("ctrl-a") && !key("escape"),
+               "keys that type nothing, or without ⌘")
+        // Copy and paste keep their own answers.
+        expect(UIMap.parseKey("cmd-c").flatMap(UIMap.clip(key:)) == .copy && UIMap.clip(title: "Edit › Paste") == .paste, "copy and paste as before")
+    }
+
     static func main() {
+        menuWords()
+        handOns()
         let window = CGRect(x: 0, y: 0, width: 800, height: 600)
 
         // Only actionable controls; a group counts only when it says it can be pressed.
@@ -438,6 +506,11 @@ struct UIMapCheck {
         expect(UIMap.blackouts(before: [], after: [], window: frame) == [], "nothing secret: nothing covered")
 
         wholeSpan()
+
+        // Petal's own windows are never read or used: the refusal says where a document's and a note's words are.
+        expect(UIMap.petalsOwn(getpid()) == UIMap.ownWords && UIMap.petalsOwn(4242, petal: 4242) != nil, "Petal's own process is refused, in words")
+        expect(UIMap.petalsOwn(getpid() + 1) == nil && UIMap.petalsOwn(4242, petal: 4243) == nil, "any other app is read as before")
+        expect(UIMap.ownWords.contains("petal_view") && UIMap.ownWords.contains("petal_note_read"), "and names the tools that give those words")
 
         print("UIMap: \(passed) passed, \(failures) failed")
         if failures > 0 { exit(1) }

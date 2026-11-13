@@ -14,8 +14,8 @@ final class Sites {
     @ObservationIgnored private var images: [String: NSImage] = [:]
     @ObservationIgnored private var fetching: Set<String> = []
     @ObservationIgnored private var failed: [String: Date] = [:]
-    /// Hosts whose cached icon is being read from disk (off the main thread).
-    @ObservationIgnored private var loading: Set<String> = []
+    /// Hosts whose cached icon is being read from disk (off the main thread), with whoever waits for that read.
+    @ObservationIgnored private var loading = SiteLoads()
 
     nonisolated static let folder = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appending(path: "Petal/sites")
 
@@ -76,19 +76,19 @@ final class Sites {
     }
 
     /// The cached icon's bytes read off the main thread; `then` says whether there was one.
+    /// (A second ask while that read is under way waits for its answer: one that came in before the file was read
+    /// would be told there's none, and the site would be asked again for an icon Petal already has.)
     private func loadCached(_ host: String, then: (@MainActor (Bool) -> Void)? = nil) {
-        guard !loading.contains(host) else { then?(images[host] != nil); return }
-        loading.insert(host)
+        guard loading.ask(host, then: then) else { return }
         let file = Self.folder.appending(path: host + ".png")
         Task.detached(priority: .utility) {
             let data = try? Data(contentsOf: file)
             await MainActor.run {
-                self.loading.remove(host)
                 if let data, let image = NSImage(data: data) {
                     self.images[host] = image
                     self.arrived += 1
                 }
-                then?(self.images[host] != nil)
+                for waiting in self.loading.answered(host) { waiting(self.images[host] != nil) }
             }
         }
     }

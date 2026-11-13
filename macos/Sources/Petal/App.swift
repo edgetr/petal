@@ -449,15 +449,16 @@ final class PetalApp {
 
     /// What `petal` and the AI's tools can ask the running Petal, over its socket (IPC.swift).
     private func registerIPC() {
-        // Petal's tools changing settings or the dock (`Petal --mcp`): done here, in order.
+        // Petal's tools changing settings or the dock (`Petal --mcp`): done here, in order. Only those (MCP.answer):
+        // the rest of Petal AI's tools come in through `assist`, where who's asking is weighed.
         ipc.on("mcpCall") { args in MCP.answer(args.first ?? "", args.dropFirst().first ?? "{}") }
         // Petal AI's tools (`Petal --mcp` asks here): ["assist", tool, json]; one that changes something waits for the
         // person to allow it.
         ipc.onFrom("assist") { [unowned self] args, who, request, reply in
-            // Which chat asks: a note's id only from Petal's own chats (Petal started them); any other caller is the
-            // process that connected, whatever it says, so it never stands in for a note or another session.
-            let claimed = args.dropFirst(2).first ?? ""
-            let caller = who.agent == .petal && !claimed.isEmpty ? claimed : "mcp-\(who.pid)"
+            // Which chat asks: one of Petal's own only by Petal's record of the AI process it started for that chat
+            // (`who.note`, AgentCallers.started); any other caller is the process that connected. Never what the
+            // caller says, so nobody stands in for a note or another session.
+            let caller = who.note ?? "mcp-\(who.pid)"
             // Its card keeps it waiting however long the person takes; its asker gone, what it had going stops.
             // (Waiting its turn for a hidden display, or for an app another run or the person is using, keeps it
             // waiting the same way.)
@@ -478,9 +479,9 @@ final class PetalApp {
 
         ipc.on("desktop") { [unowned self] _ in (docks.focusedDock?.desktop).map(String.init) ?? "" }
         ipc.on("ask") { [unowned self] _ in claude.open(asking: nil); return "ok" }
-        ipc.on("chat") { [unowned self] args in claude.open(asking: args.joined(separator: " ")); return "ok" }
+        // Words from another program are typed into the chat for the person to send (Return), never sent as theirs.
+        ipc.on("chat") { [unowned self] args in claude.open(asking: args.joined(separator: " "), send: false); return "ok" }
         ipc.on("options") { [unowned self] _ in claude.openOptions(); return "ok" }
-        ipc.on("allow") { [unowned self] _ in claude.agent.allow(); return "ok" }
         ipc.on("newChat") { [unowned self] _ in claude.agent.reset(); return "ok" }
         ipc.on("search") { [unowned self] _ in search.open(in: nil); return "ok" }
         ipc.on("settings") { [unowned self] args in
@@ -501,7 +502,6 @@ final class PetalApp {
             signals.bounce(id)
             return "ok"
         }
-        ipc.on("emptyTrash") { _ in Stacks.emptyTrash(); return "ok" }
         ipc.on("close") { [unowned self] _ in
             claude.close(); search.close(); popups.closeAll(); popups.closeAsk()
             return "ok"

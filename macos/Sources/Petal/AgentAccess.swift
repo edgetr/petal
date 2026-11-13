@@ -460,12 +460,16 @@ enum AgentAccess {
         var path: String
         var team: String?
         var identifier: String?
+        /// When it started (as proc_pidinfo says, in microseconds; 0 when Petal didn't read it): with its pid, this
+        /// very process, never another that took its pid later.
+        var start: UInt64 = 0
 
-        init(pid: Int32, path: String, team: String? = nil, identifier: String? = nil) {
+        init(pid: Int32, path: String, team: String? = nil, identifier: String? = nil, start: UInt64 = 0) {
             self.pid = pid
             self.path = path
             self.team = team
             self.identifier = identifier
+            self.start = start
         }
 
         var file: String { (path as NSString).lastPathComponent }
@@ -520,6 +524,12 @@ enum AgentAccess {
         var peerIsPetal = true
         /// The process that connected.
         var pid: Int32 = 0
+        /// One of Petal's own chats: the chat Petal started the AI above it for, by Petal's own record (`Started`),
+        /// never by what the caller says. Nil for everyone else.
+        var note: String? = nil
+        /// For `petal run` only: the chat of Petal's own it runs under (by the same record), where its card shows and
+        /// whose Stop answers it. Where it shows, never what it may do: it is asked and granted as the agent above it.
+        var chat: String? = nil
 
         /// "Codex in T3 Code", "Claude Code in Terminal", "An unknown program (nc)".
         var label: String {
@@ -534,17 +544,43 @@ enum AgentAccess {
         var grantable: Bool { agent.verified }
     }
 
+    /// An AI process Petal itself started for a chat or a note's helper, as Petal recorded it when it started it:
+    /// the very process (its pid and when it started) and the chat it was started for.
+    struct Started: Equatable, Sendable {
+        var pid: Int32
+        var start: UInt64
+        /// The chat's id (its note's): what its tools are answered about.
+        var note: String
+    }
+
     /// Who's asking: `chain` is the process that connected to Petal's socket, then its parent, and so on up.
     /// `peerIsPetal`: what connected is Petal's own code (`petal run`, `Petal --mcp`), checked by its signature.
-    static func caller(chain: [Process], petalPID: Int32, peerIsPetal: Bool, project: String) -> Caller {
+    /// `started`: the AI processes Petal started for its chats. `tools`: it asks for one of Petal AI's tools
+    /// (`assist`); only there is anyone Petal AI. `petal run` is always the agent that ran it, and asks as that agent.
+    static func caller(chain: [Process], petalPID: Int32, peerIsPetal: Bool, project: String, started: [Started] = [], tools: Bool = true) -> Caller {
+        var caller = walk(chain: chain, petalPID: petalPID, peerIsPetal: peerIsPetal, project: project, started: started, tools: tools)
+        if !tools, caller.peerIsPetal { caller.chat = underChat(chain, petalPID: petalPID, started: started) }
+        return caller
+    }
+
+    /// The chat of Petal's own whose AI process (Petal's record of it, with Petal right above) is somewhere above
+    /// what connected, nearest first; nil when none is.
+    static func underChat(_ chain: [Process], petalPID: Int32, started: [Started]) -> String? {
+        for index in chain.indices.dropFirst() where index + 1 < chain.count && chain[index + 1].pid == petalPID && chain[index].start != 0 {
+            if let record = started.first(where: { $0.pid == chain[index].pid && $0.start == chain[index].start }) { return record.note }
+        }
+        return nil
+    }
+
+    private static func walk(chain: [Process], petalPID: Int32, peerIsPetal: Bool, project: String, started: [Started], tools: Bool) -> Caller {
         let host = hostApp(chain)
         let pid = chain.first?.pid ?? 0
         guard let peer = chain.first, peerIsPetal else {
             return Caller(agent: .unknown, host: host, project: project, program: chain.first?.file ?? "", peerIsPetal: false, pid: pid)
         }
-        // Petal's own chats: Petal started them.
-        if chain.dropFirst().contains(where: { $0.pid == petalPID }) {
-            return Caller(agent: .petal, host: nil, project: project, program: peer.file, pid: pid)
+        // Petal's own chats: the tools of an AI Petal started, asked by the process that AI itself started for them.
+        if tools, let chat = ownChat(chain, petalPID: petalPID, started: started) {
+            return Caller(agent: .petal, host: nil, project: project, program: peer.file, pid: pid, note: chat.note)
         }
         // The maker whose helpers the walk passed through: only that maker's agent may be above them.
         var through: (agent: Agent, file: String)?
@@ -561,6 +597,26 @@ enum AgentAccess {
             }
         }
         return Caller(agent: .command, host: host, project: project, program: peer.file, pid: pid)
+    }
+
+    /// The chat of Petal's own that `chain` asks for, or nil. The process right above what connected must be the very
+    /// process Petal started for that chat (the same pid and start), with Petal right above it; or, where what Petal
+    /// started is the agent's launcher and not the agent (npm's `codex` is a script that runs the signed one), Claude
+    /// Code or Codex signed by its maker, started by that launcher. Petal being somewhere above
+    /// is never enough: a shell, a hook, another tool server or a command the AI runs is further down, and the walk
+    /// in `caller` says whose it is (the agent above it, asked as any agent outside Petal).
+    static func ownChat(_ chain: [Process], petalPID: Int32, started: [Started]) -> Started? {
+        guard chain.count >= 3 else { return nil }
+        func record(_ process: Process) -> Started? {
+            process.start == 0 ? nil : started.first { $0.pid == process.pid && $0.start == process.start }
+        }
+        // The very process Petal started for the chat, whatever install of the AI it is (Petal chose and started it).
+        if let chat = record(chain[1]) { return chain[2].pid == petalPID ? chat : nil }
+        // A launcher Petal started, and the agent it runs: only one signed by its maker counts, so nothing else the
+        // launcher's process runs (a shell, a hook) is ever taken for the chat.
+        guard chain.count >= 4, let agent = chain[1].agent, agent.verified, chain[2].role == .other,
+              let chat = record(chain[2]), chain[3].pid == petalPID else { return nil }
+        return chat
     }
 
     /// macOS's own programs (a shell, `env`), whose signer Petal doesn't read: never an agent. Not /usr/local or
@@ -853,23 +909,83 @@ enum AgentAccess {
         return nil
     }
 
-    /// The command as the card shows it: its words, quoted where they have spaces.
+    /// The command as the card shows it: its words, quoted where they have spaces, and a word with anything in it
+    /// that wouldn't show as itself (`unseen`) written the way a shell reads it back (`$'a\u202eb'`), so what the
+    /// card shows is what runs.
     static func commandLine(_ words: [String]) -> String {
         let plain = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789@%+=:,./_-")
         return words.map { word in
             guard word.isEmpty || !word.unicodeScalars.allSatisfy(plain.contains) else { return word }
-            return "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'"
+            guard word.unicodeScalars.contains(where: unseen) else { return "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+            var out = "$'"
+            for scalar in word.unicodeScalars {
+                switch scalar {
+                case "\\": out += "\\\\"
+                case "'": out += "\\'"
+                case "\n": out += "\\n"
+                case "\t": out += "\\t"
+                case "\r": out += "\\r"
+                default: if unseen(scalar) { out += escaped(scalar) } else { out.unicodeScalars.append(scalar) }
+                }
+            }
+            return out + "'"
         }.joined(separator: " ")
     }
 
+    /// A character that wouldn't show as itself on a card: a control or a line break, one that only formats (the
+    /// ones that turn the reading direction around, zero-width ones, tags), a space that isn't the ordinary one, one
+    /// with no meaning yet or a private one, and the few letters and marks that draw nothing.
+    static func unseen(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.properties.generalCategory {
+        case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .unassigned, .surrogate: return true
+        case .spaceSeparator: return scalar != " "
+        default: break
+        }
+        switch scalar.value {
+        case 0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0, 0xFE00...0xFE0F, 0xE0100...0xE01EF: return true
+        default: return false
+        }
+    }
+
+    private static func escaped(_ scalar: Unicode.Scalar) -> String {
+        let hex = String(scalar.value, radix: 16)
+        if scalar.value < 0x100 { return "\\x" + String(repeating: "0", count: 2 - hex.count) + hex }
+        if scalar.value < 0x10000 { return "\\u" + String(repeating: "0", count: 4 - hex.count) + hex }
+        return "\\U" + String(repeating: "0", count: 8 - hex.count) + hex
+    }
+
+    /// `text` for a card, with nothing in it that wouldn't show as itself: each such character as its number
+    /// (`\u202e`). What `commandLine` wrote has none left; this is for a command line that came from anywhere else.
+    static func visible(_ text: String) -> String {
+        guard text.unicodeScalars.contains(where: unseen) else { return text }
+        var out = ""
+        for scalar in text.unicodeScalars {
+            if unseen(scalar) { out += escaped(scalar) } else { out.unicodeScalars.append(scalar) }
+        }
+        return out
+    }
+
     // MARK: Words
+
+    /// How much of a command a card's title and What Petal AI did say, and how much `petal run`'s card keeps at all.
+    static let commandShort = 60, commandWhole = 200
 
     /// "Codex in T3 Code wants your Anthropic key for “npm test” in ~/petal".
     static func keyQuestion(_ caller: Caller, titles: [String], command: String, home: String) -> String {
         let names = titles.count <= 1 ? (titles.first ?? "") : titles.dropLast().joined(separator: ", ") + " and " + titles.last!
         let what = "your \(names) key\(titles.count == 1 ? "" : "s")"
-        let command = clipped(command, 60)
+        let command = clipped(visible(command), commandShort)
         return "\(caller.label) wants \(what)" + (command.isEmpty ? "" : " for “\(command)”") + " in \(shown(caller.project, home: home))"
+    }
+
+    /// The card's line for a command its title had to cut short: all of it (as much as the card keeps), so the
+    /// person never allows a command by its beginning only. Nil when the title already says it whole.
+    static func keyCommand(_ command: String) -> String? {
+        let whole = clipped(visible(command), commandWhole)
+        if visible(command).count > commandWhole {
+            return "The command: “\(whole)”. It's longer than Petal can show: allow it only if you know all of what it runs."
+        }
+        return whole == clipped(whole, commandShort) ? nil : "The whole command: “\(whole)”."
     }
 
     /// "Claude Code in T3 Code wants to fill your github.com login in ~/petal".

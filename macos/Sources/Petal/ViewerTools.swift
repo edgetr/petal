@@ -300,7 +300,8 @@ extension Viewers {
         }
         guard intoOriginal else { return write() }
         // Changing the person's own file: asked first, whoever asks.
-        app.assist.ask("pdfComments", "Write \(comments.count) note\(comments.count == 1 ? "" : "s") into \(pdf.lastPathComponent) as comments?",
+        let writing = "\(comments.count) note\(comments.count == 1 ? "" : "s") into \(pdf.lastPathComponent) as comments"
+        app.assist.ask("pdfComments", "Write \(writing)?", wants: "write \(writing)",
                        detail: "Petal keeps the PDF as it is now beside it, named “… (before notes)”.",
                        always: true, owner: caller) { allowed in
             guard allowed else { return fail("The person said Don't: nothing was written.") }

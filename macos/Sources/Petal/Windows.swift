@@ -215,7 +215,7 @@ enum Windows {
             }
             return nil
         }
-        for menu in menus.dropFirst() {   // the first is the app's own menu (About, Quit)
+        for menu in menus.dropFirst() {   // the first is the Apple menu (Lock Screen, Log Out): the Mac's, not the app's
             if let item = find(menu, depth: 0) {
                 return AXUIElementPerformAction(item, kAXPressAction as CFString) == .success
             }

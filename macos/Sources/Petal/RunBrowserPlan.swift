@@ -127,22 +127,42 @@ enum RunBrowserRules {
 
     static func known(_ bundle: String) -> Known? { browsers.first { $0.bundle.caseInsensitiveCompare(bundle) == .orderedSame } }
 
-    /// Which of the `installed` browsers a run gets. `setting` (`runBrowser`): the person's choice, when it's one
-    /// Petal knows and it's installed. Else the one least in the person's way: macOS takes a second copy of a running
-    /// app for the app itself, so one they don't have open, and that isn't the one their links open in
-    /// (`standard`), comes first; then the list's order. nil: none is installed.
-    static func pick(installed: [String], running: Set<String>, standard: String?, setting: String) -> Known? {
+    /// What `choose` found for a run.
+    enum Choice: Equatable {
+        case browser(Known)
+        /// None Petal can start is installed.
+        case none
+        /// The one the person's links open in is the only one there is, or the one `runBrowser` names (`named`):
+        /// a run never gets that one.
+        case theirs(Known, named: Bool)
+    }
+
+    /// Which of the `installed` browsers a run gets. Never the one the person's links open in (`standard`: macOS's
+    /// own answer for an https address, read where this is asked): macOS takes a second copy of a running app for
+    /// the app itself, so while theirs is closed a link they open anywhere would open in the run's copy. `setting`
+    /// (`runBrowser`): the person's choice, when it's one Petal knows and it's installed. Else, of the others, one
+    /// they don't have open comes first; then the list's order.
+    static func choose(installed: [String], running: Set<String>, standard: String?, setting: String) -> Choice {
         let have = browsers.filter { known in installed.contains { $0.caseInsensitiveCompare(known.bundle) == .orderedSame } }
+        guard !have.isEmpty else { return .none }
+        func theirs(_ known: Known) -> Bool { standard?.caseInsensitiveCompare(known.bundle) == .orderedSame }
         let wanted = setting.trimmingCharacters(in: .whitespaces)
         if !wanted.isEmpty, let chosen = have.first(where: { $0.bundle.caseInsensitiveCompare(wanted) == .orderedSame || $0.name.caseInsensitiveCompare(wanted) == .orderedSame }) {
-            return chosen
+            return theirs(chosen) ? .theirs(chosen, named: true) : .browser(chosen)
         }
-        func rank(_ known: Known) -> Int {
-            (running.contains(known.bundle) ? 2 : 0) + (standard?.caseInsensitiveCompare(known.bundle) == .orderedSame ? 1 : 0)
-        }
+        let open = Set(running.map { $0.lowercased() })
         var best: Known?
-        for known in have where best == nil || rank(known) < rank(best!) { best = known }
-        return best
+        for known in have where !theirs(known) {
+            if best == nil || (open.contains(best!.bundle.lowercased()) && !open.contains(known.bundle.lowercased())) { best = known }
+        }
+        if let best { return .browser(best) }
+        return have.first(where: theirs).map { .theirs($0, named: false) } ?? .none
+    }
+
+    /// The browser a run gets, or nil where it gets none (`choose`).
+    static func pick(installed: [String], running: Set<String>, standard: String?, setting: String) -> Known? {
+        if case .browser(let known) = choose(installed: installed, running: running, standard: standard, setting: setting) { return known }
+        return nil
     }
 
     /// What the browser is started with. A profile of its own (signed in to nothing, no extensions, no sync), no
@@ -387,10 +407,55 @@ enum RunBrowserRules {
         return "The page tried to download \(what)\(host.isEmpty ? "" : " from \(host)"). A run's browser saves nothing to the Mac: it was refused. Tell the person the address if they'd want the file."
     }
 
+    // MARK: The clipboard
+
+    /// Something a page may ask the browser for, as the browser's remote control names it (Browser.setPermission).
+    struct Permission: Equatable {
+        let name: String
+        /// Anything at all, not only plain text and pictures the browser cleans first.
+        var unsanitized = false
+
+        var descriptor: [String: Any] {
+            unsanitized ? ["name": name, "allowWithoutSanitization": true] : ["name": name]
+        }
+    }
+
+    /// What a run's browser refuses every page, whatever its site, from before its first page loads: putting
+    /// anything on the clipboard by itself, and reading it. The clipboard is the person's, shared with everything
+    /// on the Mac, and nobody is at a run's page to mean a copy. A browser gives the first to any page it shows
+    /// without asking, so it's refused in so many words.
+    static let refused: [Permission] = [
+        Permission(name: "clipboard-write"),
+        Permission(name: "clipboard-write", unsanitized: true),
+        Permission(name: "clipboard-read"),
+    ]
+
+    /// One of them, as the request that refuses it for every site (no origin is named).
+    static func refusal(_ permission: Permission) -> [String: Any] {
+        ["permission": permission.descriptor, "setting": "denied"]
+    }
+
+    /// How long the clipboard is watched after a press went to a page (a click, a check, a submit, a key). A page
+    /// can still copy with the browser's older command while it holds a press, which is about five seconds: that
+    /// long, and a moment more.
+    static let copyWatch: TimeInterval = 6
+
+    static let copyCleared = "After a press of yours a page copied something to the clipboard; Petal cleared the clipboard: a page in this browser never changes the person's. petal_vault fills a saved secret where it's needed (action: fill)."
+
     // MARK: Words
 
     static let off = "A browser of your own needs hidden displays (runDisplays in Petal's settings), which are off; only the person turns them on. Use the person's own windows the usual way (petal_look, petal_ui), or your own web tools."
     static let none = "No browser Petal can start for a run is installed on this Mac (Google Chrome, Microsoft Edge, Brave, Vivaldi or Helium). Petal installs none. Use your own web tools, or the person's own windows (petal_look, petal_ui)."
+
+    /// Why a run gets no browser though one Petal could start is installed: it's the one the person's links open in.
+    static func theirs(_ name: String, named: Bool) -> String {
+        let why = "Petal never starts a copy of that one for a run: while theirs is closed, a link they open anywhere would open in the run's copy."
+        let rest = " Use your own web tools, or the person's own windows (petal_look, petal_ui)."
+        if named {
+            return "runBrowser in Petal's settings names \(name), the browser the person's links open in. \(why) Name another one that's installed, or leave it empty for Petal to pick." + rest
+        }
+        return "The only browser on this Mac that Petal can start for a run is \(name), the one the person's links open in. \(why) A run gets a browser of its own once another of Google Chrome, Microsoft Edge, Brave, Vivaldi or Helium is installed; Petal installs none." + rest
+    }
     static let noPictures = "Pictures of a run's browser aren't built yet: read gives the page as text. petal_look with screenshot: \"screen\" is a picture of your display, checked for secrets."
     static let stale = "The page changed since that read (or it was read again): its ids are no use now. Call petal_browser read again."
 }

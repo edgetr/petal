@@ -980,11 +980,13 @@ final class RunDisplays {
     /// (an app starting takes a while). `live`: whoever asked is still there. Off the main thread.
     /// `anyKind`: its dialogs and panels too, for an app the run itself started (everything it shows is the run's:
     /// an Open panel, a welcome window); otherwise only ordinary windows.
+    /// `personsOnly`: never a window of a run's own browser (the same app, as a second process): what an open through
+    /// macOS made is never one of those.
     nonisolated static func newWindows(bundle: String, before: Set<CGWindowID>, timeout: TimeInterval, anyKind: Bool = false,
-                                       live: () -> Bool) -> [(window: CGWindowID, pid: pid_t, element: AXUIElement)] {
+                                       personsOnly: Bool = false, live: () -> Bool) -> [(window: CGWindowID, pid: pid_t, element: AXUIElement)] {
         let deadline = Date().addingTimeInterval(timeout)
         while live() {
-            let now = windowNumbers(bundle: bundle).filter { !before.contains($0.key) }
+            let now = windowNumbers(bundle: bundle).filter { !before.contains($0.key) && !(personsOnly && RunApps.isRun($0.value.pid)) }
             var found: [(window: CGWindowID, pid: pid_t, element: AXUIElement)] = []
             for (number, window) in now {
                 // Only a window Accessibility lists, and an ordinary one (never a sheet, a palette or a tooltip)
@@ -1032,8 +1034,11 @@ final class RunDisplays {
         opened.bundle = bundle
         let web = ["http", "https"].contains(url?.scheme?.lowercased() ?? "")
         let running = !NSRunningApplication.persons(withBundleIdentifier: bundle).isEmpty
-        let before = Set(windowNumbers(bundle: bundle).keys)
-        switch RunDisplayRules.opening(running: running, windows: before.count, address: web, browser: Browsers.kind(bundle) != nil, bare: url == nil) {
+        // A run's own browser is the same app as a second process: its windows aren't the person's.
+        let there = windowNumbers(bundle: bundle)
+        let before = Set(there.keys)
+        let theirs = there.values.filter { !RunApps.isRun($0.pid) }.count
+        switch RunDisplayRules.opening(running: running, windows: theirs, address: web, browser: Browsers.kind(bundle) != nil, bare: url == nil) {
         case .tabInTheirs:
             opened.problem = "\(opened.app) is open with the person's own windows, and an address opens there as a tab in one of them, in front of them. Nothing was opened. petal_browser open opens it in a browser of your own, on your display; or pass on: \"screen\" if the person would want it opened on their screen."
             return opened
@@ -1047,6 +1052,9 @@ final class RunDisplays {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.addsToRecentItems = false
+        // While a run has a browser of its own going, macOS would take that copy for the app and open this in it:
+        // it's opened as a new one instead (as the dock does: DockController.launch).
+        if RunApps.running(bundle: bundle) { configuration.createsNewApplicationInstance = true }
         let done = DispatchSemaphore(value: 0)
         let answer = OpenAnswer()
         let finished: @Sendable (NSRunningApplication?, Error?) -> Void = { started, error in
@@ -1064,11 +1072,11 @@ final class RunDisplays {
             return opened
         }
         // It wasn't running before this open, so this open started it: the run's own, to put away when it ends.
-        if !running {
-            opened.launched = answer.pid ?? NSRunningApplication.persons(withBundleIdentifier: bundle).first?.processIdentifier
-        }
+        // Never a run's own browser, should macOS have opened this there after all: that one is its run's.
+        opened.launched = RunDisplayRules.started(wasRunning: running, answered: answer.pid, runs: { RunApps.isRun($0) },
+                                                  persons: running ? [] : NSRunningApplication.persons(withBundleIdentifier: bundle).map(\.processIdentifier))
         // What it made: an app still starting takes a while to show its window.
-        let made = newWindows(bundle: bundle, before: before, timeout: running ? 5 : 15, anyKind: !running, live: live)
+        let made = newWindows(bundle: bundle, before: before, timeout: running ? 5 : 15, anyKind: !running, personsOnly: true, live: live)
         for (offset, item) in made.enumerated() {
             if !isOrdinary(item.element) { opened.panels.insert(item.window) }
             if move(item.element, pid: item.pid, to: frame, index: index + offset, live: live) {

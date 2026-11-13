@@ -44,6 +44,9 @@ struct VaultCheck {
         untrusted()
         joinedPieces()
         importConflicts()
+        importPlaces()
+        localPorts()
+        noteCodes()
         buyRevoked()
         buyTokens()
         joinedControls()
@@ -1050,6 +1053,227 @@ struct VaultCheck {
         var card4 = VaultItem(kind: .card, title: "Visa"); card4[.number] = "4111111111111111"
         var noCode = card4; noCode.id = Vault.newID(); noCode[.securityCode] = "123"
         expect(Vault.merge(existing: [card4], incoming: [noCode]).conflicts.isEmpty, "a secret saved for the first time isn't a conflict")
+    }
+
+    /// Sites and apps come only with the secret they were saved with: an entry that matches a saved login or key by
+    /// what it holds, but came without its password or key, never adds a place to it by itself and is never the
+    /// newer one. What it would add is offered to the person, by name.
+    static func importPlaces() {
+        let then = Date(timeIntervalSince1970: 1_700_000_000), later = Date(timeIntervalSince1970: 1_800_000_000)
+        let secure = Vault.Target(secure: true, text: true), text = Vault.Target(secure: false, text: true)
+        func web(_ frame: String) -> Vault.Place {
+            Vault.Place(web: true, frameURL: frame, topURL: frame, bundle: "com.apple.Safari", appName: "Safari", signed: true)
+        }
+        func isAsk(_ d: Vault.Decision) -> Bool { if case .ask = d { return true }; return false }
+        func after(_ merge: Vault.Merge, _ saved: VaultItem) -> VaultItem { merge.save.first { $0.id == saved.id } ?? saved }
+        var saved = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"], updated: then)
+        saved[.username] = "ada"; saved[.password] = "the-real-password"
+        // Petal's own format, a later date, no password: one more site and an app.
+        var bare = VaultItem(kind: .login, title: "GitHub", sites: ["github.com", "other.example"], updated: later)
+        bare[.username] = "ada"
+        bare.apps = ["com.example.app"]
+        for petal in [true, false] {
+            let merged = Vault.merge(existing: [saved], incoming: [bare], petal: petal, at: later)
+            let kept = after(merged, saved)
+            expect(kept.sites == ["github.com"] && kept.apps.isEmpty && kept[.password] == "the-real-password",
+                   "an entry with no password adds no site or app to the saved login (petal: \(petal))")
+            expect(merged.save.isEmpty && merged.widened == 0 && merged.updated.isEmpty && merged.added == 0, "nothing is saved or said as newer (petal: \(petal))")
+            expect(isAsk(Vault.decide(kept, .password, target: secure, place: web("https://other.example/login"))),
+                   "so the saved password still asks on the site the file named (petal: \(petal))")
+            expect(merged.conflicts.count == 1 && merged.conflicts[0].id == saved.id && merged.conflicts[0][.password] == "the-real-password"
+                   && merged.conflicts[0].sites == ["github.com", "other.example"] && merged.conflicts[0].apps == ["com.example.app"],
+                   "what it would add is offered as a conflict (petal: \(petal))")
+            expect(merged.places[saved.id] == ["other.example", "com.example.app"], "with the places it would add, to name them (petal: \(petal))")
+        }
+        // Older than what's saved, or the same date: yours, nothing offered.
+        var stale = bare; stale.updated = then.addingTimeInterval(-60)
+        let older = Vault.merge(existing: [saved], incoming: [stale], petal: true, at: later)
+        expect(older.save.isEmpty && older.conflicts.isEmpty && older.older == 1, "an older entry with no password changes nothing")
+        // It is never the newer one: its notes don't replace the saved ones (they fill only where none are saved).
+        var noted = saved; noted[.notes] = "mine"
+        var talks = bare; talks[.notes] = "theirs"; talks.sites = ["github.com"]; talks.apps = []
+        let notes = Vault.merge(existing: [noted], incoming: [talks], petal: true, at: later)
+        expect(after(notes, noted)[.notes] == "mine" && notes.conflicts.isEmpty, "an entry with no password is never newer: the saved notes stay")
+        // The same password brings its other site, as before; another password brings its own places with it.
+        var carries = bare; carries[.password] = "the-real-password"
+        let widened = Vault.merge(existing: [saved], incoming: [carries], petal: true, at: later)
+        expect(widened.widened == 1 && widened.conflicts.isEmpty && after(widened, saved).sites == ["github.com", "other.example"]
+               && widened.places.isEmpty, "the same password brings its other site and app")
+        var differs = bare; differs[.password] = "another-password"
+        let replaced = Vault.merge(existing: [saved], incoming: [differs], petal: true, at: later)
+        expect(after(replaced, saved)[.password] == "another-password" && after(replaced, saved).sites.count == 2,
+               "Petal's newer export with another password is that login whole: its password with its sites")
+        let offered = Vault.merge(existing: [saved], incoming: [differs])
+        expect(offered.save.isEmpty && offered.conflicts.count == 1 && offered.conflicts[0][.password] == "another-password" && offered.places.isEmpty,
+               "another app's other password is the usual conflict")
+        // An API key is matched by its title alone: its sites come only with the key.
+        var key = VaultItem(kind: .apiKey, title: "OpenAI", sites: ["platform.openai.com"], updated: then)
+        key[.value] = "sk-check-0123456789abcdef"
+        let empty = VaultItem(kind: .apiKey, title: "openai", sites: ["other.example"], updated: later)
+        for petal in [true, false] {
+            let merged = Vault.merge(existing: [key], incoming: [empty], petal: petal, at: later)
+            let kept = after(merged, key)
+            expect(kept.sites == ["platform.openai.com"] && kept[.value] == "sk-check-0123456789abcdef",
+                   "an entry with no key adds no site to the saved key (petal: \(petal))")
+            expect(isAsk(Vault.decide(kept, .value, target: text, place: web("https://other.example/setup"))), "so the key still asks there (petal: \(petal))")
+            expect(merged.conflicts.count == 1 && merged.conflicts[0].sites == ["platform.openai.com", "other.example"]
+                   && merged.conflicts[0][.value] == "sk-check-0123456789abcdef" && merged.places[key.id] == ["other.example"],
+                   "its site is offered, by name (petal: \(petal))")
+        }
+        var withKey = empty; withKey[.value] = "sk-check-0123456789abcdef"
+        let more = Vault.merge(existing: [key], incoming: [withKey], petal: true, at: later)
+        expect(after(more, key).sites == ["platform.openai.com", "other.example"] && more.conflicts.isEmpty, "the same key brings its other site")
+        // A card's or a contact's sites decide nothing, so they merge as before.
+        var card = VaultItem(kind: .card, title: "Visa", updated: then); card[.number] = "4111111111111111"; card[.securityCode] = "737"
+        var cardRow = VaultItem(kind: .card, title: "Visa", sites: ["shop.example"], updated: later); cardRow[.number] = "4111111111111111"
+        let carded = Vault.merge(existing: [card], incoming: [cardRow], petal: true, at: later)
+        expect(carded.conflicts.isEmpty && after(carded, card).sites == ["shop.example"], "other kinds' details merge as before")
+        // The summary names what a conflict would add.
+        expect(Vault.conflictName(saved, adds: ["other.example", "com.example.app"]) == "GitHub (adds other.example, com.example.app)"
+               && Vault.conflictName(saved, adds: nil) == "GitHub" && Vault.conflictName(saved, adds: []) == "GitHub"
+               && Vault.conflictName(saved, adds: ["a.example", "b.example", "c.example", "d.example"]) == "GitHub (adds a.example, b.example, c.example, …)",
+               "a conflict that only adds places is named with them")
+    }
+
+    /// On this Mac each port is another program's page: a login saved on one (through Petal's card, a new login, an
+    /// import) keeps its port and fills by itself on that port only; on another port of this Mac it asks. A site
+    /// the person wrote without a port ("localhost") is every port's, as before.
+    static func localPorts() {
+        let secure = Vault.Target(secure: true, text: true)
+        func web(_ frame: String, top: String? = nil) -> Vault.Place {
+            Vault.Place(web: true, frameURL: frame, topURL: top ?? frame, bundle: "com.apple.Safari", appName: "Safari", signed: true)
+        }
+        func isAsk(_ d: Vault.Decision) -> Bool { if case .ask = d { return true }; return false }
+        // What an address is saved as.
+        expect(VaultSite.site("http://localhost:3000/login") == "localhost:3000" && VaultSite.site("http://127.0.0.1:8080/") == "127.0.0.1:8080"
+               && VaultSite.site("http://[::1]:8080/x") == "[::1]:8080" && VaultSite.site("https://app.localhost:8443/") == "app.localhost:8443",
+               "a page of this Mac is saved with its port")
+        expect(VaultSite.site("http://localhost/", page: true) == "localhost:80" && VaultSite.site("https://localhost/", page: true) == "localhost:443",
+               "a page's scheme's port when none is written")
+        expect(VaultSite.site("http://localhost/") == "localhost" && VaultSite.site("https://127.0.0.1/x") == "127.0.0.1"
+               && VaultSite.site("http://localhost:3000/") == "localhost:3000", "an address in a file or typed in Settings: only a port it writes")
+        // An export writes "https://<site>/": read back, every site is the one saved, a bare one still every port's.
+        for saved in ["localhost", "localhost:3000", "[::1]:8080", "127.0.0.1", "github.com"] {
+            expect(VaultSite.hosts("https://\(saved)/") == [saved], "an export's site reads back as saved: \(saved) (\(VaultSite.hosts("https://\(saved)/")))")
+        }
+        expect(VaultSite.site("localhost") == "localhost" && VaultSite.site("localhost:3000") == "localhost:3000" && VaultSite.site("::1") == "::1"
+               && VaultSite.site("[::1]:3000") == "[::1]:3000", "a bare host stays as written")
+        expect(VaultSite.site("https://GitHub.com:8443/x") == "github.com" && VaultSite.site("github.com") == "github.com" && VaultSite.site("not a url") == nil,
+               "any other site is its host, as before")
+        expect(VaultSite.port("http://localhost:3000/") == 3000 && VaultSite.port("https://example.com/") == 443 && VaultSite.port("localhost") == nil
+               && VaultSite.port("localhost:5173") == 5173, "ports")
+        expect(VaultSite.host("localhost:3000") == "localhost" && VaultSite.host("[::1]:3000") == "::1", "what's saved still reads as its host")
+        // Matching: the saved port only; a page whose port isn't known is not it.
+        let m = VaultSite.matches
+        expect(m("http://localhost:3000/login", "localhost:3000") && m("localhost:3000", "localhost:3000") && m("http://[::1]:8080/", "[::1]:8080"),
+               "the same port of this Mac")
+        expect(!m("http://localhost:9999/login", "localhost:3000") && !m("https://localhost:8443/", "localhost:3000")
+               && !m("http://127.0.0.1:9999/", "127.0.0.1:8080") && !m("localhost", "localhost:3000") && !m("http://127.0.0.1:3000/", "localhost:3000"),
+               "another port, a page whose port isn't known, or another name for this Mac")
+        expect(m("http://localhost:9999/", "localhost") && m("localhost:9999", "localhost"), "saved without a port: every port, as before")
+        expect(m("https://accounts.github.com:8443/", "github.com"), "a port elsewhere changes nothing")
+        // A login made on a page of this Mac is that port's.
+        var made = VaultItem(kind: .login, title: "Dev")
+        made[.username] = "admin"; made[.password] = "dev-pass-1"
+        Vault.bind(&made, to: web("http://localhost:3000/login"))
+        expect(made.sites == ["localhost:3000"], "a login typed into Petal's card on localhost:3000 is saved for that port (\(made.sites))")
+        expect(Vault.decide(made, .password, target: secure, place: web("http://localhost:3000/admin")) == .fill, "it fills by itself on its own port")
+        let elsewhere = Vault.decide(made, .password, target: secure, place: web("http://localhost:9999/login"))
+        if case .ask(_, let detail) = elsewhere {
+            expect(detail.contains("localhost:3000") && detail.contains("localhost:9999") && detail.contains("another port of this Mac"), "the card says which port: \(detail)")
+        } else { expect(false, "on another port of this Mac it asks") }
+        expect(isAsk(Vault.decide(made, .password, target: secure, place: web("https://localhost:8443/login"))), "and on another port over https")
+        expect(isAsk(Vault.decide(made, .password, target: secure, place: web("http://127.0.0.1:3000/login"))), "and under another name for this Mac")
+        expect(Vault.logins([made], host: web("http://localhost:3000/").site, bundle: nil).count == 1
+               && Vault.logins([made], host: web("http://localhost:9999/").site, bundle: nil).isEmpty, "Petal picks it by itself only for its own port")
+        var loop = VaultItem(kind: .login, title: "Dev")
+        loop[.password] = "dev-pass-1"
+        Vault.bind(&loop, to: web("http://[::1]:8080/"))
+        expect(loop.sites == ["[::1]:8080"] && Vault.decide(loop, .password, target: secure, place: web("http://[::1]:8080/x")) == .fill
+               && isAsk(Vault.decide(loop, .password, target: secure, place: web("http://[::1]:8081/x"))), "the same for [::1]")
+        // What a request card would save is where it fills: no warning on its own page.
+        expect(Vault.request(.login, [.password], targets: [secure], places: [web("http://localhost:3000/login")], saved: 0).warning == nil,
+               "a login asked for on a local page fills there")
+        // Anywhere else nothing changes.
+        var site = VaultItem(kind: .login, title: "GitHub")
+        site[.password] = "pw-123456"
+        Vault.bind(&site, to: web("https://github.com:8443/login"))
+        expect(site.sites == ["github.com"] && Vault.decide(site, .password, target: secure, place: web("https://accounts.github.com/")) == .fill, "another site is saved by its host")
+        // Imports keep the port, and two ports are two logins.
+        let csv = "Title,URL,Username,Password\nDev,http://localhost:3000/login,admin,dev-pass-1\nDev,http://localhost:4000/,admin,dev-pass-2\n"
+        let rows = Vault.importCSV(csv)?.items ?? []
+        expect(rows.map(\.sites) == [["localhost:3000"], ["localhost:4000"]], "an import's local addresses keep their ports (\(rows.map(\.sites)))")
+        let both = Vault.merge(existing: [], incoming: rows)
+        expect(both.added == 2 && both.conflicts.isEmpty, "the same username on two ports is two logins")
+        expect(Vault.protonSites([["url": "http://localhost:5173/", "mode": "Exact"]] as [Any]).hosts == ["localhost:5173"], "Proton Pass's too")
+        let again = Vault.merge(existing: [made], incoming: [rows[0]])
+        expect(again.same == 1 && again.added == 0, "the same login on the same port is already here")
+    }
+
+    /// A vault item's notes are never told by the vault, and what reads as a code in them (recovery codes, a key
+    /// kept there) is hidden wherever Petal AI reads it, whole, as a word of its own. The person's ordinary words,
+    /// dates and numbers in a note stay as they are everywhere.
+    static func noteCodes() {
+        var login = VaultItem(kind: .login, title: "GitHub", sites: ["github.com"])
+        login[.username] = "ada"; login[.password] = "Kq7-real-zebra-55"
+        login[.notes] = "Recovery codes: a1b2c-3d4e5, f6g7h-8i9j0 and (Zx9Qm4Lt7Kp2). Renewed 2026-11-12, phone 5551234567.\nMy password hint: the old street. key=tok_live_9f8e7d6c"
+        let codes = Vault.noteCodes(login)
+        expect(codes == ["a1b2c-3d4e5", "f6g7h-8i9j0", "Zx9Qm4Lt7Kp2", "tok_live_9f8e7d6c"], "what reads as a code in the notes (\(codes))")
+        expect(Vault.noteCodes(VaultItem(kind: .login, title: "Plain")).isEmpty, "no notes, no codes")
+        var long = VaultItem(kind: .login, title: "Many")
+        long[.notes] = (0..<300).map { "c\($0)x9-abcd" }.joined(separator: " ")
+        expect(Vault.noteCodes(long).count == Vault.noteCodeCap, "at most \(Vault.noteCodeCap) of a note's codes")
+        expect(!Vault.secrets(login).contains { codes.contains($0) }, "they aren't secrets searched by their pieces")
+        // As Petal builds the index: every item's secrets, and its notes' codes as words.
+        let index = UIMap.SecretIndex(Vault.secrets(login), words: codes)
+        expect(index.matches("a1b2c-3d4e5") && index.matches("Use f6g7h-8i9j0 to sign in") && index.matches("code:Zx9Qm4Lt7Kp2.")
+               && index.matches("export KEY=tok_live_9f8e7d6c"), "a code from the notes is caught wherever it's read")
+        expect(index.redacted("Backup: a1b2c-3d4e5, then f6g7h-8i9j0.") == "Backup: \(UIMap.hidden), then \(UIMap.hidden).", "only the code is hidden, the words around it stay")
+        expect(index.matches("pw: Kq7-real-zebra-55"), "the password as before")
+        // Never by its pieces, and never the person's own words.
+        expect(!index.matches("a1b2c-3d") && !index.matches("xa1b2c-3d4e5") && !index.matches("a1b2c-3d4e56") && !index.matches("Zx9Qm4Lt"),
+               "part of a code, or a code run into other letters, isn't it")
+        for words in ["Recovery codes", "My password hint: the old street", "Renewed 2026-11-12", "phone 5551234567", "password", "Renewed", "tok_live"] {
+            expect(!index.matches(words), "the person's own words stay: \(words)")
+        }
+        // Names with a number in them, an email address, a host name and the item's own username aren't codes, and
+        // a contact's or an address's notes hold none.
+        let ordinary = "Recovery email john.smith2024@example.com, Instagram ada_love99, server web01-staging, Office365, covid-19 portal, renewed 12-Nov-2026, iPhone15Pro, host db1a2b3c.example.com, me j0hn5mith"
+        var plain = VaultItem(kind: .login, title: "Mail")
+        plain[.username] = "j0hn5mith"; plain[.password] = "Kq7-real-zebra-55"; plain[.notes] = ordinary
+        expect(Vault.noteCodes(plain).isEmpty, "ordinary words with digits aren't codes (\(Vault.noteCodes(plain)))")
+        for kind in [VaultKind.contact, .address] {
+            var item = VaultItem(kind: kind, title: "Ada")
+            item[.notes] = "Her recovery code a1b2c-3d4e5"
+            expect(Vault.noteCodes(item).isEmpty, "a \(kind.rawValue)'s notes give no codes")
+        }
+        let both = UIMap.SecretIndex(Vault.secrets(plain), words: codes)
+        expect(both.redacted(ordinary) == ordinary, "an email, a name or a host with digits in them is told as it is")
+        // Codes of digits only, where the notes say they're codes: hidden as they're written, as digits, and in
+        // groups either way; a phone number, a date or a number the notes don't call a code stays.
+        var backup = VaultItem(kind: .login, title: "Google")
+        backup[.notes] = "Backup codes: 1234 5678, 8765-4321 and 11223344.\nPhone 5551234567. Renewed 2026-11-12. Account 99887766.\nBackup phone 5559876543\nMore codes 2468 1357 9753 8642"
+        let numbers = Vault.noteNumbers(backup)
+        expect(Set(numbers) == ["12345678", "1234 5678", "1234-5678", "87654321", "8765-4321", "8765 4321", "11223344",
+                                "2468135797538642", "2468 1357 9753 8642", "2468-1357-9753-8642",
+                                "24681357", "2468 1357", "2468-1357", "97538642", "9753 8642", "9753-8642"], "numbers the notes call codes (\(numbers))")
+        let numbered = UIMap.SecretIndex(Vault.secrets(backup) + numbers, words: Vault.noteCodes(backup))
+        expect(numbered.matches("Your backup code: 1234 5678") && numbered.matches("12345678") && numbered.matches("use 8765 4321") && numbered.matches("1122-3344") == false
+               && numbered.matches("11223344"), "a digit code is caught as written, as digits, and in groups")
+        for words in ["Call 5551234567", "Renewed 2026-11-12", "Account 99887766", "5559876543", "Order 1234"] {
+            expect(!numbered.matches(words), "a number the notes don't call a code stays: \(words)")
+        }
+        var person = VaultItem(kind: .contact, title: "Ada")
+        person[.notes] = "Her backup code 12345678"
+        expect(Vault.noteNumbers(person).isEmpty, "a contact's notes give none")
+        expect(Vault.turns("a1b2c-3d4e5") == 9 && Vault.turns("Office365") == 1 && Vault.turns("12-Nov-2026") == 2 && Vault.turns("XK7P-9QRT") == 4,
+               "turns between letters and digits")
+        // The vault itself never tells a note.
+        expect(Vault.shown(login)["notes"] == nil && !"\(Vault.shown(login))".contains("a1b2c"), "the notes are never in what the AI is told of an item")
+        // Without the words the index is as it was.
+        expect(!UIMap.SecretIndex(Vault.secrets(login)).matches("a1b2c-3d4e5"), "an index made without the notes' codes doesn't know them")
+        expect(UIMap.SecretIndex([], words: ["a1b2c-3d4e5"]).matches("x a1b2c-3d4e5") && !UIMap.SecretIndex([], words: []).matches("a1b2c-3d4e5")
+               && UIMap.SecretIndex([], words: []).isEmpty, "words alone make an index; none make an empty one")
     }
 
     /// Buy on tab A, tab B seen in that window (a petal_ui read, an act, a title change), back on A: the Buy is over.

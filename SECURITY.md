@@ -42,6 +42,8 @@ Every release is signed with Petal's own certificate, "Petal (Edgetr)". It is no
 
 Petal, and the installer at `petal.codes/install.sh`, install a download only when it matches its release's checksum and is signed, whole, with that certificate (from Petal 2.1.3). The signing key is not in this repository.
 
+With changes of the person's own to Petal's code (`petal personal`), an update is built on their Mac from the source that signed release says it was built from.
+
 ## Worth reporting
 
 - A vault secret reaching the AI, a web page, an agent, another app, a log or a file.
@@ -57,3 +59,6 @@ These are how Petal works today, not holes:
 - A program already running as the person can read their files, including Petal's settings and notes.
 - A Private notebook is kept from Petal AI and from Petal's own pictures; it is not protection from another app recording the screen.
 - `petal run` takes a key out of what a command prints. A command written to leak a key in another form still can.
+- An agent's Always for a project covers anything that can start or set up that agent in that project.
+- Full access and an earlier Always for Petal AI also cover the person's own Claude Code and Codex outside Petal, and so whatever those run.
+- A picture Petal AI is given hides the secrets an app shows to Accessibility. Text an app draws itself, or a photo of a card, isn't hidden.

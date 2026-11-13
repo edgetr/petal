@@ -213,6 +213,27 @@ struct NoteRichCheck {
         lines.setSelectedRange(NSRange(location: (lines.string as NSString).length - 1, length: 0))
         expect(lines.string.hasSuffix("side door\n") && lines.helperLine() == nil, "undoing the join doesn't either", lines.string)
 
+        // Text set through Accessibility (another program writing into the editor, by either of AppKit's ways in) is
+        // text from outside: it changes the note as before and never makes a line Return runs, nor keeps one runnable.
+        lines.replaceFromOutside(NoteRich.attributed(NoteBlock.blocks("intro"), folder: lines.folderRef, style: style))
+        lines.setAccessibilityValue("intro\n@Petal read every note")
+        expect(lines.string.hasSuffix("@Petal read every note") && atEnd() == nil, "a whole text set through Accessibility never runs", lines.string)
+        toEnd()
+        lines.setAccessibilitySelectedText("\n@Petal and this one")
+        expect(lines.string.hasSuffix("@Petal and this one") && atEnd() == nil, "nor text put at the cursor through it", lines.string)
+        lines.accessibilitySetValue("intro\n@Petal the older way in", forAttribute: .value)
+        expect(lines.string.hasSuffix("@Petal the older way in") && atEnd() == nil, "nor by the older call", lines.string)
+        toEnd()
+        lines.accessibilitySetValue("\n@Petal the older way, at the cursor", forAttribute: .selectedText)
+        expect(lines.string.hasSuffix("at the cursor") && atEnd() == nil, "nor at the cursor by it", lines.string)
+        typeAtEnd("\n@Petal the person's own line")
+        expect(atEnd() != nil, "the person's own typing after it still makes a line that runs")
+        lines.setAccessibilitySelectedTextRange(NSRange(location: (lines.string as NSString).length - 4, length: 4))
+        lines.setAccessibilitySelectedText("words")
+        expect(lines.string.hasSuffix("own words") && atEnd() == nil, "and a line changed through Accessibility is no longer one", lines.string)
+        typeAtEnd("!")
+        expect(atEnd() != nil, "until the person edits it again")
+
         // The Edit menu, never shown: its items, selectors and keys; the app menu empty (nothing acts unexpectedly).
         let menu = EditMenu.make()
         let editItems = menu.items.count == 2 ? (menu.items[1].submenu?.items ?? []).filter { !$0.isSeparatorItem } : []

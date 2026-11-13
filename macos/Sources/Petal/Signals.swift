@@ -25,6 +25,10 @@ final class Signals {
     @ObservationIgnored private var observations: [ObjectIdentifier: NSKeyValueObservation] = [:]
     @ObservationIgnored private var tick = 0
     @ObservationIgnored private var asking = false
+    /// The last read of macOS's Dock's badges that answered, and when Petal first heard from that Dock: what a badge
+    /// went up from (SignalRules.wentUp).
+    @ObservationIgnored private var lastRead: SignalRules.Read?
+    @ObservationIgnored private var dockSince = Date.distantPast
 
     @ObservationIgnored private var watched: [String] = []
     /// When each stack was last opened (seconds since 1970), kept in state.json.
@@ -74,7 +78,8 @@ final class Signals {
         tick += 1
         if tick % 2 == 0 { readBadges() }
         if trashPolled && tick % 5 == 0 { folders.look(Stacks.trashFolder) }
-        if tick % 2 == 1 && !asking { askNowPlaying() }
+        // What's playing only while the dock shows it: with it off, the players aren't asked at all.
+        if tick % 2 == 1 && !asking && PetalApp.shared.config.bool("nowPlaying") { askNowPlaying() }
     }
 
     /// Apple events wait for a busy player, so they never run on the dock's thread.
@@ -89,6 +94,7 @@ final class Signals {
                     if waiting != self.playersWaiting { self.playersWaiting = waiting }
                     if current != self.nowPlaying {
                         let newTrack = current?.title != self.nowPlaying?.title || current?.player != self.nowPlaying?.player
+                            || current?.artist != self.nowPlaying?.artist || current?.artwork != self.nowPlaying?.artwork
                         self.nowPlaying = current
                         if newTrack { self.loadArtwork(current) }
                     }
@@ -113,17 +119,20 @@ final class Signals {
     /// Spotify gives a link to the cover; Music gives the picture itself.
     private func loadArtwork(_ playing: NowPlaying?) {
         guard let playing else { artwork = nil; return }
+        // A cover is taken only while the song it was fetched for is still the one showing: one that comes back after
+        // the next song started is dropped.
+        let same = { [weak self] in self?.nowPlaying.map { NowPlaying.sameSong($0, playing) } ?? false }
         if let url = playing.artwork {
             Task {
                 let data = try? await URLSession.shared.data(from: url).0
-                artwork = data.flatMap(NSImage.init(data:))
+                if same() { artwork = data.flatMap(NSImage.init(data:)) }
             }
         } else if playing.player == "com.apple.Music" {
             NowPlaying.queue.async {
                 var error: NSDictionary?
                 let data = NSAppleScript(source: "if application \"Music\" is running then tell application \"Music\" to get raw data of artwork 1 of current track")?
                     .executeAndReturnError(&error).data
-                DispatchQueue.main.async { MainActor.assumeIsolated { self.artwork = data.flatMap(NSImage.init(data:)) } }
+                DispatchQueue.main.async { MainActor.assumeIsolated { if same() { self.artwork = data.flatMap(NSImage.init(data:)) } } }
             }
         } else {
             artwork = nil
@@ -216,11 +225,13 @@ final class Signals {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.readingBadges = false
+                    // A read that didn't answer (no Accessibility, the Dock busy or gone) says nothing: the badges
+                    // stay as they were, and nothing bounces when they're read again.
                     guard let found else { return }
-                    for (id, label) in found where Self.count(label) > Self.count(self.badges[id] ?? "") {
-                        self.bounces[id, default: 0] += 1
-                    }
-                    if found != self.badges { self.badges = found }
+                    if found.dock != self.lastRead?.dock { self.dockSince = found.at }
+                    for id in SignalRules.wentUp(before: self.lastRead, now: found, dockSince: self.dockSince) { self.bounces[id, default: 0] += 1 }
+                    self.lastRead = found
+                    if found.badges != self.badges { self.badges = found.badges }
                 }
             }
         }
@@ -228,24 +239,38 @@ final class Signals {
     @ObservationIgnored private var readingBadges = false
     nonisolated private static let badgeQueue = DispatchQueue(label: "petal.badges", qos: .utility)
 
-    /// Each app's badge in macOS's Dock, by bundle id; nil without Accessibility or the Dock.
-    nonisolated private static func dockBadges() -> [String: String]? {
+    /// Each app's badge in macOS's Dock, by bundle id, read whole; nil without Accessibility or the Dock, or when any
+    /// part of the read didn't answer (a slow Dock), so a badge that wasn't read is never taken for no badge.
+    nonisolated private static func dockBadges() -> SignalRules.Read? {
         guard AXIsProcessTrusted(), let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first
         else { return nil }
         let element = AXUIElementCreateApplication(dock.processIdentifier)
         AXUIElementSetMessagingTimeout(element, 0.3)
+        /// An attribute's value: an empty one (`.some(nil)`) for one that isn't there (an item with no badge says
+        /// "no value"), and nil for a read that didn't answer in time.
+        func read<T>(_ element: AXUIElement, _ attribute: String) -> T?? {
+            var value: CFTypeRef?
+            switch AXUIElementCopyAttributeValue(element, attribute as CFString, &value) {
+            case .success: return .some(value as? T)
+            case .cannotComplete: return nil
+            default: return .some(nil)
+            }
+        }
         var found: [String: String] = [:]
-        for list in Windows.value(element, kAXChildrenAttribute) as [AXUIElement]? ?? [] {
-            for item in Windows.value(list, kAXChildrenAttribute) as [AXUIElement]? ?? [] {
-                guard let label: String = Windows.value(item, "AXStatusLabel"), !label.isEmpty,
-                      let url: URL = Windows.value(item, kAXURLAttribute), let id = Bundle(url: url)?.bundleIdentifier else { continue }
+        // (The Dock itself always has its lists: none at all is a read that failed.)
+        guard let lists = read(element, kAXChildrenAttribute) as [AXUIElement]??, let lists else { return nil }
+        for list in lists {
+            guard let items = read(list, kAXChildrenAttribute) as [AXUIElement]?? else { return nil }
+            for item in items ?? [] {
+                guard let label = read(item, "AXStatusLabel") as String?? else { return nil }
+                guard let label, !label.isEmpty else { continue }
+                guard let url = read(item, kAXURLAttribute) as URL?? else { return nil }
+                guard let url, let id = Bundle(url: url)?.bundleIdentifier else { continue }
                 found[id] = label
             }
         }
-        return found
+        return SignalRules.Read(dock: dock.processIdentifier, at: Date(), badges: found)
     }
-
-    private static func count(_ label: String) -> Int { Int(label) ?? (label.isEmpty ? 0 : 1) }
 
     // MARK: Download progress
 
@@ -308,31 +333,41 @@ struct NowPlaying: Equatable {
     static let players = ["com.spotify.client", "com.apple.Music"]
     static let queue = DispatchQueue(label: "petal.nowplaying")
 
+    /// The song the dock shows: every allowed player that has one is asked, and one playing shows before one paused
+    /// (a paused Spotify never hides Music playing), so the controls go to the player that's playing.
     nonisolated static func current() -> NowPlaying? {
-        for id in players where NSRunningApplication.runningApplications(withBundleIdentifier: id).first != nil
-            && Browsers.access(id) == .allowed {
-            let app = id == "com.spotify.client" ? "Spotify" : "Music"
-            let artwork = id == "com.spotify.client" ? "artwork url of current track" : "\"\""
-            let script = """
-            if application "\(app)" is not running then return ""
-            tell application "\(app)"
-              if player state is stopped then return ""
-              set sep to ASCII character 31
-              return (name of current track) & sep & (artist of current track) & sep & (player state as text) & sep & \(artwork)
-            end tell
-            """
-            var error: NSDictionary?
-            guard let text = NSAppleScript(source: script)?.executeAndReturnError(&error).stringValue, !text.isEmpty else { continue }
-            let parts = text.components(separatedBy: "\u{1F}")
-            guard parts.count >= 3 else { continue }
-            return NowPlaying(player: id, title: parts[0], artist: parts[1], playing: parts[2] == "playing",
-                              artwork: parts.count > 3 ? URL(string: parts[3]) : nil)
-        }
-        return nil
+        let songs = players.compactMap(song)
+        return SignalRules.shownPlayer(playing: songs.map(\.playing)).map { songs[$0] }
     }
 
-    /// The players running now that haven't been asked yet. Each is looked at here, without prompting, whatever
-    /// `current` did: it stops at the first player with a song, so a second one would never be looked at.
+    /// The same song, from the same player (its cover belongs to it).
+    static func sameSong(_ a: NowPlaying, _ b: NowPlaying) -> Bool {
+        a.player == b.player && a.title == b.title && a.artist == b.artist && a.artwork == b.artwork
+    }
+
+    /// What one player has: nil when it isn't running, isn't allowed, or has nothing playing or paused.
+    nonisolated private static func song(_ id: String) -> NowPlaying? {
+        guard NSRunningApplication.runningApplications(withBundleIdentifier: id).first != nil, Browsers.access(id) == .allowed else { return nil }
+        let app = id == "com.spotify.client" ? "Spotify" : "Music"
+        let artwork = id == "com.spotify.client" ? "artwork url of current track" : "\"\""
+        let script = """
+        if application "\(app)" is not running then return ""
+        tell application "\(app)"
+          if player state is stopped then return ""
+          set sep to ASCII character 31
+          return (name of current track) & sep & (artist of current track) & sep & (player state as text) & sep & \(artwork)
+        end tell
+        """
+        var error: NSDictionary?
+        guard let text = NSAppleScript(source: script)?.executeAndReturnError(&error).stringValue, !text.isEmpty else { return nil }
+        let parts = text.components(separatedBy: "\u{1F}")
+        guard parts.count >= 3 else { return nil }
+        return NowPlaying(player: id, title: parts[0], artist: parts[1], playing: parts[2] == "playing",
+                          artwork: parts.count > 3 ? URL(string: parts[3]) : nil)
+    }
+
+    /// The players running now that haven't been asked yet, each looked at here without prompting (`current` asks only
+    /// the players that said yes).
     nonisolated static func waiting() -> Set<String> {
         Set(players.filter { Browsers.access($0) == .notAsked })
     }

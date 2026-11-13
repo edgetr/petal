@@ -48,6 +48,8 @@ enum Tiling {
     private static var timer: Timer?
     private static var work: DispatchWorkItem?
     private static var settling: DispatchWorkItem?
+    /// The window whose drag is being waited on (`settle`).
+    private static var draggedWindow: CGWindowID?
     private static var refs: [EventHotKeyRef] = []
 
     private static var config: Config { PetalApp.shared.config }
@@ -173,8 +175,15 @@ enum Tiling {
         case .moved, .resized:
             guard let id = event.window, let element = event.element, let done = applied[id],
                   let now = Windows.frame(of: element), !now.equalTo(done.actual, within: 2), layout(of: id) != nil else { return }
-            // Someone is dragging or resizing a tiled window: wait for the mouse to let go.
-            settle(id, attempts: 0)
+            // Someone is dragging or resizing a tiled window: wait for the mouse to let go. A window its app moved
+            // by itself (nobody pressed the mouse) only goes back to its place.
+            let down = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseDown)
+            let up = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .leftMouseUp)
+            // A drag already being waited on for this window stays one (a late event never makes it the app's own).
+            let dragged = TileLayout.dragged(buttonDown: NSEvent.pressedMouseButtons & 1 != 0, sinceMouseDown: down, sinceMouseUp: up)
+                || draggedWindow == id
+            if dragged { draggedWindow = id }
+            settle(id, attempts: 0, dragged: dragged)
         case .missionControl, .missionControlEnded, .titleChanged, .tabSwitched:
             break
         }
@@ -190,11 +199,13 @@ enum Tiling {
     /// When the drag ends: dropped on another tiled window, the two swap; on another screen's layout, it joins it
     /// there; anywhere else, it goes back to its place. Resizing goes back too. Petal never moves the pointer: it
     /// only reads where it is.
-    private static func settle(_ id: CGWindowID, attempts: Int) {
+    private static func settle(_ id: CGWindowID, attempts: Int, dragged: Bool) {
         settling?.cancel()
         let item = DispatchWorkItem {
-            if NSEvent.pressedMouseButtons & 1 != 0 && attempts < 300 { settle(id, attempts: attempts + 1); return }
+            if NSEvent.pressedMouseButtons & 1 != 0 && attempts < 300 { settle(id, attempts: attempts + 1, dragged: dragged); return }
+            if draggedWindow == id { draggedWindow = nil }
             guard active, let from = layout(of: id) else { return }
+            guard dragged else { applied[id] = nil; return retile() }
             let top = Screens.all.first?.frame.maxY ?? 0
             let mouse = NSEvent.mouseLocation
             let pointer = CGPoint(x: mouse.x, y: top - mouse.y)

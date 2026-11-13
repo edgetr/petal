@@ -577,7 +577,7 @@
   },
   {
     "name": "petal_routine_save",
-    "description": "Make a routine from what the user asked, or change one (id). words: their own words. You fill trigger and actions from them, once; Petal runs it without AI except for sorting files by what they are. trigger.on: \"file\" (a file lands in folder, e.g. ~/Downloads, ~/Desktop or screenshots; types: kinds pdf, image, video, audio, archive, installer, document, code or extensions; named: words in its name; both optional), \"app\" (app: name or bundle id; when: \"opens\" or \"front\"), \"time\" (at: \"HH:MM\"; days: 1 = Monday … 7, empty = every day). actions, in order: {do: \"sort\", by: \"ai\" (by what each file is; the quick AI picks an existing subfolder or names a new one for similar files) or \"kind\" (Images, PDFs, …), into: where the subfolders go (the files' folder by default)}, {do: \"move\", to: a folder (a name alone is inside the files' folder)}, {do: \"open\", apps: names, bundle ids or https:// addresses}, {do: \"hide\", apps}, {do: \"shortcut\", name}. sort and move act on the new file; with an app or time trigger they take folder's files. Files are only moved, never deleted. It acts on new files only: when the answer says files are there now, offer petal_routine_run.",
+    "description": "Make a routine from what the user asked, or change one (id). words: their own words. You fill trigger and actions from them, once; Petal runs it without AI except for sorting files by what they are. trigger.on: \"file\" (a file lands in folder, e.g. ~/Downloads, ~/Desktop or screenshots; types: kinds pdf, image, video, audio, archive, installer, document, code or extensions; named: words in its name; both optional), \"app\" (app: name or bundle id; when: \"opens\" or \"front\"), \"time\" (at: \"HH:MM\"; days: 1 = Monday … 7, empty = every day). actions, in order: {do: \"sort\", by: \"ai\" (by what each file is; the quick AI picks an existing subfolder or names a new one for similar files) or \"kind\" (Images, PDFs, …), into: where the subfolders go (the files' folder by default)}, {do: \"move\", to: a folder (a name alone is inside the files' folder)}, {do: \"open\", apps: names, bundle ids, https:// addresses or documents by full path (never a script, a program or another kind of address)}, {do: \"hide\", apps}, {do: \"shortcut\", name}. Petal asks the user first before it saves a routine that opens something or runs a Shortcut. sort and move act on the new file; with an app or time trigger they take folder's files. Files are only moved, never deleted. It acts on new files only: when the answer says files are there now, offer petal_routine_run.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -608,7 +608,7 @@
   },
   {
     "name": "petal_routine_run",
-    "description": "Run a routine now on the files already in its folder. dryRun: true says what it would move where, moving nothing; without it, it does it (Petal asks the user first when it's 10 files or more). A routine that moves no files just runs its actions.",
+    "description": "Run a routine now on the files already in its folder. dryRun: true says what it would move where, moving nothing; without it, it does it (Petal asks the user first when it's 10 files or more). A routine that moves no files just runs its actions. One that opens something or runs a Shortcut asks the user first.",
     "inputSchema": {
       "type": "object",
       "properties": {

@@ -81,7 +81,7 @@ enum VaultField: String, CaseIterable, Codable {
     case value, notes
 
     /// Never told to the AI, never shown in Petal without Touch ID or the Mac's password, and searched for in
-    /// everything Petal AI reads (UIMap.SecretIndex), except notes.
+    /// everything Petal AI reads (UIMap.SecretIndex); of notes, only what reads as a code (Vault.noteCodes).
     var isSecret: Bool { [.password, .number, .securityCode, .value, .notes].contains(self) }
 
     func label(_ kind: VaultKind) -> String {
@@ -362,7 +362,7 @@ enum Vault {
 
     /// Every way an item's secrets may show up in text, for UIMap.SecretIndex: a password and key whole, a card
     /// number as typed, as digits and in fours (with spaces and dashes), and the security code. Not notes (they're the
-    /// person's words, too common to hide).
+    /// person's words, too common to hide): only what reads as a code in them, whole (`noteCodes`).
     static func secrets(_ item: VaultItem) -> [String] {
         var out: [String] = []
         for field in [VaultField.password, .value, .securityCode] where !item[field].isEmpty { out.append(item[field]) }
@@ -373,6 +373,94 @@ enum Vault {
         }
         var seen = Set<String>()
         return out.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    /// How many of a note's codes are looked for: a note is a few lines, not a file.
+    static let noteCodeCap = 100
+
+    /// What in an item's notes reads as a code (a recovery code, a key kept there): each run of letters, digits,
+    /// dashes and underscores that is 8 characters or more and goes from letters to digits and back at least three
+    /// times ("a1b2c-3d4e5", "XK7P-9QRT"), as a random code does. UIMap.SecretIndex looks for each whole, as a word of
+    /// its own (its `words`), so the person's ordinary words, dates and numbers are told as they are; so are names
+    /// with a number in them ("Office365", "web01-staging", "12-Nov-2026"), what's part of an email address or a host
+    /// name, the item's own username, and anything in a contact's or an address's notes.
+    static func noteCodes(_ item: VaultItem) -> [String] {
+        guard item.kind != .contact, item.kind != .address else { return [] }
+        let own = Set([item[.username], item[.email], item.title].map { $0.lowercased() })
+        var out: [String] = [], seen = Set<String>()
+        for token in item[.notes].split(whereSeparator: \.isWhitespace) where !token.contains("@") && !hostLike(token) {
+            for run in token.split(whereSeparator: { !($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }) {
+                let code = run.trimmingCharacters(in: CharacterSet(charactersIn: "-_"))
+                guard code.count >= UIMap.SecretIndex.piece, turns(code) >= 3, !own.contains(code.lowercased()),
+                      seen.insert(code).inserted else { continue }
+                out.append(code)
+                if out.count == noteCodeCap { return out }
+            }
+        }
+        return out
+    }
+
+    /// What in an item's notes reads as a code of digits only (a recovery code, "1234 5678"): in a line or sentence of
+    /// its notes that names codes ("code", "backup", "recovery", Turkish's "kod", "yedek", "kurtarma") and no phone,
+    /// each number of 6 to 19 digits, whole or in groups of three or more joined by a space or a dash. They're
+    /// searched for as secrets are (UIMap.SecretIndex): their digits, as written, and their groups joined each way.
+    static func noteNumbers(_ item: VaultItem) -> [String] {
+        guard item.kind != .contact, item.kind != .address else { return [] }
+        var out: [String] = [], seen = Set<String>()
+        let clauses = item[.notes].components(separatedBy: CharacterSet(charactersIn: "\n;")).flatMap { $0.components(separatedBy: ". ") }
+        for clause in clauses {
+            let words = UIMap.words(UIMap.fold(clause))
+            guard words.contains(where: { word in codeLabels.contains { word.hasPrefix($0) } }),
+                  !words.contains(where: { word in phoneLabels.contains { word.hasPrefix($0) } }) else { continue }
+            let text = clause as NSString
+            for match in numberPattern.matches(in: clause, range: NSRange(location: 0, length: text.length)) {
+                let written = text.substring(with: match.range)
+                let all = written.split(whereSeparator: { $0 == " " || $0 == "-" }).map(String.init)
+                // Maybe several codes written in a row ("1234 5678 8765 4321"): the whole, and each group of six digits
+                // or more, else each two groups.
+                let parts = all.count < 3 ? [] : all.allSatisfy({ $0.count >= 6 }) ? all.map { [$0] }
+                    : stride(from: 0, to: all.count, by: 2).map { Array(all[$0..<min($0 + 2, all.count)]) }
+                let codes = [all] + parts
+                for groups in codes {
+                    let digits = groups.joined()
+                    guard (6...19).contains(digits.count) else { continue }
+                    for form in [digits, groups.joined(separator: " "), groups.joined(separator: "-")] where seen.insert(form).inserted {
+                        out.append(form)
+                    }
+                    if out.count >= noteCodeCap { return out }
+                }
+            }
+        }
+        return out
+    }
+
+    /// Words that say a part of a note holds codes, and words that say it's a phone number.
+    static let codeLabels = ["code", "backup", "recovery", "kod", "yedek", "kurtarma"]
+    static let phoneLabels = ["phone", "tel", "mobile", "cep", "fax"]
+    /// A number of three digits or more, or groups of them joined by one space or dash, not run into other digits.
+    static let numberPattern = try! NSRegularExpression(pattern: "(?<![0-9])[0-9]{3,}(?:[ -][0-9]{3,})*(?![0-9])")
+
+    /// How many times `text` goes from a letter to a digit or back, the dashes and underscores between aside.
+    static func turns(_ text: String) -> Int {
+        var count = 0
+        var last: Bool?
+        for character in text where character.isLetter || character.isNumber {
+            let digit = character.isNumber
+            if let last, last != digit { count += 1 }
+            last = digit
+        }
+        return count
+    }
+
+    /// A word with a dot between two letters or digits: a host or file name ("web01.example.com", "v2.3.1").
+    static func hostLike(_ token: Substring) -> Bool {
+        let characters = Array(token)
+        guard characters.count > 2 else { return false }
+        for index in 1..<(characters.count - 1) where characters[index] == "." {
+            let before = characters[index - 1], after = characters[index + 1]
+            if (before.isLetter || before.isNumber) && (after.isLetter || after.isNumber) { return true }
+        }
+        return false
     }
 
     static func groups(_ text: String, by size: Int, _ separator: String) -> String {
@@ -395,7 +483,7 @@ enum Vault {
         return titled.count == 1 ? titled[0] : nil
     }
 
-    /// The logins saved for a page's host, or for an app.
+    /// The logins saved for a page (its host; for a page of this Mac, its host and port: `Place.site`), or for an app.
     static func logins(_ items: [VaultItem], host: String?, bundle: String?) -> [VaultItem] {
         items.filter { item in
             guard item.kind == .login else { return false }
@@ -527,6 +615,9 @@ enum Vault {
         /// The host shown to the person: the page's (or frame's). Only a web address (http or https) names a site:
         /// an app's or browser's own page (t3code://, chrome://, about:, file:) never does.
         var host: String? { frameURL.flatMap(Vault.siteHost) }
+        /// What a login is saved for and matched by: the host, and for a page of this Mac its port too
+        /// ("localhost:3000"), since each port there is another program's page.
+        var site: String? { frameURL.flatMap { Vault.siteHost($0) == nil ? nil : VaultSite.site($0, page: true) } }
         /// Where a purchase is made: the tab's whole page (a card form often sits in a payment company's frame).
         var shop: String? { (topURL ?? frameURL).flatMap(Vault.siteHost) }
         var where_: String { web ? host ?? appName : appName }
@@ -687,10 +778,14 @@ enum Vault {
         if item.sites.isEmpty && item.apps.isEmpty { return "This login isn't saved for any site yet, so Petal can't tell it's the right place." }
         if place.web {
             if let problem = pageProblem(place) { return problem }
-            let host = place.host ?? ""
-            if item.sites.contains(where: { VaultSite.matches(host: host, saved: $0) }) { return nil }
+            let host = place.host ?? "", page = place.site ?? host
+            if item.sites.contains(where: { VaultSite.matches(host: page, saved: $0) }) { return nil }
             let saved = item.sites.isEmpty ? "an app" : item.sites.joined(separator: ", ")
-            return "This login is saved for \(saved). This page is \(host): if it only looks like \(item.sites.first.map(VaultSite.registrable) ?? item.title), it may be trying to take your password."
+            // The same host on another port of this Mac: another program may be serving it.
+            if page != host, item.sites.contains(where: { VaultSite.host($0) == host }) {
+                return "This login is saved for \(saved). This page is \(page): another port of this Mac, so it may be another program's page."
+            }
+            return "This login is saved for \(saved). This page is \(page): if it only looks like \(item.sites.first.map(VaultSite.registrable) ?? item.title), it may be trying to take your password."
         }
         guard item.apps.contains(place.bundle) else {
             return "This login is saved for \((item.sites + item.apps).joined(separator: ", ")), not \(place.appName)."
@@ -1027,7 +1122,8 @@ enum Vault {
     static func bind(_ item: inout VaultItem, to place: Place) {
         if place.web {
             // A page isolated from its site isn't the site's: nothing is saved for the site from it.
-            if !place.isolated, let host = place.host { item.sites = [host] }
+            // A page of this Mac with its port: the login is that program's, not every local page's.
+            if !place.isolated, let site = place.site { item.sites = [site] }
         } else if !place.unverified, place.signed, let team = place.team {
             item.apps = [place.bundle]
             item.appSigners = [place.bundle: team]
@@ -1392,7 +1488,7 @@ enum Vault {
         var hosts: [String] = []
         var unread = false
         func add(_ text: String) {
-            if let host = VaultSite.host(text) { if !hosts.contains(host) { hosts.append(host) } } else { unread = true }
+            if let host = VaultSite.site(text) { if !hosts.contains(host) { hosts.append(host) } } else { unread = true }
         }
         func read(_ value: Any?) {
             switch value {
@@ -1645,6 +1741,26 @@ enum Vault {
         var older = 0
         /// Saved logins the import added sites or apps to (the same login, also kept for somewhere else).
         var widened = 0
+        /// Conflicts that would only add sites or apps to a saved login or key, from an entry that came without its
+        /// password or key: the saved item's id → what it would add, to say so by name.
+        var places: [String: [String]] = [:]
+    }
+
+    /// The secret a kind's sites and apps let Petal fill by itself: a login's password, a key (an unsorted secret
+    /// too, for once it's sorted). Other kinds' sites decide nothing.
+    static func placedSecret(_ kind: VaultKind) -> VaultField? {
+        switch kind {
+        case .login: .password
+        case .apiKey, .unsorted: .value
+        default: nil
+        }
+    }
+
+    /// A conflict as an import's summary names it: its title, and the sites or apps it would add when that's all it
+    /// does ("GitHub (adds gist.github.com)").
+    static func conflictName(_ item: VaultItem, adds: [String]?) -> String {
+        guard let adds, !adds.isEmpty else { return item.title }
+        return "\(item.title) (adds \(adds.prefix(3).joined(separator: ", "))\(adds.count > 3 ? ", …" : ""))"
     }
 
     /// An import against what's saved. Something already there changes nothing unless it differs. Matched by its id
@@ -1652,7 +1768,9 @@ enum Vault {
     /// title, sites and apps), restored as it was backed up. Matched by what it holds (the same site and username,
     /// card number, …): a login takes only the import's password, the sites and apps the saved one doesn't have yet
     /// (and its notes where none are saved, or Petal's newer ones; another app's other title or notes are offered as a
-    /// conflict, never dropped); anything else takes the import's fields. Either way a secret (a password, security
+    /// conflict, never dropped); anything else takes the import's fields. Sites and apps come only with the secret
+    /// they were saved with: an entry without a password (or key) never adds a place to a saved login (or key) by
+    /// itself, and is never the newer one; what it would add is offered as a conflict (`places`). Either way a secret (a password, security
     /// code or key) is replaced only when Petal's own export says it's newer: from any other export, a different secret is a
     /// conflict, kept as it is and said. Petal's export older than what's saved changes nothing. An entry repeated
     /// with the same id (Petal's export) lands on one item, the later winning.
@@ -1711,23 +1829,41 @@ enum Vault {
                 var detailed: VaultItem?
                 // A login the import only adds sites or apps to: said as such, not as something newer.
                 var onlyPlaces = false
+                // The saved item with the sites and apps of an entry that came without its secret: where the saved
+                // password or key would fill by itself is the person's to say, so it's offered, never saved here.
+                var placed: VaultItem?
                 if byID {
                     // Petal's own backup of this very item: all of it, as backed up.
                     next = item
                 } else if saved.kind == .login {
-                    if !item[.password].isEmpty { next[.password] = item[.password] }
-                    let newer = petal && item.updated > saved.updated
+                    // An entry with no password says nothing of where the saved one goes, and is never the newer one.
+                    let brings = !item[.password].isEmpty
+                    if brings { next[.password] = item[.password] }
+                    let newer = petal && brings && item.updated > saved.updated
                     if next[.notes].isEmpty || (newer && !item[.notes].isEmpty) { next[.notes] = item[.notes] }
                     let before = next
-                    next = withPlaces(next, from: item)
+                    let wider = withPlaces(next, from: item)
+                    if brings { next = wider } else if !identical(wider, next) { placed = wider }
                     onlyPlaces = identical(before, saved) && !identical(next, saved)
-                    if !petal { detailed = withDetails(next, from: item) }
+                    if !petal {
+                        // Its other title or notes go with the same offer.
+                        if let offered = placed { placed = withDetails(offered, from: item) ?? offered } else { detailed = withDetails(next, from: item) }
+                    }
                 } else {
                     next.fields = saved.fields.merging(item.fields) { _, new in new }
-                    next.sites = saved.sites + item.sites.filter { !saved.sites.contains($0) }
                     next.title = item.title.isEmpty ? saved.title : item.title
+                    let more = item.sites.filter { !saved.sites.contains($0) }
+                    // A key's sites are where it fills by itself: they come only with the key.
+                    if let secret = placedSecret(saved.kind), item[secret].isEmpty {
+                        if !more.isEmpty {
+                            placed = next
+                            placed?.sites = saved.sites + more
+                        }
+                    } else {
+                        next.sites = saved.sites + more
+                    }
                 }
-                guard !identical(next, saved) || detailed != nil else { result.same += 1; continue }
+                guard !identical(next, saved) || detailed != nil || placed != nil else { result.same += 1; continue }
                 let replaces = replacesSecret(saved, with: next)
                 if petal {
                     // Petal's own dates say which is newer.
@@ -1751,7 +1887,7 @@ enum Vault {
                 // A later entry with the same id that's taken wins over its earlier conflict.
                 result.conflicts.removeAll { $0.id == next.id }
                 if !identical(next, saved) {
-                    if saved.kind == .login, !byID, !identical(withPlaces(saved, from: item), saved) { result.widened += 1 }
+                    if saved.kind == .login, !byID, placed == nil, !identical(withPlaces(saved, from: item), saved) { result.widened += 1 }
                     current[index] = next
                     if !onlyPlaces, !result.updated.contains(next.title) { result.updated.append(next.title) }
                     if let at = touched[next.id] { result.save[at] = next } else { touched[next.id] = result.save.count; result.save.append(next) }
@@ -1760,6 +1896,12 @@ enum Vault {
                     // The secrets agree; the title or notes don't: yours stay, the import's are offered.
                     detailed.updated = date
                     result.conflicts.append(detailed)
+                }
+                if var placed {
+                    // It came without the secret: where the saved one goes stays as it is, the entry's places offered.
+                    placed.updated = date
+                    result.conflicts.append(placed)
+                    result.places[placed.id] = placed.sites.filter { !saved.sites.contains($0) } + placed.apps.filter { !saved.apps.contains($0) }
                 }
             } else {
                 if item.updated == Date(timeIntervalSince1970: 0) { item.updated = date }
@@ -1887,27 +2029,56 @@ enum VaultSite {
     /// Starts reading the list now, so it's there by the time a field is filled.
     static func preload() { _ = suffixes() }
 
-    /// The host of an address, or of a bare host ("github.com"), lower case, without a port, brackets or a trailing dot.
-    static func host(_ text: String) -> String? {
+    /// An address, or a bare host ("github.com", "localhost:3000", "::1"), in parts; `bare`: it had no scheme.
+    private static func parts(_ text: String) -> (parts: URLComponents, bare: Bool)? {
         var trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, !trimmed.contains(" ") else { return nil }
-        if !trimmed.contains("://") {
+        let bare = !trimmed.contains("://")
+        if bare {
             // A bare IPv6 address ("::1") goes in brackets, as in an address.
             if trimmed.filter({ $0 == ":" }).count > 1, !trimmed.hasPrefix("[") { trimmed = "[" + trimmed + "]" }
             trimmed = "https://" + trimmed
         }
-        guard let parts = URLComponents(string: trimmed), var host = parts.host?.lowercased(), !host.isEmpty else { return nil }
+        return URLComponents(string: trimmed).map { ($0, bare) }
+    }
+
+    /// The host of an address, or of a bare host ("github.com"), lower case, without a port, brackets or a trailing dot.
+    static func host(_ text: String) -> String? {
+        guard let parts = parts(text)?.parts, var host = parts.host?.lowercased(), !host.isEmpty else { return nil }
         if host.hasPrefix("["), host.hasSuffix("]") { host = String(host.dropFirst().dropLast()) }
         while host.hasSuffix(".") { host.removeLast() }
         guard host.contains(".") || host.contains(":") || host == "localhost" else { return nil }
         return host
     }
 
+    /// The port an address names: its own, else its scheme's (80 for http, 443 for https); for a bare host, the one
+    /// written after it ("localhost:3000"), or nil when there's none.
+    static func port(_ text: String) -> Int? {
+        guard let (parts, bare) = parts(text) else { return nil }
+        if let port = parts.port { return port }
+        if bare { return nil }
+        switch parts.scheme?.lowercased() {
+        case "http": return 80
+        case "https": return 443
+        default: return nil
+        }
+    }
+
+    /// What something is saved for: an address's host, and for a page of this Mac its port too ("localhost:3000",
+    /// "[::1]:8080"), since each port there is another program's. For a page Petal reads (`page`), the port it's on,
+    /// its scheme's when none is written; for an address in a file or typed in Settings, only a port it writes, so
+    /// "https://localhost/" and a bare "localhost" stay the person's word for every port.
+    static func site(_ text: String, page: Bool = false) -> String? {
+        guard let host = host(text) else { return nil }
+        guard isLocal(host), let port = page ? port(text) : parts(text)?.parts.port else { return host }
+        return (host.contains(":") ? "[\(host)]" : host) + ":\(port)"
+    }
+
     /// Every site in an export's URL column, which may list several ("https://a.example, https://b.example"):
-    /// their hosts, in order, each once.
+    /// their hosts (a page of this Mac with its port: `site`), in order, each once.
     static func hosts(_ list: String) -> [String] {
         var out: [String] = []
-        for host in list.split(separator: ",").compactMap({ host(String($0)) }) where !out.contains(host) { out.append(host) }
+        for host in list.split(separator: ",").compactMap({ site(String($0)) }) where !out.contains(host) { out.append(host) }
         return out
     }
 
@@ -1920,9 +2091,10 @@ enum VaultSite {
         ["localhost", "127.0.0.1", "::1"].contains(host) || host.hasSuffix(".localhost")
     }
 
-    /// A host without a leading "www.", for telling two logins apart.
+    /// A host without a leading "www.", for telling two logins apart (a page of this Mac with its port: two ports
+    /// are two programs' logins).
     static func plain(_ text: String) -> String {
-        let h = host(text) ?? text.lowercased()
+        let h = site(text) ?? text.lowercased()
         return h.hasPrefix("www.") ? String(h.dropFirst(4)) : h
     }
 
@@ -1939,13 +2111,18 @@ enum VaultSite {
         return suffixes()?.registrable(host) ?? host
     }
 
-    /// A page on `host` belongs to something saved for `saved`: the same host, or under the saved site's registrable
-    /// name ("accounts.github.com" for "github.com"). An IP address, this Mac, or a public suffix saved as a site
-    /// ("github.io") only matches itself. Until the list is read, or for a name it doesn't cover: the saved host and
-    /// what's under it only.
+    /// A page on `host` (a host, or the page's whole address) belongs to something saved for `saved`: the same host,
+    /// or under the saved site's registrable name ("accounts.github.com" for "github.com"). An IP address, this Mac,
+    /// or a public suffix saved as a site ("github.io") only matches itself. On this Mac each port is another
+    /// program's page: something saved with its port ("localhost:3000") matches that port only, so the page's
+    /// address must say which it is (a bare "localhost" isn't it); saved without one, any port. Until the list is
+    /// read, or for a name it doesn't cover: the saved host and what's under it only.
     static func matches(host: String, saved: String) -> Bool {
         guard let page = self.host(host), let site = self.host(saved) else { return false }
-        if page == site { return true }
+        if page == site {
+            if isLocal(site), let wanted = port(saved) { return port(host) == wanted }
+            return true
+        }
         if isAddress(page) || isAddress(site) || isLocal(site) || isLocal(page) { return false }
         guard let list = suffixes(), list.suffix(of: site) != nil, list.suffix(of: page) != nil else { return page.hasSuffix("." + site) }
         guard let root = list.registrable(site) else { return false }

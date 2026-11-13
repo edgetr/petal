@@ -127,6 +127,13 @@ enum TileLayout {
         }
     }
 
+    /// Whether a tiled window that moved or changed size was the person's drag: the button is down now, or was pressed
+    /// or let go a moment ago (the window's own event can come after a drag ended, a long one too). Otherwise its app moved it (it resized
+    /// itself, say), and it only goes back to its place: where the pointer happens to rest swaps nothing.
+    static func dragged(buttonDown: Bool, sinceMouseDown: Double, sinceMouseUp: Double = .infinity) -> Bool {
+        buttonDown || sinceMouseDown < 1.5 || sinceMouseUp < 1.5
+    }
+
     enum Direction: String, CaseIterable { case left, right, up, down }
 
     /// The window next to `id` in a direction: among those whose span overlaps it across that direction, the

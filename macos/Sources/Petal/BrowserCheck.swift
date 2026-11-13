@@ -52,6 +52,8 @@ final class CheckServer: @unchecked Sendable {
     private var posted: [(path: String, body: String)] = []
     private var hits: [String] = []
     var pages: @Sendable (_ path: String, _ port: Int) -> (type: String, body: String, headers: [String])? = { _, _ in nil }
+    /// Called with each path asked for, before it's answered (on the thread that serves it).
+    var onHit: (@Sendable (_ path: String) -> Void)?
 
     func start() -> Bool {
         socket = Darwin.socket(AF_INET, SOCK_STREAM, 0)
@@ -119,6 +121,7 @@ final class CheckServer: @unchecked Sendable {
             hits.append(plain)
             if method == "POST" { posted.append((plain, String(decoding: data, as: UTF8.self))) }
         }
+        onHit?(plain)
         var status = "200 OK", type = "text/html; charset=utf-8", body = "", extra: [String] = []
         if let page = pages(path, port) {
             type = page.type
@@ -331,6 +334,8 @@ private final class BrowserChecker {
     func alive(_ pid: pid_t) -> Bool { kill(pid, 0) == 0 }
 
     var current: RunBrowser? { app.runBrowsers.browser(for: caller) }
+    /// No press is still being watched for what its page copies (each watch ends by itself, in seconds).
+    func settled() -> Bool { wait(10) { self.app.runBrowsers.copyWatches == 0 } }
     func base(_ host: String = "127.0.0.1") -> String { "http://\(host):\(server.port)" }
 
     // MARK: The pages
@@ -428,6 +433,28 @@ private final class BrowserChecker {
                 var body = "<h1>Many links</h1>"
                 for index in 1...320 { body += "<p><a href=\"/two?n=\(index)\">Link number \(index)</a></p>" }
                 return html("Big", body)
+            case "/clip":
+                // A page that goes for the clipboard by itself, when it loads and on a press, and says what came of
+                // it. The headless shell keeps a clipboard of its own, so the copy a real browser would let a page
+                // make on a press (its older copy command) is stood in for: the page tells the check's server, which
+                // puts it on the check's clipboard.
+                return html("Clip", """
+                <h1>Clip</h1>
+                <p id="load">On load: waiting.</p><p id="press">On a press: nothing yet.</p><p id="state">Permission: unknown.</p>
+                <button onclick="tryWrite('press', 'On a press'); fetch('/copied-secret')">Copy the password</button>
+                <button onclick="fetch('/copied-words')">Copy the words</button>
+                <label for="k">Hot field</label><input id="k" onkeydown="fetch('/copied-secret')">
+                <script>
+                function tryWrite(id, words) {
+                    navigator.clipboard.writeText('written by the page').then(function () { document.getElementById(id).textContent = words + ': written.'; },
+                        function () { document.getElementById(id).textContent = words + ': refused.'; });
+                }
+                tryWrite('load', 'On load');
+                navigator.permissions.query({ name: 'clipboard-write' }).then(function (status) { document.getElementById('state').textContent = 'Permission: ' + status.state + '.'; });
+                </script>
+                """)
+            case "/copied-secret", "/copied-words":
+                return ("text/plain; charset=utf-8", "ok", [])
             case "/slow":
                 return html("Slow", "<h1>Slow</h1><p id=\"late\"></p><script>setTimeout(function(){ document.getElementById('late').textContent = 'It arrived.'; }, 700)</script>")
             default:
@@ -499,9 +526,15 @@ private final class BrowserChecker {
         // process of its own (as the browsers people use do), and no maker's signature to check, so the check says
         // it's verified (only here).
         app.runBrowsers.finder = { _ in
-            RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
-                            extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true })
+            .success(RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
+                                     extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true }))
         }
+        // A clipboard of the check's own, and its own word that nobody is typing: the person's is never read or
+        // changed, and what they do at the Mac meanwhile changes no step.
+        let clipboard = NSPasteboard.withUniqueName()
+        defer { clipboard.releaseGlobally() }
+        app.runBrowsers.clipboard = clipboard
+        app.runBrowsers.copyHands = { false }
         let profiles = URL(fileURLWithPath: RunBrowsers.root)
 
         var pid: pid_t = 0
@@ -743,14 +776,28 @@ private final class BrowserChecker {
             newPassword = current?.checkEvaluate("document.getElementById('np').value") ?? ""
             expect(newPassword.count >= 20 && current?.checkEvaluate("document.getElementById('nc').value") == newPassword, "both fields hold the same strong password")
             let saved = VaultStore.itemsForCheck().first { $0.title == "Check signup" }
-            expect(VaultStore.itemsForCheck().count == before + 1 && saved?[.password] == newPassword && saved?.sites == ["127.0.0.1"], "saved for the site the browser said the page is (\(saved?.sites ?? []))")
+            expect(VaultStore.itemsForCheck().count == before + 1 && saved?[.password] == newPassword && saved?.sites == ["127.0.0.1:\(server.port)"], "saved for the site the browser said the page is, with its port on this Mac (\(saved?.sites ?? []))")
             expect(!newPassword.isEmpty && !(answers.last ?? "").contains(newPassword), "and never told")
+            // Another port of this Mac is another program's page: the login made on this one asks there.
+            let elsewhere = CheckServer()
+            elsewhere.pages = server.pages
+            defer { elsewhere.stop() }
+            if elsewhere.start() {
+                _ = browser("open", ["address": "http://127.0.0.1:\(elsewhere.port)/login"])
+                read = page(browser("read"))
+                let asked = cards.count
+                let ported = call("petal_vault", ["action": "fill", "item": saved?.id ?? "", "fields": ["password": id("password field \"Password\"", in: read)]], answer: [.no])
+                expect(ported["declined"] != nil && cards.count == asked + 1 && cards.last?.warn == true, "on another port of this Mac the person is asked, and Don't fills nothing (\(ported))")
+                expect(current?.checkEvaluate("document.getElementById('pass').value") == "", "the field there stayed empty")
+            } else {
+                expect(false, "a second server on another port of this Mac")
+            }
             // On another site's page, where a login would only fill after asking: no password is made at all.
             _ = browser("open", ["address": base("localhost") + "/signup"])
             read = page(browser("read"))
             // (localhost is this Mac's own too, so a new login may be made there: saved for localhost, not 127.0.0.1.)
             let other = call("petal_vault", ["action": "new_login", "password_id": id("password field \"New password\"", in: read), "title": "Check other"])
-            expect(VaultStore.itemsForCheck().first { $0.title == "Check other" }?.sites == ["localhost"], "a login made on another site is that site's (\(other))")
+            expect(VaultStore.itemsForCheck().first { $0.title == "Check other" }?.sites == ["localhost:\(server.port)"], "a login made on another site is that site's (\(other))")
             // What the person types into Petal's card goes into the page, and is hidden from then on.
             _ = browser("open", ["address": base("localhost") + "/login"])
             read = page(browser("read"))
@@ -779,6 +826,34 @@ private final class BrowserChecker {
             expect(error(refused).contains("didn't let") && current?.checkEvaluate("document.getElementById('pass').value") == "", "Don't: nothing filled (\(refused))")
             let allowed = call("petal_vault", ["action": "fill", "item": loginID, "fields": ["username": user, "password": pass]], answer: [.once], asker: agent)
             expect((allowed["filled"] as? [String])?.count == 2, "Allow once: filled, by the vault's own rules for the page (\(allowed))")
+            // Full access and an Always cover the person's own Claude Code and Codex; any other program is asked every
+            // time. The real Assist.ask, with nothing behind its answer.
+            app.config.set("claudeAccess", "full")
+            app.config.set("aiAllowed", ["trash"])
+            var said: [String: Bool] = [:]
+            app.assist.ask("trash", "Move “keep.txt” to the Trash", wants: "move “keep.txt” to the Trash", owner: caller) { said["agent always"] = $0 }
+            app.assist.ask("quit", "Quit Mail", wants: "quit Mail", owner: caller) { said["agent full"] = $0 }
+            expect(said["agent always"] == true && said["agent full"] == true && app.assist.pending == nil,
+                   "Codex in T3 Code (signed by its maker) goes by an Always and by Full access, as before (\(said))")
+            // The same name asking, now as a program Petal can't verify.
+            let program = AgentAccess.Caller(agent: .unknown, host: nil, project: root.appending(path: "project").path, program: "python3", peerIsPetal: false, pid: 4242)
+            _ = call("petal_memories", [:], asker: program)
+            app.assist.ask("trash", "Move “keep.txt” to the Trash", wants: "move “keep.txt” to the Trash", owner: caller) { said["always"] = $0 }
+            var shown = app.assist.pending
+            expect(said["always"] == nil && shown?.title == "An unknown program (python3) wants to move “keep.txt” to the Trash" && shown?.every == true && shown?.mark == .unknown,
+                   "an Always doesn't cover a program Petal can't verify: asked, by its name, with no Always (\(shown?.title ?? "no card"))")
+            app.assist.choose(.no, for: shown?.id)
+            expect(said["always"] == false, "Don't is Don't")
+            app.assist.ask("quit", "Quit Mail", wants: "quit Mail", owner: caller) { said["full"] = $0 }
+            shown = app.assist.pending
+            expect(said["full"] == nil && shown?.title == "An unknown program (python3) wants to quit Mail" && shown?.every == true, "nor does Full access (\(shown?.title ?? "no card"))")
+            app.assist.choose(.always, for: shown?.id)
+            expect(said["full"] == true && app.config.strings("aiAllowed") == ["trash"], "and nothing it's allowed is kept for anyone else (\(app.config.strings("aiAllowed")))")
+            app.assist.ask("quit", "Quit Mail", wants: "quit Mail", owner: app.claude.current.id.uuidString) { said["own"] = $0 }
+            app.assist.ask("trash", "Move “keep.txt” to the Trash", wants: "move “keep.txt” to the Trash", owner: nil) { said["routine"] = $0 }
+            expect(said["own"] == true && said["routine"] == true && app.assist.pending == nil, "Petal's own chat and a routine's own run aren't asked (\(said))")
+            app.config.set("claudeAccess", "auto")
+            app.config.set("aiAllowed", [String]())
             // The vault unreadable (a locked Keychain): nothing of a page is told, and nothing is done in it.
             VaultStore.standUnreadable = true
             VaultIndex.changed()
@@ -792,7 +867,7 @@ private final class BrowserChecker {
             VaultStore.standUnreadable = false
             VaultIndex.changed()
             expect(wait(5) { !VaultIndex.current().unreadable } && error(browser("read")).isEmpty, "readable again, it reads again")
-            return "Codex in T3 Code asked on its own card, Don't and Allow once each did as said; unreadable, the page stayed untold and untouched"
+            return "Codex in T3 Code asked on its own card, Don't and Allow once each did as said; Full access and an Always answered for it and not for a program Petal can't verify; unreadable, the page stayed untold and untouched"
         }
 
         let agent = AgentAccess.Caller(agent: .codex, host: "T3 Code", project: root.appending(path: "project").path)
@@ -911,6 +986,63 @@ private final class BrowserChecker {
             return "4000 long headings told in \(text.count) characters, the rest said to be left out"
         }
 
+        step("the clipboard: no page writes it by itself, and a copied secret is cleared") {
+            // What a page copies on a press, stood in for by the check's server, onto the check's own clipboard.
+            nonisolated(unsafe) let board = clipboard
+            let secret = password
+            server.onHit = { path in
+                guard path == "/copied-secret" || path == "/copied-words" else { return }
+                board.clearContents()
+                board.setString(path == "/copied-secret" ? secret : "only words", forType: .string)
+            }
+            defer { server.onHit = nil }
+            expect(settled(), "no press from before is still watched")
+            for host in ["127.0.0.1", "localhost"] {
+                _ = browser("open", ["address": base(host) + "/clip"])
+                let waited = browser("wait", ["text": "Permission: denied.", "seconds": 5])
+                let read = page(browser("read"))
+                expect((waited["done"] as? String) == "The page shows that now." && read.contains("On load: refused."),
+                       "on \(host) a page is refused the clipboard, whatever it asks (\(read.components(separatedBy: "\n").filter { $0.contains("On load") || $0.contains("Permission") }))")
+            }
+            var read = page(browser("read"))
+            var count = clipboard.changeCount
+            let pressed = browser("click", ["id": id("button \"Copy the password\"", in: read)])
+            expect(error(pressed).isEmpty, "it pressed (\(pressed))")
+            expect(wait(10) { clipboard.changeCount == count + 2 } && clipboard.string(forType: .string) == nil,
+                   "a saved password a page copied on a press is cleared (the clipboard moved \(clipboard.changeCount - count), holds \(clipboard.string(forType: .string) == nil ? "nothing" : "something"))")
+            expect(settled(), "the watch ended")
+            let told = browser("read")
+            read = page(told)
+            // The press's own answer when the copy came that soon, else the next one.
+            let said = [pressed, told].filter { ($0["happened"] as? [String])?.contains(RunBrowserRules.copyCleared) == true }.count
+            expect(said == 1, "and an answer says so, once (\(pressed["happened"] ?? "nothing"); \(told["happened"] ?? "nothing"))")
+            expect(read.contains("On a press: refused."), "its own write on that press was refused too")
+            expect(app.assist.history.map(\.text).contains { $0.contains("Cleared the clipboard after a page copied to it") }, "and so does What Petal AI did")
+            // A key is a press too.
+            count = clipboard.changeCount
+            let keyed = browser("key", ["key": "down", "id": id("field \"Hot field\"", in: read)])
+            expect(error(keyed).isEmpty && wait(10) { clipboard.changeCount == count + 2 } && clipboard.string(forType: .string) == nil,
+                   "one copied on a key is cleared (\(error(keyed)); the clipboard moved \(clipboard.changeCount - count))")
+            expect(settled(), "the watch ended")
+            // Words that are nobody's secret go too: a page never changes the person's clipboard.
+            read = page(browser("read"))
+            count = clipboard.changeCount
+            _ = browser("click", ["id": id("button \"Copy the words\"", in: read)])
+            expect(wait(10) { clipboard.changeCount == count + 2 } && settled() && clipboard.string(forType: .string) == nil,
+                   "a copy with no secret in it is cleared too (\(clipboard.string(forType: .string) ?? "nothing"))")
+            // The person typing or clicking meanwhile: a copy may be theirs, and is never cleared.
+            app.runBrowsers.copyHands = { true }
+            defer { app.runBrowsers.copyHands = { false } }
+            read = page(browser("read"))
+            count = clipboard.changeCount
+            _ = browser("click", ["id": id("button \"Copy the password\"", in: read)])
+            expect(wait(10) { clipboard.changeCount == count + 1 } && settled() && clipboard.string(forType: .string) == password && clipboard.changeCount == count + 1,
+                   "with the person at the keyboard nothing is cleared")
+            expect((browser("read")["happened"] as? [String])?.contains(RunBrowserRules.copyCleared) != true, "and nothing is said")
+            clipboard.clearContents()
+            return "two sites refused the clipboard on load and on a press; a password copied on a press and on a key was cleared and said, and so were plain words; a copy while the person types was left"
+        }
+
         step("no secret in any answer") {
             let all = answers.joined(separator: "\n")
             for (name, secret) in [("the password", password), ("the key", key), ("the card number", cardNumber), ("the page's own password", "letmein-shown-by-page"),
@@ -965,23 +1097,29 @@ private final class BrowserChecker {
             expect(error(off) == RunBrowserRules.off, "and with them off the tool says why (\(error(off)))")
             app.config.set("runDisplays", true)
             // No browser installed: said plainly.
-            app.runBrowsers.finder = { _ in nil }
+            app.runBrowsers.finder = { _ in .failure(.init(RunBrowserRules.none)) }
             let none = browser("open", ["address": base() + "/"], answer: [.once], task: "fourth run")
             expect(error(none) == RunBrowserRules.none, "with no browser installed it says so (\(error(none)))")
             app.displays.ended(caller)
-            return "the run's end and the switch each ended theirs (pids \(pid), \(secondPID)); no profile left; off and no browser say why"
+            // Only the browser the person's links open in: the run gets none, and hears why.
+            let theirs = RunBrowserRules.theirs("Google Chrome", named: false)
+            app.runBrowsers.finder = { _ in .failure(.init(theirs)) }
+            let only = browser("open", ["address": base() + "/"], answer: [.once], task: "fifth run")
+            expect(error(only) == theirs && current == nil && runProcesses().isEmpty, "with only the person's link browser installed it starts none and says so (\(error(only)))")
+            app.displays.ended(caller)
+            return "the run's end and the switch each ended theirs (pids \(pid), \(secondPID)); no profile left; off, no browser and only the person's own say why"
         }
 
         // A browser that starts and never answers (a script that only sleeps), to hold a launch open.
         let slow = root.appending(path: "slow-browser").path
         try? Data("#!/bin/sh\nsleep 40\n".utf8).write(to: URL(fileURLWithPath: slow))
         try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slow)
-        let slowSpec: @Sendable (String) -> RunBrowser.Spec? = { _ in
-            RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: slow, headless: true, verify: { _ in true })
+        let slowSpec: @Sendable (String) -> Result<RunBrowser.Spec, RunBrowser.Problem> = { _ in
+            .success(RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: slow, headless: true, verify: { _ in true }))
         }
-        let realSpec: @Sendable (String) -> RunBrowser.Spec? = { _ in
-            RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
-                            extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true })
+        let realSpec: @Sendable (String) -> Result<RunBrowser.Spec, RunBrowser.Problem> = { _ in
+            .success(RunBrowser.Spec(bundle: "org.chromium.headless-shell", name: "Check browser", executable: shell, headless: true,
+                                     extra: ["--site-per-process", "--disable-gpu"], verify: { _ in true }))
         }
 
         step("a browser still starting is already a run's, and ends with its run") {
@@ -1146,8 +1284,11 @@ enum BrowserLiveCheck {
 
         // 1. What it needs.
         step(VirtualDisplay.available, "macOS has the classes Petal makes a display with", VirtualDisplay.available ? "" : "missing: " + VirtualDisplay.missing.joined(separator: ", "))
-        let spec = off(30) { RunBrowsers.find(setting: "") } ?? nil
-        step(spec != nil, "a browser Petal can start for a run is installed, signed by its maker", spec.map { "\($0.name), \($0.executable)" } ?? RunBrowserRules.none)
+        let found = off(30) { RunBrowsers.find(setting: "") } ?? .failure(.init(RunBrowserRules.none))
+        let spec = try? found.get()
+        var why = RunBrowserRules.none
+        if case .failure(let problem) = found { why = problem.words }
+        step(spec != nil, "a browser Petal can start for a run is installed, signed by its maker", spec.map { "\($0.name), \($0.executable)" } ?? why)
         let trusted = AXIsProcessTrusted()
         say("Accessibility: \(trusted ? "allowed" : "not allowed (the window in front can't be named; the rest still runs)")")
         let recording = CGPreflightScreenCaptureAccess()

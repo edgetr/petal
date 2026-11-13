@@ -425,7 +425,7 @@ struct LinkCardView: View {
         .padding(.vertical, 7).padding(.horizontal, 9)
         .background(.white.opacity(0.75), in: .rect(cornerRadius: Radius.control))
         .overlay { RoundedRectangle(cornerRadius: Radius.control).stroke(.black.opacity(0.12), lineWidth: 0.5) }
-        .onTapGesture { if let address = URL(string: url) { NSWorkspace.shared.open(address) } }
+        .onTapGesture { NoteTasks.openWeb(url) }
     }
 }
 

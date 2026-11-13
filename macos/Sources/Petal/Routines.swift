@@ -180,6 +180,8 @@ final class Routines {
         }
         let routine: String
         let source: URL
+        /// The folder the routine names for these files: where it moves them, or where their subfolders go.
+        var root: URL?
         var items: [Item] = []
         var total = 0
         var later = 0            // past the most one run handles
@@ -378,7 +380,7 @@ final class Routines {
     /// A watcher on every folder a file routine watches, and none on any other.
     private func watch() {
         var folders: [String: String] = [:]   // path → as written
-        for routine in list where routine.on && routine.trigger.on == "file" {
+        for routine in list where routine.on && routine.trigger.on == "file" && !Self.outOfBounds(routine) {
             if let url = Self.url(routine.trigger.folder) { folders[url.path] = routine.trigger.folder }
         }
         for (path, watch) in watches where folders[path] == nil {
@@ -475,7 +477,7 @@ final class Routines {
         let job = jobs.removeFirst()
         // Routines turned off meanwhile ("Run my routines", or this one): what's still queued is dropped.
         guard isOn else { jobs = []; return }
-        guard let routine = list.first(where: { $0.id == job.id }), routine.on, !routine.usesModes, !job.stop.isStopped else { return next() }
+        guard let routine = list.first(where: { $0.id == job.id }), routine.on, Self.skipped(routine) == nil, !job.stop.isStopped else { return next() }
         working = true
         execute(routine, file: job.file, stop: job.stop) { [weak self] _ in
             self?.working = false
@@ -609,35 +611,67 @@ final class Routines {
         let app = PetalApp.shared
         switch action.kind {
         case "open":
+            // Apps, web addresses and documents only (RoutineRules.opens): never a script, a program or another
+            // kind of address, whatever the routine names.
             var opened: [String] = []
             var urls: [URL] = []
+            var files: [URL] = []
             var launched: [String] = []
+            let outcome = Opened()
             for item in action.apps {
-                if item.contains("://"), let url = URL(string: item) {
+                switch RoutineRules.opens(item) {
+                case .web(let url):
                     urls.append(url)
                     opened.append(url.host ?? item)
-                } else if item.hasPrefix("/") || item.hasPrefix("~") {
-                    urls.append(URL(fileURLWithPath: (item as NSString).expandingTildeInPath))
-                    opened.append((item as NSString).lastPathComponent)
-                } else if !NSWorkspace.shared.personsApplications.contains(where: { $0.bundleIdentifier == item }) {
-                    app.docks.launch(item)   // Launch Services' own asynchronous open (and the dock's launch pulse)
-                    launched.append(item)
-                    opened.append(Apps.name(item))
+                case .file(let path):
+                    files.append(URL(fileURLWithPath: path))
+                case .app(let id):
+                    if !NSWorkspace.shared.personsApplications.contains(where: { $0.bundleIdentifier == id }) {
+                        app.docks.launch(id)   // Launch Services' own asynchronous open (and the dock's launch pulse)
+                        launched.append(id)
+                        opened.append(Apps.name(id))
+                    }
+                case .nothing:
+                    outcome.left.append(String(item.prefix(60)))
                 }
             }
-            let said = opened.isEmpty ? nil : "opened " + Apps.listed(opened)
-            guard !urls.isEmpty || !launched.isEmpty else { return done(said) }
+            let say = { () -> String? in
+                let names = opened + outcome.opened
+                var parts: [String] = names.isEmpty ? [] : ["opened " + Apps.listed(names)]
+                if !outcome.left.isEmpty { parts.append("left " + Apps.listed(outcome.left) + " unopened (routines open apps, sites and documents)") }
+                return parts.isEmpty ? nil : parts.joined(separator: ", ")
+            }
+            guard !urls.isEmpty || !files.isEmpty || !launched.isEmpty else { return done(say()) }
             // The next step waits until the apps are running (30 s at most) and the addresses and files are opened.
+            // A file is looked at as it really is first (its links followed), off the main thread.
             Assist.off({ !stop.isStopped }, {
                 for url in urls {
                     guard !stop.isStopped else { return }
                     NSWorkspace.shared.open(url)
                 }
+                for file in files {
+                    guard !stop.isStopped else { return }
+                    let (real, what) = NoteTasks.routine(file)
+                    switch what {
+                    case .open:
+                        NSWorkspace.shared.open(real)
+                        outcome.opened.append(real.lastPathComponent)
+                    case .launch:
+                        NSWorkspace.shared.openApplication(at: real, configuration: NSWorkspace.OpenConfiguration())
+                        outcome.opened.append(real.deletingPathExtension().lastPathComponent)
+                    case .folder:
+                        // A folder opens as a Finder window; nothing in it is opened.
+                        NSWorkspace.shared.open(real)
+                        outcome.opened.append(real.lastPathComponent)
+                    case .never:
+                        outcome.left.append(file.lastPathComponent)
+                    }
+                }
                 let end = Date().addingTimeInterval(30)
                 while Date() < end, !stop.isStopped, !launched.allSatisfy({ !NSRunningApplication.persons(withBundleIdentifier: $0).isEmpty }) {
                     Thread.sleep(forTimeInterval: 0.25)
                 }
-            }) { ran in done(ran || !launched.isEmpty ? said : nil) }
+            }) { ran in done(ran || !launched.isEmpty || !outcome.left.isEmpty ? say() : nil) }
         case "hide":
             let running = NSWorkspace.shared.personsApplications.filter { r in action.apps.contains { $0 == r.bundleIdentifier } && !r.isHidden }
             guard !running.isEmpty else { return done(nil) }
@@ -659,6 +693,12 @@ final class Routines {
         }
     }
 
+    /// What an open action's files came to, filled off the main thread and read back on it once that's done.
+    private final class Opened: @unchecked Sendable {
+        var opened: [String] = []
+        var left: [String] = []
+    }
+
     // MARK: Sorting files
 
     private var quick: ((String, String, @escaping ([String: Any]?) -> Void) -> Void)? {
@@ -673,23 +713,24 @@ final class Routines {
     /// the move, off the main thread. `done(move, folder, made, waitsForAI)`; no move when it stays.
     private func place(_ routine: Routine, _ action: Action, _ file: URL, done: @escaping (Move?, URL, Bool, Bool) -> Void) {
         let base = Self.url(routine.source(action)) ?? file.deletingLastPathComponent()
-        let finish = { (folder: URL?) in
+        // `root`: the folder the routine names; `folder` is it (nil), or a subfolder Petal files into under it.
+        let finish = { (folder: URL?, root: URL?) in
             guard let folder else { return done(nil, base, false, false) }
             Self.io.async {
-                let result = Self.move(file, into: folder)
+                let result = Self.move(file, into: folder, under: root ?? folder)
                 DispatchQueue.main.async { MainActor.assumeIsolated { done(result?.move, folder, result?.made ?? false, false) } }
             }
         }
         if action.kind == "move" {
-            return finish(Self.url(action.to, base: base))
+            return finish(Self.url(action.to, base: base), nil)
         }
         let into = action.into.isEmpty ? base : (Self.url(action.into, base: base) ?? base)
         // Kind folders (Images, PDFs, …) only for a routine set to sort by kind: one in the person's own words keeps
         // its own rules, with or without the AI.
-        guard action.by == "ai" else { return finish(into.appending(path: Self.kind(of: file))) }
+        guard action.by == "ai" else { return finish(into.appending(path: Self.kind(of: file)), into) }
         let key = Self.pattern(file.lastPathComponent)
         // What the AI answered before for names like this one comes first; with no AI and no answer, it stays put.
-        if let folder = learned[routine.id]?[key] { return finish(into.appending(path: folder)) }
+        if let folder = learned[routine.id]?[key] { return finish(into.appending(path: folder), into) }
         guard let quick else { return done(nil, base, false, true) }
         let words = routine.words
         let rule = ruleVersion[routine.id, default: 0]
@@ -705,11 +746,11 @@ final class Routines {
                     quick(prompt, "r|\(routine.id)|\(rule)|\(key)") { answer in
                         // The rule changed while the AI answered: its answer is for the old rule, so nothing is
                         // learned or moved by it.
-                        guard self.isOn, rule == self.ruleVersion[routine.id, default: 0] else { return finish(nil) }
+                        guard self.isOn, rule == self.ruleVersion[routine.id, default: 0] else { return finish(nil, nil) }
                         let picked = (answer?["folders"] as? [String: Any])?["1"] ?? answer?["folder"]
-                        guard let name = Self.folderName(picked, among: folders.map(\.name)) else { return finish(nil) }
+                        guard let name = Self.folderName(picked, among: folders.map(\.name)) else { return finish(nil, nil) }
                         self.learn(routine.id, [key: name])
-                        finish(into.appending(path: name))
+                        finish(into.appending(path: name), into)
                     }
                 }
             }
@@ -738,6 +779,7 @@ final class Routines {
         Self.io.async {
             let all = Self.files(in: source).filter { Self.wants(trigger, $0) }
             var plan = Plan(routine: routine.id, source: source)
+            plan.root = into
             plan.total = all.count
             plan.later = max(0, all.count - Self.mostFiles)
             let files = Array(all.prefix(Self.mostFiles))
@@ -815,9 +857,10 @@ final class Routines {
     /// made). `done(moves, folders made, stopped before the end)`.
     private func apply(_ plan: Plan, stop: RoutineStop, done: @escaping ([Move], [String], Bool) -> Void) {
         let items = plan.items
+        let root = plan.root
         Self.io.async {
             let result = RoutineStop.each(items, stop: stop) { item -> (move: Move, made: String?)? in
-                Self.move(item.file, into: item.folder).map { ($0.move, $0.made ? item.folder.path : nil) }
+                Self.move(item.file, into: item.folder, under: root ?? item.folder).map { ($0.move, $0.made ? item.folder.path : nil) }
             }
             let moves = result.done.map(\.move), made = result.done.compactMap(\.made)
             DispatchQueue.main.async { MainActor.assumeIsolated { done(moves, made, result.stopped) } }
@@ -957,11 +1000,12 @@ final class Routines {
                 var o = r.json
                 o["does"] = summary(r)
                 if r.usesModes { o["skipped"] = Routine.modesGone + " Delete it, or save it again with another trigger and actions." }
+                else if Self.outOfBounds(r) { o["skipped"] = Self.outOfBoundsLine + " Delete it, or save it again with folders in the home folder." }
                 return o
             }, "history": log.prefix(15).map { e -> [String: Any] in
                 ["id": e.id, "routine": e.name, "text": e.text, "at": e.at.timeIntervalSince1970, "canPutBack": e.canUndo]
             }])
-        case "petal_routine_save": saveTool(args, live: live, send, fail)
+        case "petal_routine_save": saveTool(args, caller: caller, live: live, send, fail)
         case "petal_routine_delete":
             let id = args["id"] as? String ?? ""
             guard list.contains(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
@@ -977,7 +1021,7 @@ final class Routines {
         }
     }
 
-    private func saveTool(_ args: [String: Any], live: @escaping () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+    private func saveTool(_ args: [String: Any], caller: String?, live: @escaping () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let old = list.first { $0.id == (args["id"] as? String ?? "") }
         var trigger = (args["trigger"] as? [String: Any]).map(Trigger.init) ?? old?.trigger ?? Trigger()
         var actions = (args["actions"] as? [[String: Any]])?.map(Action.init) ?? old?.actions ?? []
@@ -1028,7 +1072,23 @@ final class Routines {
                     if actions[index].kind == "move" {
                         if let to = check(actions[index].to, base: base, mustExist: false) { actions[index].to = to } else { problem = "to must be in the home folder" }
                     }
-                case "open", "hide":
+                case "open":
+                    // Apps, web addresses and documents; a script, a program or another kind of address is said now.
+                    actions[index].apps = actions[index].apps.map { item in
+                        switch RoutineRules.opens(item) {
+                        case .app(let name): return Self.bundleID(name)
+                        case .web: return item
+                        case .file(let path):
+                            if FileManager.default.fileExists(atPath: path), NoteTasks.routine(URL(fileURLWithPath: path)).1 == .never {
+                                problem = "open doesn't take \((path as NSString).lastPathComponent): a routine opens apps, web addresses, folders and documents, never a script or a program"
+                            }
+                            return item
+                        case .nothing:
+                            problem = "open takes apps, https:// addresses and documents by path; \(item.prefix(60)) is none of them"
+                            return item
+                        }
+                    }
+                case "hide":
                     actions[index].apps = actions[index].apps.map { $0.contains("://") || $0.hasPrefix("/") || $0.hasPrefix("~") ? $0 : Self.bundleID($0) }
                 default: break
                 }
@@ -1040,14 +1100,30 @@ final class Routines {
                     // Its asker gone while the folders were checked: nothing is saved for it.
                     guard live() else { return }
                     let routine = Routine(id: id, name: name, words: words, on: on, trigger: trigger, actions: actions)
-                    self.save(routine)
-                    var reply: [String: Any] = ["saved": routine.json, "does": self.summary(routine)]
-                    if !self.isOn { reply["note"] = "Routines are off in Petal's settings (routines); it runs once they're on." }
-                    if existing > 0, routine.actions.contains(where: \.movesFiles) {
-                        reply["filesThereNow"] = existing
-                        reply["next"] = "It only acts on new files. petal_routine_run with dryRun: true shows what it would do with the \(existing) there now; without dryRun it does it (Petal asks the person first when it's many)."
+                    let keep = {
+                        self.save(routine)
+                        var reply: [String: Any] = ["saved": routine.json, "does": self.summary(routine)]
+                        if !self.isOn { reply["note"] = "Routines are off in Petal's settings (routines); it runs once they're on." }
+                        if existing > 0, routine.actions.contains(where: \.movesFiles) {
+                            reply["filesThereNow"] = existing
+                            reply["next"] = "It only acts on new files. petal_routine_run with dryRun: true shows what it would do with the \(existing) there now; without dryRun it does it (Petal asks the person first when it's many)."
+                        }
+                        send(reply)
                     }
-                    send(reply)
+                    // One that opens something or runs a Shortcut is the person's to say yes to first; a new name
+                    // or new words for one that does the same already, or turning it off, isn't asked again.
+                    let now = self.list.first { $0.id == id }
+                    let same = now.map { $0.trigger == trigger && $0.actions == actions } ?? false
+                    guard RoutineRules.savingAsks(actions: actions.map(\.kind), same: same, wasOn: now?.on ?? false, on: on) else { return keep() }
+                    let rule = self.ruleVersion[id, default: 0]
+                    self.allow(now == nil ? "Add the routine “\(name)”?" : "Change the routine “\(name)”?", self.summary(routine), owner: caller) { yes in
+                        guard yes, live() else { return send(["declined": "The person didn't allow it; nothing was saved."]) }
+                        // Changed or deleted while its card waited: what was asked isn't what would be saved over.
+                        guard rule == self.ruleVersion[id, default: 0], (now == nil) == !self.list.contains(where: { $0.id == id }) else {
+                            return send(["note": "The routine changed while it waited; nothing was saved. Save it again."])
+                        }
+                        keep()
+                    }
                 }
             }
         }
@@ -1057,9 +1133,26 @@ final class Routines {
                          _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let id = args["id"] as? String ?? ""
         guard let routine = list.first(where: { $0.id == id }) else { return fail("No routine with id \(id); petal_routines lists them.") }
-        guard !routine.usesModes else { return fail(Routine.modesGone) }
+        if let why = Self.skipped(routine) { return fail(why) }
         let dry = args["dryRun"] as? Bool ?? false
         let rule = ruleVersion[id, default: 0]   // the routine as it is now; a change while its card waits stops it
+        let changed = { send(["note": "The routine changed while it waited; nothing moved. Run it again."]) }
+        // One that opens something or runs a Shortcut asks before it's run by hand (a dry run does nothing, so it
+        // doesn't); then it runs as any other does.
+        guard !dry, Self.asksFirst(routine) else {
+            return runNow(routine, dry: dry, rule: rule, caller: caller, live: live, stop: stop, send, fail)
+        }
+        allow("Run the routine “\(routine.name)”?", summary(routine), owner: caller) { yes in
+            guard yes, live() else { return send(["declined": "The person didn't allow it."]) }
+            guard rule == self.ruleVersion[id, default: 0], self.list.contains(where: { $0.id == id }) else { return changed() }
+            self.runNow(routine, dry: dry, rule: rule, caller: caller, live: live, stop: stop, send, fail)
+        }
+    }
+
+    /// `runTool`, once whatever it asks first is answered. `rule`: the routine's rule when it was asked for.
+    private func runNow(_ routine: Routine, dry: Bool, rule: Int, caller: String?, live: @escaping () -> Bool, stop: RoutineStop,
+                        _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+        let id = routine.id
         let changed = { send(["note": "The routine changed while it waited; nothing moved. Run it again."]) }
         guard let action = routine.actions.first(where: \.movesFiles) else {
             if dry { return send(["wouldDo": summary(routine)]) }
@@ -1108,11 +1201,27 @@ final class Routines {
         }
     }
 
+    /// The check's own answer to Petal AI's card for a routine (kind, title, detail), in place of the person's.
+    @ObservationIgnored var answering: ((String, String, String) -> Bool)?
+
+    /// A routine that opens something or runs a Shortcut goes on doing it by itself, so the person is asked before
+    /// Petal AI saves, changes or runs one: Petal AI's card (kind `routine`, which Always covers), showing what the
+    /// routine does. `owner`: the chat or AI session asking. The check answers through `answering`, else never asks.
+    private func allow(_ title: String, _ detail: String, owner: String?, done: @escaping (Bool) -> Void) {
+        if let answering { return done(answering(Self.card, title, detail)) }
+        guard !standalone else { return done(true) }
+        PetalApp.shared.assist.ask("routine", title, detail: detail, owner: owner, done: done)
+    }
+    /// The card's kind, as Always keeps it in `aiAllowed`.
+    nonisolated static let card = "routine"
+
+    nonisolated static func asksFirst(_ routine: Routine) -> Bool { RoutineRules.asksFirst(actions: routine.actions.map(\.kind)) }
+
     /// Asked first with Petal AI's card when it's many files; the check never asks. `owner`: the chat or AI session
     /// that ran it (nil for a routine's own trigger).
     private func confirm(_ many: Bool, _ title: String, _ detail: String, owner: String?, done: @escaping (Bool) -> Void) {
         guard many, !standalone else { return done(true) }
-        PetalApp.shared.assist.ask("tidy", title, detail: detail, owner: owner, done: done)
+        PetalApp.shared.assist.ask("tidy", title, wants: title.prefix(1).lowercased() + title.dropFirst(), detail: detail, owner: owner, done: done)
     }
 
     nonisolated static func counts(_ plan: Plan) -> [(name: String, count: Int, new: Bool)] {
@@ -1194,16 +1303,38 @@ final class Routines {
         return (base ?? home).appending(path: text).standardizedFileURL
     }
 
-    /// Inside the home folder, and not all of it, its Library or a hidden folder. (Testing with `PETAL_ROUTINES`
-    /// also allows the temporary folders.)
+    /// Testing with `PETAL_ROUTINES` also allows the temporary folders.
+    nonisolated static var testing: Bool { ProcessInfo.processInfo.environment["PETAL_ROUTINES"]?.isEmpty == false }
+
+    /// Inside the home folder, and not all of it, its Library or a hidden folder, by its path as written
+    /// (RoutineRules.allowed). Where a folder really is, every link followed, is asked again before each move.
     nonisolated static func allowed(_ url: URL) -> Bool {
-        let home = NSHomeDirectory()
-        let path = url.standardizedFileURL.path
-        if ProcessInfo.processInfo.environment["PETAL_ROUTINES"]?.isEmpty == false,
-           ["/tmp/", "/private/tmp/", "/private/var/folders/", "/var/folders/"].contains(where: path.hasPrefix) { return true }
-        guard path.hasPrefix(home + "/") else { return false }
-        let parts = path.dropFirst(home.count + 1).split(separator: "/")
-        return !parts.isEmpty && parts[0] != "Library" && !parts.contains { $0.hasPrefix(".") }
+        RoutineRules.allowed(url.standardizedFileURL.path, home: NSHomeDirectory(), testing: testing)
+    }
+
+    /// A routine with a folder that isn't one routines tidy. One saved through Petal's tool never has one (it's
+    /// refused there); one written into routines.json by hand can. It's listed with a line saying so and never
+    /// runs, and its folders are neither watched nor read.
+    nonisolated static func outOfBounds(_ routine: Routine) -> Bool {
+        if routine.trigger.on == "file" {
+            guard let folder = url(routine.trigger.folder), allowed(folder) else { return true }
+        }
+        for action in routine.actions where action.movesFiles {
+            guard let source = url(routine.source(action)), allowed(source) else { return true }
+            if !action.into.isEmpty {
+                guard let into = url(action.into, base: source), allowed(into) else { return true }
+            }
+            if action.kind == "move" {
+                guard let to = url(action.to, base: source), allowed(to) else { return true }
+            }
+        }
+        return false
+    }
+    nonisolated static let outOfBoundsLine = "It names a folder routines don't tidy (outside your home folder, or in its Library), so it doesn't run."
+
+    /// Why a routine never runs, in a line for the person; nil when it does.
+    nonisolated static func skipped(_ routine: Routine) -> String? {
+        routine.usesModes ? Routine.modesGone : outOfBounds(routine) ? outOfBoundsLine : nil
     }
 
     nonisolated static func tilde(_ url: URL) -> String {
@@ -1368,20 +1499,29 @@ final class Routines {
     }
 
     /// Moves a file into a folder (made if it isn't there), never over another file: "name 2.pdf" instead.
-    nonisolated static func move(_ file: URL, into folder: URL) -> (move: Move, made: Bool)? {
-        let result = moveOnly(file, into: folder)
+    /// `root`: the folder the routine itself names (where it moves files, or where its subfolders go); `folder` is
+    /// it, or a subfolder under it. Nothing moves unless the file's folder and `folder` really are, every link
+    /// followed, places routines tidy, and a subfolder under `root` is a folder, never a link (RoutineRules.refusal).
+    nonisolated static func move(_ file: URL, into folder: URL, under root: URL) -> (move: Move, made: Bool)? {
+        let result = moveOnly(file, into: folder, under: root)
         if let result { journal(result.move) }
         return result
     }
 
-    nonisolated private static func moveOnly(_ file: URL, into folder: URL) -> (move: Move, made: Bool)? {
+    nonisolated private static func moveOnly(_ file: URL, into folder: URL, under root: URL) -> (move: Move, made: Bool)? {
         let fm = FileManager.default
         guard fm.fileExists(atPath: file.path),
               file.deletingLastPathComponent().standardizedFileURL.path != folder.standardizedFileURL.path else { return nil }
+        // Where the file and the folder really are, read right before anything is made or moved.
+        let may = { RoutineRules.refusal(moving: file.path, into: folder.path, under: root.path, home: NSHomeDirectory(), testing: testing) == nil }
+        guard may() else { return nil }
         var isFolder: ObjCBool = false
         let made = !fm.fileExists(atPath: folder.path, isDirectory: &isFolder)
         if !made && !isFolder.boolValue { return nil }   // a file is in the way
-        if made { guard (try? fm.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else { return nil } }
+        if made {
+            guard (try? fm.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else { return nil }
+            guard may() else { return nil }   // and once more now that the folder is there
+        }
         var target = folder.appending(path: file.lastPathComponent)
         let stem = file.deletingPathExtension().lastPathComponent, ext = file.pathExtension
         var n = 2
@@ -1396,7 +1536,7 @@ final class Routines {
 
 /// Watches the top of one folder for files that arrive, and hands each on once it has settled: its size and date
 /// unchanged for two looks a second apart, and no download still under way (Chrome's .crdownload, Safari's
-/// .download, Firefox's .part beside an empty file). Folders that arrive are left alone.
+/// .download, Firefox's .part beside an empty file). Folders and links that arrive are left alone.
 final class FolderWatch: @unchecked Sendable {
     static let partial: Set<String> = ["crdownload", "download", "part", "partial", "opdownload", "tmp", "aria2", "!qb"]
 
@@ -1474,11 +1614,12 @@ final class FolderWatch: @unchecked Sendable {
         let fm = FileManager.default
         for (name, var file) in waiting {
             let url = folder.appending(path: name)
-            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey]) else {
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey, .contentModificationDateKey]) else {
                 waiting[name] = nil   // gone again
                 continue
             }
-            if values.isDirectory == true || Self.partial.contains(url.pathExtension.lowercased()) {
+            // A folder, or a link to anything: known, never handed on as a file to sort.
+            if values.isDirectory == true || values.isSymbolicLink == true || Self.partial.contains(url.pathExtension.lowercased()) {
                 known.insert(name)
                 waiting[name] = nil
                 continue
@@ -1574,8 +1715,8 @@ struct RoutineList: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(routine.words).font(.system(size: TextSize.body)).fixedSize(horizontal: false, vertical: true)
                     Text(routines.summary(routine)).font(.system(size: TextSize.small)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    if routine.usesModes {
-                        Text(Routines.Routine.modesGone).font(.system(size: TextSize.small)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    if let why = Routines.skipped(routine) {
+                        Text(why).font(.system(size: TextSize.small)).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     } else if let last = routine.lastRun {
                         Text("Last ran \(last, format: .relative(presentation: .named))\(routine.lastResult.isEmpty ? "" : ": " + routine.lastResult.prefix(1).lowercased() + routine.lastResult.dropFirst())")
                             .font(.system(size: TextSize.small)).foregroundStyle(.secondary).lineLimit(2)
@@ -1586,7 +1727,7 @@ struct RoutineList: View {
                 // The switch last, in the column every page's switches are in; none for a routine that can't run.
                 Toggle(routine.words, isOn: Binding(get: { routine.on }, set: { routines.setOn(routine.id, $0) }))
                     .toggleStyle(.switch).labelsHidden().controlSize(.small).tint(tint)
-                    .opacity(routine.usesModes ? 0 : 1).disabled(routine.usesModes)
+                    .opacity(Routines.skipped(routine) == nil ? 1 : 0).disabled(Routines.skipped(routine) != nil)
             }
         }
     }

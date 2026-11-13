@@ -172,17 +172,38 @@ def installed_version():
     return os.environ.get("PETAL_INSTALLED_VERSION", "")
 
 
-def download_release(version, into):
-    """GitHub's source tarball for the macos-v<version> tag, unpacked into `into`."""
+def plain_version(version):
+    """A version as a release says it: numbers with dots between them ("2.1.4"), nothing else. The same rule as the
+    updater's (UpdateTrust.plainVersion): up to four parts of up to six digits."""
+    return bool(re.fullmatch(r"[0-9]{1,6}(\.[0-9]{1,6}){0,3}", version or ""))
+
+
+def plain_commit(commit):
+    """A commit as git names it whole: 40 lowercase hex characters."""
+    return bool(re.fullmatch(r"[0-9a-f]{40}", commit or ""))
+
+
+def download_release(version, into, commit=None):
+    """A release's source from GitHub, unpacked into `into`. With `commit` (an update: the commit Petal read from the
+    release it checked first, signed by Petal's maker), that commit's source and no other; without, the installed
+    Petal's own commit, else the macos-v<version> tag."""
     if not version or version == "dev":
         raise Problem("This Petal has no release version to take the source from.")
-    # The installed Petal's own commit (build.sh writes it into the app) is its exact source; a release's tag
-    # points at the same one. A build of a commit that isn't on GitHub falls back to the version's tag.
-    urls = []
-    commit = os.environ.get("PETAL_SOURCE_COMMIT", "")
-    if commit and version == installed_version():
-        urls.append("https://github.com/%s/archive/%s.tar.gz" % (REPO, commit))
-    urls.append("https://github.com/%s/archive/refs/tags/macos-v%s.tar.gz" % (REPO, version))
+    # The version goes into what's downloaded: plain numbers only, or nothing is.
+    if not plain_version(version):
+        raise Problem("That isn't a Petal version, so no source was downloaded for it.")
+    if commit is not None:
+        if not plain_commit(commit):
+            raise Problem("Petal %s's release doesn't say which source it was built from, so none was downloaded." % version)
+        urls = ["https://github.com/%s/archive/%s.tar.gz" % (REPO, commit)]
+    else:
+        # The installed Petal's own commit (build.sh writes it into the app) is its exact source; a release's tag
+        # points at the same one. A build of a commit that isn't on GitHub falls back to the version's tag.
+        urls = []
+        own = os.environ.get("PETAL_SOURCE_COMMIT", "")
+        if plain_commit(own) and version == installed_version():
+            urls.append("https://github.com/%s/archive/%s.tar.gz" % (REPO, own))
+        urls.append("https://github.com/%s/archive/refs/tags/macos-v%s.tar.gz" % (REPO, version))
     tarball = os.path.join(into, "source.tar.gz")
     tree = os.path.join(into, "tree")
     os.makedirs(tree)
@@ -197,13 +218,14 @@ def download_release(version, into):
 
 
 @contextlib.contextmanager
-def release_tree(version=None, release_dir=None):
-    """The released source of a version: downloaded, or a folder given (a test's own release)."""
+def release_tree(version=None, release_dir=None, commit=None):
+    """The released source of a version: downloaded (`commit`: that very commit's), or a folder given (a test's own
+    release)."""
     if release_dir:
         yield os.path.realpath(release_dir)
         return
     with tempfile.TemporaryDirectory(prefix="petal-release-") as tmp:
-        yield download_release(version, tmp)
+        yield download_release(version, tmp, commit)
 
 
 def release_version(tree, fallback=""):
@@ -457,15 +479,20 @@ def markers(tree, base):
     return found
 
 
-def update(version=None, release_dir=None, auto=False, check_cmd=None, keep=None):
-    """Combines a release with the person's changes. Raises Kept when it can't."""
+def update(version=None, release_dir=None, auto=False, check_cmd=None, keep=None, commit=None):
+    """Combines a release with the person's changes. Raises Kept when it can't. `commit`: the commit the release was
+    built from, as Petal read it from the release it checked; its source is the only one taken then, and it must be
+    the version asked for."""
     require()
     s = state()
     if not s.get("in_use"):
         say("Personal changes aren't in use; nothing to combine.")
         return "nothing"
-    with lock(wait=not auto), release_tree(version, release_dir) as tree:
-        version = release_version(tree, version or "")
+    with lock(wait=not auto), release_tree(version, release_dir, commit) as tree:
+        said = release_version(tree, version or "")
+        if commit is not None and not release_dir and said != version:
+            raise Problem("Petal %s's source says it's another version, so it wasn't used." % version)
+        version = said
         mine = rev("refs/heads/mine")
         failed = s.get("failed") or {}
         if auto and failed.get("version") == version and failed.get("mine") == mine:
@@ -483,8 +510,9 @@ def update(version=None, release_dir=None, auto=False, check_cmd=None, keep=None
                 result = rev("HEAD", cwd=work)
                 keep_built(work, keep)
         except Kept as kept:
+            # Its commit is kept with it, so trying again (`petal personal retry`) takes the very same source.
             save_state(failed={"version": version, "mine": mine, "reason": str(kept), "detail": kept.detail, "at": time.strftime("%Y-%m-%d %H:%M"),
-                               "backup": saved})
+                               "backup": saved, **({"commit": commit} if commit else {})})
             raise
         # Edits made while it ran would be lost by moving mine; they're kept, and it tries again next time.
         if unsaved() or rev("refs/heads/mine") != mine:
@@ -739,6 +767,7 @@ def main(argv):
     auto = "--auto" in args
     args = [a for a in args if a not in ("--json", "--auto")]
     check_cmd, keep, version = option(args, "--check"), option(args, "--keep"), option(args, "--version")
+    commit = option(args, "--commit")
     command = args[0] if args else "status"
     rest = args[1:]
     try:
@@ -782,15 +811,17 @@ def main(argv):
         elif command == "restore":
             return restore(rest[0] if rest else None)
         elif command == "update":
-            # update [<release dir>] [--version V] [--auto] [--check CMD] [--keep PATH]
-            result = update(version, rest[0] if rest else None, auto, check_cmd, keep)
+            # update [<release dir>] [--version V] [--commit SHA] [--auto] [--check CMD] [--keep PATH]
+            result = update(version, rest[0] if rest else None, auto, check_cmd, keep, commit)
             if as_json:
                 print(json.dumps({"status": result, "version": state().get("version")}))
         elif command == "retry":
             require()
             failed = state().get("failed") or {}
             target = version or failed.get("version") or installed_version()
-            update(target, None, False, check_cmd, keep)
+            if commit is None and target == failed.get("version"):
+                commit = failed.get("commit")
+            update(target, None, False, check_cmd, keep, commit)
             if as_json:
                 print(json.dumps({"status": "updated", "version": state().get("version")}))
         elif command == "mark-good":

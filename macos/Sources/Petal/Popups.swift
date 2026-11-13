@@ -1023,13 +1023,16 @@ struct FormActionsHeight: PreferenceKey {
 @MainActor @Observable
 final class Thumbnails {
     static let shared = Thumbnails()
-    private var images: [URL: NSImage] = [:]
-    @ObservationIgnored private var making: Set<URL> = []
+    /// Goes up as each one arrives, so the stacks showing a placeholder draw it.
+    private var made = 0
+    /// What's kept and what's being made (ThumbnailCache): never watched itself, so asking from a view changes nothing
+    /// a view watches.
+    @ObservationIgnored private var cache = ThumbnailCache<NSImage>()
 
     func image(for url: URL) -> NSImage? {
-        if let image = images[url] { return image }
-        guard !making.contains(url) else { return nil }
-        making.insert(url)
+        _ = made
+        let wanted = cache.want(url)
+        guard wanted.start else { return wanted.image }
         DispatchQueue.global(qos: .userInitiated).async {
             var picture: NSImage?
             if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -1040,8 +1043,8 @@ final class Thumbnails {
             }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    if self.images.count > 300 { self.images = [:] }
-                    self.images[url] = picture ?? NSWorkspace.shared.icon(forFile: url.path)
+                    self.cache.made(url, picture ?? NSWorkspace.shared.icon(forFile: url.path))
+                    self.made += 1
                 }
             }
         }

@@ -613,6 +613,77 @@ enum NoteHelp {
         return false
     }
 
+    /// What asks `gh` whether a pull request merged: its options first, then `--`, then the link, so a link is only
+    /// ever read as the pull request to look at, whatever it says.
+    static func mergedArguments(_ link: String) -> [String] { ["gh", "pr", "view", "--json", "state", "-q", ".state", "--", link] }
+
+    // MARK: What this Mac was asked to keep going
+
+    /// A chain, a watcher or a morning note as this Mac keeps it for itself (`NoteLocal.standing`, in Application
+    /// Support, never synced): written only when the person's own line set one up here, with the note it's on and
+    /// its words as they were then. The clock acts on what a note's file says only while this Mac holds exactly that
+    /// (`NoteHelp.stands`): an entry that is only in a file (synced, imported, written by hand or by a tool), or
+    /// whose words aren't the ones the person set up, is left in its file as it is and nothing is done for it. The
+    /// `mac` in a file says where an entry runs; it never starts one.
+    struct Standing: Codable, Equatable, Sendable {
+        static let chain = "chain", watch = "watch", morning = "morning"
+        var kind: String
+        var note: String
+        /// Everything of the entry that says what is done, where and when (never what a look or a start writes back),
+        /// each part whole.
+        var mark: [String]
+
+        init(kind: String, note: String, mark: [String]) { self.kind = kind; self.note = note; self.mark = mark }
+
+        /// A chain on its note: what it waits for, what it asks and since when (`fired` is its start's to write).
+        init(_ chain: Chain, on note: String) {
+            self.init(kind: Self.chain, note: note, mark: [chain.after, chain.afterTitle, chain.then, chain.ask, NoteFile.stamp(chain.since)])
+        }
+
+        /// A watcher on its note: its page, its line and its clock (its values, `paused` and `id` change as it runs).
+        init(_ watch: Watch, on note: String) {
+            self.init(kind: Self.watch, note: note, mark: [watch.url, watch.line, watch.every, watch.at, watch.tz])
+        }
+
+        /// A notebook's morning note, on its cover: its time.
+        init(morning time: String, on cover: String) { self.init(kind: Self.morning, note: cover, mark: [time]) }
+    }
+
+    /// Whether this Mac holds `entry` just as a note's file says it now. Nothing held yet (`nil`): nothing stands.
+    static func stands(_ entry: Standing, in held: [Standing]?) -> Bool { held?.contains(entry) == true }
+
+    /// `held` with `entry` as its note's one of that kind (a new watcher takes the place of the one before).
+    static func standing(_ held: [Standing]?, adding entry: Standing) -> [Standing] {
+        (held ?? []).filter { $0.kind != entry.kind || $0.note != entry.note } + [entry]
+    }
+
+    /// `held` without that note's one of that kind (a chain that started, a watcher or morning notes stopped).
+    static func standing(_ held: [Standing]?, without kind: String, on note: String) -> [Standing]? {
+        held?.filter { $0.kind != kind || $0.note != note }
+    }
+
+    /// The taking finished once the folder is read whole: what was kept, with the ones found since added; a note's
+    /// one of a kind already kept stays as it is.
+    static func standing(_ held: [Standing]?, merging found: [Standing]) -> [Standing] {
+        var out = held ?? []
+        for entry in found where !out.contains(where: { $0.kind == entry.kind && $0.note == entry.note }) { out.append(entry) }
+        return out
+    }
+
+    /// Once, for a Mac that kept none yet (a Petal from before this was kept): the chains not yet started, the
+    /// watchers and the morning notes already in the notes' folder that name this Mac go on as they were. From then
+    /// on only the person's own line adds one.
+    static func adopted(_ notes: [(note: String, file: NoteFile)], mac: String) -> [Standing] {
+        guard !mac.isEmpty else { return [] }
+        var held: [Standing] = []
+        for (note, file) in notes {
+            if let chain = file.chain, chain.mac == mac, chain.fired == nil { held = standing(held, adding: Standing(chain, on: note)) }
+            if let watch = file.watch, watch.mac == mac { held = standing(held, adding: Standing(watch, on: note)) }
+            if let morning = file.morning, morning.mac == mac { held = standing(held, adding: Standing(morning: morning.time, on: note)) }
+        }
+        return held
+    }
+
     // MARK: Mentions and the words they bind
 
     /// What one @ or understood word bound to, for its chip: `@Petal` (no chip), a note, a notebook, a time, a
@@ -1956,11 +2027,41 @@ extension RunToken {
 }
 
 extension NoteHelp {
+    /// Who a question is asked for: one of Petal's own chats or helpers, a routine running by itself (no chat asked),
+    /// the person's own Claude Code or Codex outside Petal (signed by its maker: `agent`), or anyone else who reached
+    /// Petal's tools (a program, a command, an agent Petal can't verify: `outside`).
+    enum Asker: Equatable { case own, routine, agent, outside }
+
+    /// `owner`: the chat or session a question is for, nil when no chat asked. `known`: it's one of Petal's own chats.
+    /// `verified`: an outside caller is Claude Code or Codex signed by its maker (AgentAccess.Agent.verified).
+    static func asker(owner: String?, known: Bool, verified: Bool = false) -> Asker {
+        guard owner != nil else { return .routine }
+        return known ? .own : verified ? .agent : .outside
+    }
+
     /// The authorization an automatic approval stands for (registered on the asking run's token before it goes on):
-    /// an Always given earlier, or Full access; nil when the person must be asked.
-    static func autoGrant(kind: String, fullAccess: Bool, allowed: [String]) -> String? {
+    /// an Always given earlier, or Full access; nil when the person must be asked. Full access and Always cover Petal
+    /// AI and the person's own Claude Code and Codex; any other caller is asked every time, whatever they say.
+    static func autoGrant(kind: String, fullAccess: Bool, allowed: [String], asker: Asker) -> String? {
+        guard asker != .outside else { return nil }
         if allowed.contains(kind) { return "always:" + kind }
         return fullAccess ? "full-access" : nil
+    }
+
+    /// A card for `asker`: its title, Petal AI's own or, for a caller outside Petal, who asks (`label`: "Codex in T3
+    /// Code", "An unknown program (python3)") and what for (`wants`: "use Mail"), where the card says what it wants;
+    /// and whether it is asked every time with no Always (an Always is kept for every chat, so it's never offered to
+    /// a caller Petal can't verify).
+    static func card(title: String, wants: String?, every: Bool, asker: Asker, label: String?) -> (title: String, every: Bool) {
+        switch asker {
+        case .own, .routine: return (title, every)
+        case .agent:
+            guard let wants, !wants.isEmpty, let label else { return (title, every) }
+            return ("\(label) wants to \(wants)", every)
+        case .outside:
+            guard let wants, !wants.isEmpty else { return (title, true) }
+            return ("\(label ?? "Another program") wants to \(wants)", true)
+        }
     }
 
     /// Which checkout a coding helper works in. A checkout named in the person's words is always checked, however
@@ -2527,7 +2628,7 @@ extension NoteHelp {
         if computerUse { words = words + "\n\nYou may use the user's apps with petal_ui and petal_act; call petal_ui first and again after anything changes the window." }
         if runDisplays { words = words + "\n\n" + ownDisplay }
         if t.placeIsFile {
-            words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look and petal_ui read it there, and petal_view gives the words of the page it shows (page: another one). Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
+            words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look reads it there, and petal_view gives the words of the page it shows (page: another one); petal_ui and petal_act never read or use Petal's own windows. Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
         }
         if !t.place.isEmpty {
             words = words + "\n\nThe note is on: \(t.place). This, here, this page and this sentence mean that place, even after the user has gone elsewhere."

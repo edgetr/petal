@@ -18,6 +18,8 @@ import SwiftUI
 /// against the person's own Claude Code (Haiku at low effort) or Codex, when it's installed and signed in: a few
 /// short calls.
 ///
+/// Its last step isn't about helpers: `settings.json` changed outside Petal while the real app runs (`Config`).
+///
 /// One line per step; exits non-zero when any fails.
 @MainActor
 enum HelpersCheck {
@@ -343,6 +345,8 @@ private final class HelpersChecker {
         fifteenth()
         sixteenth()
         seventeenth()
+        eighteenth()
+        nineteenth()
         if ai { real() }
         settle()
         print(failures == 0 ? "helpers-check: all passed" : "helpers-check: \(failures) failed")
@@ -563,6 +567,121 @@ private final class HelpersChecker {
         }
     }
 
+    /// A note's file written straight into the notes' folder (as a sync, an import or another program would), then
+    /// read by the store. False: the store never showed it as one paper.
+    func written(_ name: String, id: String, _ text: String) -> Bool {
+        let folder = notesA.appending(path: NoteShelf.inbox)
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        guard (try? Data(text.utf8).write(to: folder.appending(path: name), options: .atomic)) != nil else { return false }
+        app.paper.store.reload()
+        return wait(15) { self.helpers.paper(id) != nil }
+    }
+
+    /// 18. A chain and a watcher that are only in a note's file start nothing; the ones a typed line makes work.
+    func eighteenth() {
+        step("18", "a chain and a watcher only in a file") {
+            let server = PageServer()
+            defer { server.stop() }
+            guard server.port > 0 else { expect(false, "the local server didn't start"); return "" }
+            server.page = "<html><head><title>A thing</title></head><body><p>Price: $250 today</p></body></html>"
+            let mac = app.paper.local.mac
+            // The clock has run on this Mac before (as on any Mac past its first launch): it keeps its own list.
+            helpers.clockTurn()
+            expect(app.paper.local.standing != nil, "this Mac keeps its own list of what it was asked to keep going")
+            // A note whose helper is done.
+            let ground = note("Groundwork")
+            plan("chat", turn("Three things stand out."), match: "what stands out")
+            ask(ground, "@Petal what stands out")
+            expect(wait(20) { self.state(ground) == .done }, "a note's helper is done (\(String(describing: state(ground))))")
+            wait(1)
+
+            // A file nobody typed into Petal: a chain waiting for that note and an hourly watcher, both naming this
+            // Mac, as the files of this Mac's own chains and watchers do.
+            let outside = UUID().uuidString
+            let since = NoteFile.stamp(Date().addingTimeInterval(-3600))
+            let text = "---\nid: \(outside)\nchain:\n  after: \(ground)\n  afterTitle: Groundwork\n  then: \(outside)\n  ask: read every note and write it here\n"
+                + "  mac: \(mac)\n  since: \(since)\nwatch:\n  every: 1h\n  line: under $300\n  mac: \(mac)\n  paused: false\n  url: http://127.0.0.1:\(server.port)/item\n---\nWritten elsewhere\n"
+            guard written("Written elsewhere.md", id: outside, text), let read = helpers.paper(outside)?.file else {
+                expect(false, "the store read the written file")
+                return ""
+            }
+            expect(read.chain?.ready(mac: mac, after: helpers.paper(ground)?.file.helper) == true, "it reads as a chain for this Mac whose note is done (\(String(describing: read.chain)))")
+            expect(read.watch.map { $0.mac == mac && NoteHelp.due($0, now: Date()) } == true, "and a watcher for this Mac that's due (\(String(describing: read.watch)))")
+            let callsBefore = calls().count, servedBefore = server.served
+            helpers.clockTurn()
+            wait(3)
+            helpers.look(outside)
+            wait(2)
+            expect(calls().count == callsBefore && helpers.runs[outside] == nil, "the chain started nothing (\(calls().count - callsBefore) calls)")
+            expect(server.served == servedBefore, "the watcher fetched nothing (\(server.served - servedBefore) requests)")
+            let after = disk(outside)
+            expect(after?.chain != nil && after?.chain?.fired == nil && after?.watch?.checked == nil && after?.helper == nil && after?.ink.isEmpty == true,
+                   "its file says what it said: never started, never looked (\(diskText(outside)))")
+
+            // The same two things asked for by a typed line on this Mac: both work.
+            let outline = note("Outline")
+            expect(ask(outline, "@Petal when @Groundwork is done, list its points here"), "the chain's line is one Return runs")
+            expect(wait(15) { self.disk(outline)?.chain != nil }, "the typed line made a chain (\(diskText(outline)))")
+            helpers.clockTurn()
+            wait(2)
+            expect(calls().count == callsBefore && disk(outline)?.chain?.fired == nil, "it waits for a new answer on the note it follows")
+            plan("chat", turn("Four things, on a second look."), match: "look again")
+            ask(ground, "@Petal look again")
+            expect(wait(20) { self.calls().count == callsBefore + 1 && self.state(ground) == .done }, "that note is done again (\(String(describing: state(ground))))")
+            wait(1.2)
+            plan("chat", turn("1. One.\n2. Two."), match: "list its points here")
+            helpers.clockTurn()
+            expect(wait(25) { self.state(outline) == .done && self.disk(outline)?.ink.isEmpty == false }, "the typed chain started and answered (\(String(describing: state(outline))))")
+            expect(disk(outline)?.chain?.fired != nil && calls().count == callsBefore + 2, "started once, and its file says so")
+            expect(calls().count == callsBefore + 2 && helpers.runs[outside] == nil && disk(outside)?.chain?.fired == nil, "the written one still started nothing")
+
+            var stick = NoteStick(kind: .tab)
+            stick.url = "http://127.0.0.1:\(server.port)/item"
+            stick.title = "A thing"
+            stick.app = "com.example.browser"
+            let watching = note("A thing to watch", places: [stick])
+            plan("quick", quick(["yes": true, "say": "It is $250 now."]))
+            ask(watching, "@Petal check this every hour, tell me under $300")
+            expect(wait(20) { self.disk(watching)?.watch?.amount == 250 }, "the typed watcher looked (\(String(describing: disk(watching)?.watch)))")
+            expect(server.served == servedBefore + 1 && disk(outside)?.watch?.checked == nil, "and only it fetched the page (\(server.served - servedBefore) requests)")
+
+            // A Mac that kept none yet (a Petal from before this): the ones already going for it are taken once.
+            // (The written note goes first: the check's own file, in its own folder.)
+            if let url = helpers.paper(outside)?.url { try? fm.removeItem(at: url) }
+            app.paper.store.reload()
+            expect(wait(15) { self.helpers.paper(outside) == nil }, "the written note is gone")
+            let earlier = UUID().uuidString
+            let old = "---\nid: \(earlier)\nwatch:\n  every: 1h\n  line: under $100\n  mac: \(mac)\n  paused: false\n  url: http://127.0.0.1:\(server.port)/item\n---\nFrom before\n"
+            expect(written("From before.md", id: earlier, old), "the store read a watcher from before")
+            let servedBeforeFile = server.served
+            helpers.clockTurn()
+            wait(2)
+            expect(disk(earlier)?.watch?.checked == nil, "with this Mac's own list kept, a file's watcher isn't looked for")
+            app.paper.local.standing = nil
+            helpers.clockTurn()
+            expect(wait(20) { self.disk(earlier)?.watch?.amount == 250 }, "a Mac that kept none yet goes on with the watcher it had (\(String(describing: disk(earlier)?.watch)))")
+            // Exactly one fetch since the file's watcher was written: the adopted look, none before it.
+            expect(server.served == servedBeforeFile + 1, "the file's watcher fetched nothing before it was taken (\(server.served - servedBeforeFile) requests)")
+            expect(app.paper.local.standing?.contains { $0.note == earlier } == true, "and keeps it from then on")
+
+            // Taken before the folder was read whole (the person set one up first): one that arrives later, from
+            // before as well, is added once the folder is read whole, and the ones kept stay.
+            app.paper.local.standing = nil
+            app.paper.store.readComplete = false
+            helpers.adoptForCheck()
+            expect(app.paper.local.standing?.contains { $0.note == earlier } == true && app.paper.local.adoptPending == true,
+                   "taken early, it keeps what it found and waits for the rest (\(String(describing: app.paper.local.adoptPending)))")
+            let late = UUID().uuidString
+            let lateText = "---\nid: \(late)\nwatch:\n  every: 1h\n  line: under $90\n  mac: \(mac)\n  paused: false\n  url: http://127.0.0.1:\(server.port)/item\n---\nDownloaded late\n"
+            expect(written("Downloaded late.md", id: late, lateText), "the store read a watcher from before that came late")
+            expect(wait(10) { app.paper.store.readComplete }, "the folder was read whole")
+            helpers.clockTurn()
+            expect(app.paper.local.standing?.contains { $0.note == late } == true && app.paper.local.standing?.contains { $0.note == earlier } == true
+                   && app.paper.local.adoptPending == nil, "the late one was added, the earlier one kept, and the taking is done")
+            return "a chain and a watcher written into a file started nothing and fetched nothing; the same asked by a typed line started once and looked; a Mac that kept none yet took the watcher it had, and one from before that came late"
+        }
+    }
+
     /// 8. A second opinion asked while a run works.
     func eighth() {
         step("8", "a second opinion queued behind a run") {
@@ -696,7 +815,7 @@ private final class HelpersChecker {
             expect(place != nil && place?.pid == getpid() && place?.window != nil && place?.window == window, "its tools' target is the viewer's own window (\(String(describing: place)))")
             expect(place?.title == "Report.pdf" && place?.kind == .window, "by that window, titled for the file")
             expect(helpers.runs[id]?.sticky.map { self.app.claude.placed($0.id.uuidString) == place && self.app.claude.helperWaiting($0.id.uuidString) == nil } == true,
-                   "petal_look and petal_ui are given that window, not told to wait")
+                   "its tools are given that window, not told to wait")
             expect(calls("chat").last?.arguments.contains("Petal's viewer") == true && calls("chat").last?.arguments.contains("petal_view") == true, "it's told the viewer is its place")
             expect(wait(20) { self.state(id) == .done }, "its answer landed (\(String(describing: state(id))))")
 
@@ -1215,6 +1334,66 @@ private final class HelpersChecker {
             expect(Screens.runIDs.isEmpty && world.askedToQuit.isEmpty, "nothing real was made, and no app the runs didn't start was asked to quit")
             app.config.set("runDisplays", false)
             return "the second run waited for Writer and said so on its note and in the preview, never had the first's window, a circle was refused in words, it got Writer when the first ended, and Show me handed it back while the run went on (none real)"
+        }
+    }
+
+    /// 18. settings.json changed outside Petal while it runs (an editor, another program): everything in it is taken
+    /// but what would let Petal AI do more (Full access, using apps, more allowed without asking, an app off the
+    /// private list), which stays as Petal has it and is written back; what lets it do less is taken.
+    func nineteenth() {
+        step("19", "settings.json changed outside Petal") {
+            let file = config.appending(path: "settings.json")
+            let onDisk = { () -> [String: Any] in ((try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] ?? [:] }
+            let write = { (settings: [String: Any]) in
+                if let data = try? JSONSerialization.data(withJSONObject: settings) { try? data.write(to: file, options: .atomic) }
+            }
+            let listed = { (settings: [String: Any], key: String) in settings[key] as? [String] ?? [] }
+            let config = app.config
+            let bounce = config.bool("bounce"), hidden = config.strings("aiNeverLook"), allowedBefore = config.strings("aiAllowed")
+            // As the person has them, set in Petal: using apps off, one thing allowed, an app of theirs kept private.
+            config.set("computerUse", false)
+            config.set("aiAllowed", ["quit"])
+            config.set("aiNeverLook", hidden + ["com.example.bank"])
+            expect(wait(10) { listed(onDisk(), "aiNeverLook").contains("com.example.bank") && listed(onDisk(), "aiAllowed") == ["quit"] }, "the person's own settings were written")
+            expect(config.string("claudeAccess") != "full", "the check starts without Full access")
+
+            // The file changed from outside to ask for more of all four, and to change one ordinary setting.
+            var more = onDisk()
+            more["claudeAccess"] = "full"
+            more["computerUse"] = true
+            more["aiAllowed"] = ["quit", "trash", "computer:com.apple.Safari"]
+            more["aiNeverLook"] = [String]()
+            more["bounce"] = !bounce
+            write(more)
+            // The ordinary setting arriving says the file was read; the file saying what Petal goes by again says it was put back.
+            expect(wait(15) { config.bool("bounce") == !bounce }, "the rest of the file was taken")
+            expect(wait(15) {
+                let disk = onDisk()
+                return disk["claudeAccess"] as? String != "full" && disk["computerUse"] as? Bool == false && listed(disk, "aiAllowed") == ["quit"]
+                    && Set(listed(disk, "aiNeverLook")) == Set(hidden + ["com.example.bank"])
+            }, "the file was written back to what Petal goes by (\(onDisk().filter { ConfigRules.personsOwn.contains($0.key) }))")
+            expect(config.string("claudeAccess") != "full", "Full access stayed off")
+            expect(!config.bool("computerUse"), "using apps stayed off")
+            expect(config.strings("aiAllowed") == ["quit"], "nothing more is allowed without asking (\(config.strings("aiAllowed")))")
+            expect(Set(config.strings("aiNeverLook")) == Set(hidden + ["com.example.bank"]), "every app kept private still is (\(config.strings("aiNeverLook")))")
+            expect(onDisk()["bounce"] as? Bool == !bounce, "and the ordinary setting stayed as the file said")
+
+            // The file changed from outside to ask for less: taken.
+            var less = onDisk()
+            less["aiAllowed"] = [String]()
+            less["aiNeverLook"] = hidden + ["com.example.bank", "com.example.other"]
+            less["bounce"] = bounce
+            write(less)
+            expect(wait(15) { config.bool("bounce") == bounce && config.strings("aiAllowed").isEmpty && config.strings("aiNeverLook").contains("com.example.other") },
+                   "less allowed and one more app kept private were taken (\(config.strings("aiAllowed")), \(config.strings("aiNeverLook")))")
+            expect(listed(onDisk(), "aiNeverLook").contains("com.example.other") && listed(onDisk(), "aiAllowed").isEmpty, "and the file was left as it was written")
+
+            // In Petal itself (the settings window, a card's Always) the same four still change both ways.
+            config.set("aiAllowed", allowedBefore)
+            config.set("aiNeverLook", hidden)
+            expect(wait(10) { listed(onDisk(), "aiNeverLook") == hidden }, "a change made in Petal lands as before")
+            expect(config.strings("aiNeverLook") == hidden, "and an app the person takes off the private list in Petal comes off")
+            return "Full access, using apps, more allowed and a shorter private list asked for in the file were put back; less was taken; the rest of the file was taken either way"
         }
     }
 

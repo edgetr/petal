@@ -246,6 +246,15 @@ struct RunDisplayCheck {
         expect(RunDisplayRules.opening(running: false, windows: 0, address: false, browser: false, bare: true) == .go, "an app that isn't open opens")
         expect(RunDisplayRules.opening(running: true, windows: 1, address: true, browser: false, bare: false) == .go, "an address in an app that isn't a browser")
 
+        // The process an open started is the run's to put away; never another run's own browser.
+        let runs: (Int32) -> Bool = { $0 == 700 }
+        expect(RunDisplayRules.started(wasRunning: false, answered: 412, runs: runs, persons: [412]) == 412, "an app this open started is the run's")
+        expect(RunDisplayRules.started(wasRunning: true, answered: 412, runs: runs, persons: [412]) == nil, "one the person had open never is")
+        expect(RunDisplayRules.started(wasRunning: false, answered: 700, runs: runs, persons: []) == nil, "a run's own browser that took the open isn't this run's to quit")
+        expect(RunDisplayRules.started(wasRunning: false, answered: 700, runs: runs, persons: [412]) == nil, "nor is anything else then: this open started nothing")
+        expect(RunDisplayRules.started(wasRunning: false, answered: nil, runs: runs, persons: [700, 412]) == 412, "macOS named none: the person's copy, never a run's")
+        expect(RunDisplayRules.started(wasRunning: false, answered: nil, runs: runs, persons: [700]) == nil, "and none where there's only a run's")
+
         // MARK: What a run leaves behind
 
         typealias Left = RunDisplayRules.Left

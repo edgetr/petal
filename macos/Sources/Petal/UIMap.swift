@@ -43,6 +43,12 @@ enum UIMap {
     static let valueRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField", "AXCheckBox",
                                           "AXRadioButton", "AXSlider", "AXPopUpButton", "AXIncrementor", "AXDateField", "AXStepper"]
 
+    /// Petal's own windows (its notes and their editors, its viewer, its settings) are never read or used through
+    /// `petal_ui` and `petal_act`: they aren't an app to work in, and a note's words go only through the note tools.
+    /// The refusal in words for a window of the process `pid` when it is Petal itself (`petal`), else nil.
+    static func petalsOwn(_ pid: pid_t, petal: pid_t = getpid()) -> String? { pid == petal ? ownWords : nil }
+    static let ownWords = "That's one of Petal's own windows: petal_ui and petal_act never read or use Petal itself. For a document in Petal's viewer, petal_view gives its words; a note's are petal_note_read's."
+
     static func isSecure(_ node: UINode) -> Bool { node.subrole == "AXSecureTextField" }
 
     static func isActionable(_ node: UINode) -> Bool {
@@ -281,7 +287,8 @@ enum UIMap {
 
     /// The vault's secrets as hashes (Swift's, seeded afresh in each process): a whole secret, every run of `piece`
     /// characters of a longer one, and a short one (`short` to `piece` - 1 characters, a PIN) as a word of its own
-    /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets. A card's
+    /// inside text, so text holding a secret, or part of a long one, is caught without keeping the secrets. A code
+    /// written in an item's notes is caught whole, as a word of its own. A card's
     /// security code (any secret of 3 or 4 digits) is caught wherever it isn't part of a longer number ("CVV: 737",
     /// "cvc737", "CVV1234", not 737 in 17370). A card number is also caught across whatever separates its digits ("4242\u{00A0}4242", "4242.4242",
     /// full-width digits), and digits are digits in any script.
@@ -319,8 +326,12 @@ enum UIMap {
         private var wholes = Set<Int>()
         /// Every `piece` characters of a longer secret, as `window` hashes them.
         private var pieces = Set<UInt64>()
-        /// Short secrets by their length, as `window` hashes them.
+        /// Short secrets, by their length, as `window` hashes them.
         private var shorts: [Int: Set<UInt64>] = [:]
+        /// The words found only whole (`words`), as `window` hashes them, and their lengths, shortest first, with
+        /// `base` to each length's power.
+        private var words = Set<UInt64>()
+        private var wordLengths: [(length: Int, power: UInt64)] = []
         /// 3- and 4-digit secrets (security codes), by their length, as `window` hashes them.
         private var numbers: [Int: Set<UInt64>] = [:]
         /// Every `piece` digits of a card number (a secret that is 12 to 19 digits and separators), as `window`
@@ -336,7 +347,17 @@ enum UIMap {
             return index
         }
 
-        init(_ secrets: [String]) {
+        /// `words`: found only whole, as a word of its own, whatever its length (what reads as a code in an item's
+        /// notes), never by its pieces, so the person's other words stay as they are.
+        init(_ secrets: [String], words: [String] = []) {
+            var lengths = Set<Int>()
+            for word in words where !word.isEmpty {
+                wholes.insert(word.hashValue)
+                let codes = Self.codes(Array(word))
+                self.words.insert(Self.window(codes[...]))
+                lengths.insert(codes.count)
+            }
+            wordLengths = lengths.sorted().map { length in (length, (0..<length).reduce(UInt64(1)) { power, _ in power &* Self.base }) }
             for secret in secrets where !secret.isEmpty {
                 wholes.insert(secret.hashValue)
                 let characters = Array(secret)
@@ -409,6 +430,7 @@ enum UIMap {
         private func scan(_ characters: [Character], _ found: (Int, Int) -> Bool) {
             let codes = Self.codes(characters)
             var going = true
+            if !wordLengths.isEmpty { going = scanWords(characters, codes, found) }
             for (length, hashes) in shorts where going {
                 Self.roll(codes, length) { start, hash in
                     if hashes.contains(hash), Self.edge(characters, start), Self.edge(characters, start + length) { going = found(start, length) }
@@ -461,6 +483,44 @@ enum UIMap {
                 }
             }
             flush()
+        }
+
+        /// The words found only whole, in one pass however many lengths they have: a word is letters, digits, dashes
+        /// and underscores (Vault.noteCodes), so it can only be inside a run of those at least as long as the shortest
+        /// word, starting at a letter or digit after the run's start or a dash or underscore, and ending where a word
+        /// ends. Each such span of a word's length is hashed from the run's running hashes. False once `found` says stop.
+        private func scanWords(_ characters: [Character], _ codes: [UInt64], _ found: (Int, Int) -> Bool) -> Bool {
+            guard let shortest = wordLengths.first?.length else { return true }
+            func inWord(_ character: Character) -> Bool { Self.letterOrDigit(character) || character == "-" || character == "_" }
+            var prefix: [UInt64] = []
+            var start = 0
+            while start < characters.count {
+                guard inWord(characters[start]) else { start += 1; continue }
+                var end = start
+                while end < characters.count, inWord(characters[end]) { end += 1 }
+                defer { start = end }
+                guard end - start >= shortest else { continue }
+                // prefix[k]: the hash of the run's first k characters, so any span's is prefix[e] - prefix[s]·base^length.
+                prefix.removeAll(keepingCapacity: true)
+                prefix.append(0)
+                for index in start..<end { prefix.append(prefix[prefix.count - 1] &* Self.base &+ codes[index]) }
+                for from in start..<end where Self.letterOrDigit(characters[from]) {
+                    guard from == start || !Self.letterOrDigit(characters[from - 1]) else { continue }
+                    for (length, power) in wordLengths {
+                        let to = from + length
+                        guard to <= end else { break }
+                        let hash = prefix[to - start] &- prefix[from - start] &* power
+                        if words.contains(hash), Self.edge(characters, to), !found(from, length) { return false }
+                    }
+                }
+            }
+            return true
+        }
+
+        /// A letter or a digit of any script, ASCII's told at once.
+        @inline(__always) static func letterOrDigit(_ character: Character) -> Bool {
+            if let ascii = character.asciiValue { return (48...57).contains(ascii) || (65...90).contains(ascii) || (97...122).contains(ascii) }
+            return character.isLetter || character.isNumber
         }
 
         /// `text` is a secret, holds `piece` characters or more of one, or holds a short one whole, not run into the
@@ -688,7 +748,9 @@ enum UIMap {
     // MARK: The clipboard
 
     /// What a menu item, key or button does with the clipboard: copy (or cut) puts something on it, paste takes it off.
-    enum Clip { case copy, paste }
+    /// `send` hands what's selected to another app without the clipboard (a Service, Share, Look Up): checked as a
+    /// copy is.
+    enum Clip { case copy, paste, send }
 
     /// ⌘V with any other modifiers (⌥⇧⌘V pastes and matches style) pastes; ⌘C and ⌘X copy.
     static func clip(key: Key) -> Clip? {
@@ -769,6 +831,44 @@ enum UIMap {
     /// A menu item: its shortcut first, then the app's own name for it, then its words.
     static func clip(menuItem title: String?, identifier: String = "", character: String? = nil, modifiers: Int = 0) -> Clip? {
         clip(shortcut: character, modifiers: modifiers) ?? clip(identifier: identifier) ?? clip(title: title)
+    }
+
+    // MARK: Handing the selection on
+
+    /// Menus whose items hand what's selected to another app, or say it out loud: Services, Share and Speech (folded;
+    /// Turkish's Servisler, Paylaş and Konuşma too).
+    static let sendMenus: Set<String> = ["services", "share", "speech", "servisler", "paylas", "konusma"]
+    /// Items that do, by the words they start with or hold: Look Up “…”, Search With Google, Translate “…”, Use
+    /// Selection for Find (it goes on the find clipboard, which every app reads), Start Speaking, Share…, and
+    /// Turkish's "…" Sözcüğünü Ara, Google ile Ara, Çevir, Seçimi Bulmak için Kullan, Konuşmaya Başla, Paylaş.
+    static let sendPhrases = ["look up", "search with", "search in", "search the web", "translate", "use selection for find",
+                              "start speaking", "share", "sozcugunu ara", "ile ara", "cevir", "secimi bulmak icin kullan",
+                              "konusmaya basla", "paylas"]
+
+    /// The menu at this place in an app's menu bar, as Accessibility lists it, is the app's own (About, Services,
+    /// Quit): the Apple menu comes first, then the app's.
+    static func ownMenu(at index: Int) -> Bool { index == 1 }
+
+    /// A menu item that hands what's selected to another app: anything under Services, Share or Speech, anything in
+    /// a submenu of the app's own menu (`appMenu`: where Services is, in every language), an item whose words say so,
+    /// and ⌘E (Use Selection for Find, in every language).
+    static func sends(menu title: String?, appMenu: Bool = false, character: String? = nil, modifiers: Int = 0) -> Bool {
+        if modifiers == 0, character?.lowercased() == "e" { return true }
+        let path = title.map(menuPath) ?? []
+        if appMenu, path.count > 2 { return true }
+        let folded = path.map { words(fold($0)).joined(separator: " ") }
+        if folded.dropLast().contains(where: sendMenus.contains) { return true }
+        guard let last = folded.last else { return false }
+        let padded = " " + last + " "
+        return sendPhrases.contains { padded.contains(" " + $0 + " ") }
+    }
+
+    /// A key that may hand what's selected to another app: ⌘ with a character that none of the app's own menus has
+    /// (`claimed`) is one macOS offers to Services (⇧⌘L searches the web with the selection, ⇧⌘Y makes a sticky
+    /// note of it, ⌃⌘D looks it up), whatever keys the person gave theirs. A key the menus have is judged as that
+    /// item (`sends(menu:)`); one that types nothing (an arrow, Delete, Return) is no Service's.
+    static func sends(key: Key, claimed: Bool) -> Bool {
+        key.command && key.character != nil && !claimed
     }
 
     /// A button or other control: the app's own name for it, then its title, description and help.
@@ -1135,6 +1235,23 @@ enum UIMap {
         var parts = [text]
         for separator in [">", "›", "→"] { parts = parts.flatMap { $0.components(separatedBy: separator) } }
         return parts.map(tidy).filter { !$0.isEmpty }
+    }
+
+    /// A menu path as petal_act tells it ("File › Export…"). A menu's titles are its app's own text (the Window menu
+    /// lists every window by its title), so each goes through `shown`, the vault's redaction, before it's told.
+    static func menuShown(_ walked: [String], shown: (String) -> String) -> String {
+        walked.filter { !$0.isEmpty }.map(shown).joined(separator: " › ")
+    }
+
+    /// Why there's no menu called `asked` (the AI's own word for it), with the menus there are, each through `shown`.
+    static func noMenu(_ asked: String, menus: [String], shown: (String) -> String) -> String {
+        "There's no “\(asked)” menu. The menus are: \(menus.filter { !$0.isEmpty }.map(shown).joined(separator: ", "))."
+    }
+
+    /// Why the menu at `walked` has no item called `asked`, with up to 30 of the items it has, each through `shown`.
+    static func noMenuItem(_ asked: String, in walked: [String], items: [String], shown: (String) -> String) -> String {
+        let names = items.filter { !$0.isEmpty }.prefix(30).map(shown)
+        return "There's no “\(asked)” in \(menuShown(walked, shown: shown)). It has: \(names.joined(separator: ", "))."
     }
 
     /// A menu item's title matches what was asked: case aside, "..." the same as "…", and a trailing "…" optional.

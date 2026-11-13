@@ -9,8 +9,9 @@ import ScreenCaptureKit
 /// browser's Automation), so the AI never needs them itself.
 ///
 /// Looking is free. Anything that changes something asks first, with a card in the dock's style (Allow once,
-/// Always, Don't), unless the chat has Full access or the person said Always for that kind of thing. Files go to the
-/// Trash, never away for good, and the last batch can be put back.
+/// Always, Don't), unless the chat has Full access or the person said Always for that kind of thing. Both cover Petal
+/// AI and the person's own Claude Code and Codex; any other program is asked every time, on a card that says who it
+/// is. Files go to the Trash, never away for good, and the last batch can be put back.
 ///
 /// It also remembers what the person says to remember and what the AI notices on its own (`aiMemory`).
 @MainActor @Observable
@@ -72,21 +73,30 @@ final class Assist {
     /// `keep`: the label of an Always kept as `kept` says (an agent's grant), shown even when Don't is the default.
     /// `owner`: the chat or AI session asking (Assist.handle's caller), always said: its Stop, next turn or hanging up
     /// answers its card Don't. Only what no chat asked for (a routine's own run) passes nil.
-    func ask(_ kind: String, _ title: String, detail: String = "", always: Bool = false, form: VaultForm? = nil, warn: Bool = false,
+    /// Full access and Always cover Petal's own chats and helpers (an owner the panel knows), a routine's own run, and
+    /// the person's own Claude Code and Codex outside Petal (signed by their makers), whose cards say who asks and
+    /// `wants` (what for: "use Mail") under that agent's mark. Anyone else (a program, a command, an agent Petal
+    /// can't verify) gets a card every time, with no Always, that says the same.
+    func ask(_ kind: String, _ title: String, wants: String? = nil, detail: String = "", always: Bool = false, form: VaultForm? = nil, warn: Bool = false,
              allow: String = "Allow", owner: String?, keep: String? = nil, mark: AgentAccess.Agent? = nil, kept: (() -> Void)? = nil,
              typed: ((VaultForm.Answer) -> Void)? = nil, done: @escaping (Bool) -> Void) {
+        let asker = NoteHelp.asker(owner: owner, known: owner.map { app.claude.note(withID: $0) != nil } ?? false,
+                                   verified: owner.flatMap { outside[$0] }?.agent.verified ?? false)
         // `always` (the vault) asks every time: neither Full access nor an earlier Always skips it.
         // An automatic approval (an Always given earlier, or Full access) is registered on the asking helper's run
         // first: taking that Always back cancels every run using it. A run that isn't going on is refused.
         if form == nil, !always, !warn,
-           let grant = NoteHelp.autoGrant(kind: kind, fullAccess: config.string("claudeAccess") == "full", allowed: config.strings("aiAllowed")) {
+           let grant = NoteHelp.autoGrant(kind: kind, fullAccess: config.string("claudeAccess") == "full", allowed: config.strings("aiAllowed"), asker: asker) {
             return done(app.paper.helpers.authorized(owner, grant))
         }
         settle(false)   // one question at a time: a newer one replaces an older one, which is declined
         formTyped = typed
         keptAlways = keep == nil ? nil : kept
-        let request = Request(kind: kind, title: title, detail: detail, every: always || warn, owner: owner, form: form, warn: warn,
-                              allow: allow, keep: keep, mark: mark)
+        // Who asks, when it isn't Petal AI: as Petal read it off the socket with this caller's request.
+        let who = asker == .outside || asker == .agent ? owner.flatMap { outside[$0] } : nil
+        let card = NoteHelp.card(title: title, wants: wants, every: always || warn, asker: asker, label: who?.label)
+        let request = Request(kind: kind, title: card.title, detail: detail, every: card.every, owner: owner, form: form, warn: warn,
+                              allow: allow, keep: keep, mark: mark ?? (asker == .outside || asker == .agent ? who?.agent ?? .unknown : nil))
         pending = request
         answer = done
         // In the chat when it's open and the question is its own (the card shows there); over the dock otherwise
@@ -109,6 +119,9 @@ final class Assist {
 
     @ObservationIgnored private var formTyped: ((VaultForm.Answer) -> Void)?
     @ObservationIgnored private var keptAlways: (() -> Void)?
+    /// Who each caller outside Petal is, by the name its requests go under (`mcp-<pid>`): as Petal read it off the
+    /// socket with that caller's latest request (`handle`), for what its cards say. Never what the caller says.
+    @ObservationIgnored private var outside: [String: AgentAccess.Caller] = [:]
 
     /// Shows a made-up question, for `Petal --snapshot`.
     func preview(_ request: Request?) { pending = request }
@@ -157,6 +170,11 @@ final class Assist {
         if pending?.owner == owner { settle(false) }
     }
 
+    /// That one card, if it's still up, is answered Don't.
+    func decline(card: UUID) {
+        if pending?.id == card { settle(false) }
+    }
+
     /// A request's asker went before its answer (an agent that gave up waiting, or quit): what that chat or AI
     /// session had going stops, its card is answered Don't, and what it was allowed this task goes, so nothing it
     /// asked for happens with nobody to hear of it; its next request starts afresh and asks again. (An AI session's
@@ -199,6 +217,13 @@ final class Assist {
         let gone: @Sendable () -> Bool = { request?.hungUp == true }
         let live: @Sendable () -> Bool = { !gone() }
         guard live() else { return }   // its client went before Petal got to it: nothing to answer
+        // Who a caller outside Petal is goes with its requests to every card made for them (`ask`).
+        if let note, let who {
+            if outside.count > 200 {
+                outside = outside.filter { name, _ in name.hasPrefix("mcp-") ? Int32(name.dropFirst(4)).map { kill($0, 0) == 0 } ?? false : true }
+            }
+            outside[note] = who.agent == .petal ? nil : who
+        }
         // An AI session outside Petal keeps its hidden display while it keeps asking (RunDisplays).
         app.displays.touched(note)
         let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
@@ -372,7 +397,9 @@ final class Assist {
             let realTitle: String = window.flatMap { Windows.value($0, kAXTitleAttribute) } ?? ""
             let frame = window.flatMap { Windows.frame(of: $0) } ?? .zero
             let focused: AXUIElement? = number == focusedID ? Windows.value(element, kAXFocusedUIElementAttribute) : nil
-            let selected: String = focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
+            // Never the selection in Petal's own windows: a note's words are told through the note tools, which keep
+            // a Private notebook's to itself.
+            let selected: String = pid == getpid() ? "" : focused.flatMap { Windows.value($0, kAXSelectedTextAttribute) } ?? ""
             // Nothing of the vault's secrets goes to the AI: not in the title, the selection, nor the clipboard.
             let title = Self.withoutSecrets(realTitle)
             // Nothing selected in a field holding a secret, not even part of one: a card number selected four
@@ -718,7 +745,10 @@ final class Assist {
                     // Its asker gone while the app was looked up: nothing opens.
                     guard live() else { return }
                     if let appURL {
-                        NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: NSWorkspace.OpenConfiguration())
+                        let configuration = NSWorkspace.OpenConfiguration()
+                        // A run's own copy of that browser is never the one this opens in (as DockController.launch).
+                        if RunApps.running(bundle: opener.bundle) { configuration.createsNewApplicationInstance = true }
+                        NSWorkspace.shared.open([url], withApplicationAt: appURL, configuration: configuration)
                     } else {
                         NSWorkspace.shared.open(url)
                     }
@@ -779,7 +809,7 @@ final class Assist {
                 }
                 // Its own, which the person never saw: the run's to put away, with nobody to ask.
                 if answer == .go { return quit() }
-                ask("quit", "Quit \(label)", detail: "It asks to save anything unsaved.", owner: caller) { allowed in
+                ask("quit", "Quit \(label)", wants: "quit \(label)", detail: "It asks to save anything unsaved.", owner: caller) { allowed in
                     guard allowed, live() else { return send(["declined": "The person didn't allow quitting \(label)."]) }
                     quit()
                 }
@@ -924,6 +954,9 @@ final class Assist {
             var found: [AppWindow] = []
             // A run's own display too: whose windows each caller sees is decided below.
             for pid in pids { found += Windows.windows(of: pid, everywhere: true) }
+            // Each title as the AI may be told it: the vault's secrets taken out, as petal_look's are (here, off the
+            // main thread, since it may read the Keychain).
+            let titles = Dictionary(found.map { ($0.id, Self.withoutSecrets($0.title)) }, uniquingKeysWith: { first, _ in first })
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // Its asker gone while the windows were read: nothing is asked or done for it.
@@ -935,13 +968,17 @@ final class Assist {
                         let hidden = self.privatePIDs
                         return send(["windows": found.map { w in
                             var item: [String: Any] = ["id": w.id, "app": NSRunningApplication(processIdentifier: w.pid)?.localizedName ?? "",
-                                                       "title": hidden.contains(w.pid) ? "" : w.title,
+                                                       "title": hidden.contains(w.pid) ? "" : titles[w.id] ?? UIMap.hidden,
                                                        "minimized": w.minimized, "here": self.app.docks.isOnScreen(w)]
                             if mine(w) { item["display"] = "yours" }
                             return item
                         }])
                     }
-                    let window = found.first { $0.id == wanted } ?? found.first { !wanted.isEmpty && $0.title.localizedCaseInsensitiveContains(wanted) }
+                    // Found by its id, or by words of its title as the list told it (never its own title's hidden
+                    // words, nor a private app's title, which the list leaves empty).
+                    let hidden = self.privatePIDs
+                    let window = found.first { $0.id == wanted }
+                        ?? found.first { !wanted.isEmpty && !hidden.contains($0.pid) && (titles[$0.id] ?? "").localizedCaseInsensitiveContains(wanted) }
                         ?? (wanted.isEmpty ? found.first { !$0.minimized } : nil)
                     guard let window else { return fail("No such window; list them first.") }
                     // Nothing on a run's own display comes forward: the person can't see it there.
@@ -950,7 +987,8 @@ final class Assist {
                     }
                     let appName = NSRunningApplication(processIdentifier: window.pid)?.localizedName ?? "the window"
                     // A private app's window is called by its app's name only, in replies and the history.
-                    let label = window.title.isEmpty || self.privatePIDs.contains(window.pid) ? appName : window.title
+                    let title = titles[window.id] ?? UIMap.hidden
+                    let label = title.isEmpty || self.privatePIDs.contains(window.pid) ? appName : title
                     switch action {
                     case "focus": Windows.focus(window, onScreen: self.app.docks.isOnScreen(window)); send(["focused": label])
                     case "minimize":
@@ -978,7 +1016,7 @@ final class Assist {
                         // Its own window on its own display, which the person never saw: closed without asking them
                         // (its app still asks to save anything unsaved, there, where the run can answer).
                         if self.app.displays.owns(window: window.number, for: caller) { return close() }
-                        self.ask("close", "Close “\(label)”", detail: "Its app asks to save anything unsaved.", owner: caller) { allowed in
+                        self.ask("close", "Close “\(label)”", wants: "close “\(label)”", detail: "Its app asks to save anything unsaved.", owner: caller) { allowed in
                             guard allowed, live() else { return send(["declined": "The person didn't allow closing it."]) }
                             close()
                         }
@@ -1051,7 +1089,8 @@ final class Assist {
         let urls = paths.map(URL.init(fileURLWithPath:)).filter { FileManager.default.fileExists(atPath: $0.path) }
         guard !urls.isEmpty else { return fail("None of those files are there.") }
         let names = urls.prefix(3).map(\.lastPathComponent).joined(separator: ", ") + (urls.count > 3 ? " and \(urls.count - 3) more" : "")
-        ask("trash", urls.count == 1 ? "Move “\(urls[0].lastPathComponent)” to the Trash" : "Move \(urls.count) items to the Trash",
+        let moving = urls.count == 1 ? "“\(urls[0].lastPathComponent)”" : "\(urls.count) items"
+        ask("trash", "Move \(moving) to the Trash", wants: "move \(moving) to the Trash",
             detail: urls.count == 1 ? "You can put it back." : names, owner: caller) { allowed in
             guard allowed, live() else { return send(["declined": "The person didn't allow it."]) }
             NSWorkspace.shared.recycle(urls) { moved, error in

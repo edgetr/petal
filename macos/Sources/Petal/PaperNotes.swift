@@ -3136,8 +3136,8 @@ extension NoteStore {
 }
 
 /// What Petal Notes keeps on this Mac only (never synced): this Mac's id, which notes are open, where notes were
-/// moved to, the last notebook used on each site or app. `Application Support/Petal/notes-state.json`, written off
-/// the main thread.
+/// moved to, the last notebook used on each site or app, and the chains, watchers and morning notes the person set
+/// up here. `Application Support/Petal/notes-state.json`, written off the main thread.
 struct NoteLocal: Codable, Equatable {
     var mac = UUID().uuidString
     /// Notes showing (folded or open) on their window or Desktop, by note id.
@@ -3156,6 +3156,14 @@ struct NoteLocal: Codable, Equatable {
     /// kept across restarts and moved with its file; once the conflict is settled, the note's handle names the one
     /// left (NoteShield.find).
     var copies: [String: String]? = nil
+
+    /// The chains, watchers and morning notes the person's own lines set up on this Mac (`NoteHelp.Standing`): the
+    /// helpers' clock does only these, never one that is only in a note's file. Nil: none kept yet (a Petal from
+    /// before this was kept), so the ones this Mac already had going are taken once (`NoteHelp.adopted`).
+    var standing: [NoteHelp.Standing]? = nil
+    /// That taking was done before the folder was read whole (the person set one up first, or the read took too
+    /// long): the rest is taken, adding, once it is.
+    var adoptPending: Bool? = nil
 
     mutating func copyHandle(_ key: String, redact: ((String) -> String)? = nil) -> String {
         if let made = copies?[key] { return made }
@@ -3190,6 +3198,11 @@ struct NoteLocal: Codable, Equatable {
         if let point = desk.removeValue(forKey: old) { desk[new] = point }
         shown = shown.map { $0 == old ? new : $0 }
         if let handle = handles?.removeValue(forKey: holder) { handles?[new] = handle }
+        standing = standing?.map { kept in
+            var kept = kept
+            if kept.note == old { kept.note = new }
+            return kept
+        }
     }
 
     static var file: URL { Config.supportFolder.appending(path: "notes-state.json") }
@@ -3209,6 +3222,7 @@ struct NoteLocal: Codable, Equatable {
         out.desk = desk.filter { keep($0.key) }
         out.handles = handles?.filter { keep($0.key) }
         out.copies = copies?.filter { keep(String($0.key.split(separator: "#").first ?? "")) }
+        out.standing = standing?.filter { keep($0.note) }
         return out
     }
 

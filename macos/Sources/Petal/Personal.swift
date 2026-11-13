@@ -10,8 +10,9 @@ import CryptoKit
 /// this Petal.
 ///
 /// Updates (Updater.check): while changes exist, a new release's source is combined with them and built, instead of
-/// the release's own Petal.app being installed. If that can't be done, this Petal keeps running and the person is
-/// told, with an offer to report it.
+/// the release's own Petal.app being installed. That Petal.app is still downloaded and checked first, as an update
+/// that's installed is (Updater.source): the source is the commit it says it was built from. If it can't be done,
+/// this Petal keeps running and the person is told, with an offer to report it.
 @MainActor
 enum Personal {
     /// PETAL_PERSONAL_HOME moves all of it elsewhere, and keeps a running Petal from being restarted (for testing).
@@ -114,11 +115,13 @@ enum Personal {
         var errorDescription: String? { message }
     }
 
-    /// Petal's personal signing identity, made once: a self-made certificate, "Petal (Personal)", in a keychain of
-    /// Petal's own whose password only Petal keeps, so signing never asks for the person's login password. macOS
-    /// ties Petal's permissions (Accessibility, Screen Recording) to this certificate, so they carry from one
-    /// personal build to the next.
-    nonisolated static func identity() throws -> (keychain: String, hash: String) {
+    /// Signs with Petal's personal identity, made once: a self-made certificate, "Petal (Personal)", in a keychain
+    /// of Petal's own, so signing never asks for the person's login password (its own password is kept beside it,
+    /// in a file only the person's account can read). macOS ties Petal's permissions (Accessibility, Screen
+    /// Recording) to this certificate, so they carry from one personal build to the next. The keychain is unlocked
+    /// for `body` only (PersonalSigning.unlocked): locked again on every way out, and by itself after two minutes
+    /// without use or when the Mac sleeps, so the key isn't left ready to sign between builds.
+    nonisolated static func withIdentity<T>(_ body: (_ keychain: String, _ hash: String) throws -> T) throws -> T {
         let keychain = signing.appending(path: "petal-personal.keychain-db").path
         let passwordFile = signing.appending(path: "password")
         let fm = FileManager.default
@@ -151,34 +154,32 @@ enum Personal {
                                       "-days", "7300", "-config", "\(p)/cert.cnf"]),
                 ("/usr/bin/openssl", ["pkcs12", "-export", "-inkey", "\(p)/key.pem", "-in", "\(p)/cert.pem", "-out", "\(p)/id.p12",
                                       "-passout", "pass:\(password)", "-name", "Petal (Personal)"]),
-                ("/usr/bin/security", ["create-keychain", "-p", password, keychain]),
-                ("/usr/bin/security", ["set-keychain-settings", keychain]),
-                ("/usr/bin/security", ["unlock-keychain", "-p", password, keychain]),
-                ("/usr/bin/security", ["import", "\(p)/id.p12", "-k", keychain, "-P", password, "-T", "/usr/bin/codesign"]),
-                ("/usr/bin/security", ["set-key-partition-list", "-S", "apple-tool:,apple:", "-s", "-k", password, keychain]),
-            ]
+            ] + PersonalSigning.make(keychain, password: password, identity: "\(p)/id.p12").map { (PersonalSigning.security, $0) }
             for (tool, arguments) in steps where run(tool, arguments).status != 0 {
                 try? fm.removeItem(at: signing)
                 throw Failure("Couldn't make Petal's signing certificate (\(URL(fileURLWithPath: tool).lastPathComponent) \(arguments[0]) failed).")
             }
         }
         let password = (try? String(contentsOf: passwordFile, encoding: .utf8)) ?? ""
-        _ = run("/usr/bin/security", ["unlock-keychain", "-p", password, keychain])
-        // Self-made, so macOS lists it as untrusted; codesign signs with it all the same.
-        let found = run("/usr/bin/security", ["find-identity", keychain]).output.split(separator: "\n")
-            .first { $0.contains("\"Petal (Personal)\"") }?.split(separator: " ").dropFirst().first
-        guard let hash = found.map(String.init) else { throw Failure("Petal's signing certificate is missing from its keychain.") }
-        return (keychain, hash)
+        return try PersonalSigning.unlocked(keychain, password: password, run: { _ = run($0, $1) }) {
+            // Self-made, so macOS lists it as untrusted; codesign signs with it all the same.
+            let found = run(PersonalSigning.security, ["find-identity", keychain]).output.split(separator: "\n")
+                .first { $0.contains("\"Petal (Personal)\"") }?.split(separator: " ").dropFirst().first
+            guard let hash = found.map(String.init) else { throw Failure("Petal's signing certificate is missing from its keychain.") }
+            return try body(keychain, hash)
+        }
     }
 
     /// Signs a build of the person's Petal and puts it in place of this one. Petal restarts into it.
     nonisolated static func install(_ app: URL) throws {
-        let signer = try identity()
         let entitlements = source.appending(path: "macos/Petal.entitlements").path
-        let sign = run("/usr/bin/codesign", ["--force", "--options", "runtime", "--entitlements", entitlements,
-                                             "--keychain", signer.keychain, "--sign", signer.hash, app.path])
-        guard sign.status == 0, run("/usr/bin/codesign", ["--verify", "--strict", app.path]).status == 0 else {
-            throw Failure("Couldn't sign the new Petal: \(sign.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+        // The keychain is locked again as soon as the build is signed, before anything is put in place.
+        try withIdentity { keychain, hash in
+            let sign = run("/usr/bin/codesign", ["--force", "--options", "runtime", "--entitlements", entitlements,
+                                                 "--keychain", keychain, "--sign", hash, app.path])
+            guard sign.status == 0, run("/usr/bin/codesign", ["--verify", "--strict", app.path]).status == 0 else {
+                throw Failure("Couldn't sign the new Petal: \(sign.output.trimmingCharacters(in: .whitespacesAndNewlines))")
+            }
         }
         _ = try FileManager.default.replaceItemAt(Bundle.main.bundleURL, withItemAt: app)
     }
@@ -203,6 +204,7 @@ enum Personal {
         }
         let app = work.appending(path: "unpacked/Petal.app")
         guard UpdateTrust.signed(app) else { throw Failure("Petal \(version)'s download isn't signed by Petal's maker, so it wasn't installed.") }
+        guard UpdateTrust.release(app, is: version) else { throw Failure("The download isn't Petal \(version), so it wasn't installed.") }
         _ = try FileManager.default.replaceItemAt(Bundle.main.bundleURL, withItemAt: app)
     }
 
@@ -211,7 +213,8 @@ enum Personal {
     /// Called by the updater when a newer release is out. Returns false when there are no changes of the person's
     /// own (the release's Petal.app is installed as usual); true when Petal was rebuilt with them. Throws, after
     /// telling the person, when it can't be done; this Petal keeps running either way.
-    static func update(to version: String, manual: Bool) async throws -> Bool {
+    static func update(to release: Updater.Release, manual: Bool) async throws -> Bool {
+        let version = release.version
         guard inUse, !isDevelopmentBuild else { return false }
         guard let tools = await Task.detached(operation: { developerTools }).value else {
             let message = "Your changes to Petal's code need Apple's command line tools to be rebuilt, and they aren't installed."
@@ -226,7 +229,11 @@ enum Personal {
         if (status["changes"] as? Int ?? 0) == 0 && (status["unsaved"] as? [Any] ?? []).isEmpty { return false }
         let provider = PetalApp.shared.chatProvider
         let aiPath = provider.flatMap { PetalApp.shared.paths[$0] }
-        let arguments = ["update", "--version", version, "--json", "--check", buildCheck, "--keep", buildOutput] + (manual ? [] : ["--auto"])
+        // The release itself first, checked as one that's installed is (its checksum, its maker's signature, the
+        // version it said): what's built with the person's changes is the source that Petal.app says it was built
+        // from, by its commit, and no other.
+        let commit = try await Updater.source(of: release)
+        let arguments = ["update", "--version", version, "--commit", commit, "--json", "--check", buildCheck, "--keep", buildOutput] + (manual ? [] : ["--auto"])
         let reply = try await Task.detached { () throws -> [String: Any] in
             try? FileManager.default.removeItem(at: built)
             let reply = result(core(arguments, tools: tools, aiPath: aiPath).output)
@@ -335,9 +342,12 @@ enum Personal {
             if command == "save" { print("Building Petal with your edits (a minute or two)…") }
             finish(pass([command] + rest + build))
         case "retry":
-            let target = ((state["failed"] as? [String: Any])?["version"] as? String) ?? version
+            let failed = state["failed"] as? [String: Any]
+            let target = (failed?["version"] as? String) ?? version
+            // The release that couldn't take them: the same source again, by the commit kept with it.
+            let commit = (failed?["commit"] as? String).flatMap { UpdateTrust.plainCommit($0) ? ["--commit", $0] : nil } ?? []
             print("Bringing your changes over to Petal \(target) and building it…")
-            finish(pass(["update", "--version", target] + build))
+            finish(pass(["update", "--version", target] + commit + build))
         case "restore":
             let status = pass(["restore"] + rest)
             guard status == 0 else { exit(status) }

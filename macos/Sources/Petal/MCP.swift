@@ -90,7 +90,7 @@ enum MCP {
             let dock = read(dockFile) ?? [:]
             let environment = ProcessInfo.processInfo.environment
             return ["settings": effective, "settings_help": help,
-                    "dock": ["apps": dock["apps"] as? [String] ?? [], "position": dock["position"] ?? "bottom",
+                    "dock": ["apps": ConfigRules.apps(dock["apps"]), "position": dock["position"] ?? "bottom",
                              "autohide": dock["autoHide"] ?? false, "dock": dock["dock"] ?? "petal"],
                     "files": ["settings": settingsFile.path, "dock": dockFile.path,
                               "instructions": folder.appending(path: "instructions.md").path,
@@ -152,7 +152,7 @@ enum MCP {
                 if let hide = args["autohide"] as? Bool { dock["autoHide"] = hide; done["autohide"] = hide }
                 guard whole != nil || add != nil || remove != nil else { return }
                 var apps: [String] = []
-                for app in (whole ?? dock["apps"] as? [String] ?? []) + (add ?? []) where !apps.contains(app) { apps.append(app) }
+                for app in (whole ?? ConfigRules.apps(dock["apps"])) + (add ?? []) where !apps.contains(app) { apps.append(app) }
                 apps.removeAll { remove?.contains($0) == true }
                 dock["apps"] = apps
                 done["apps"] = apps
@@ -177,7 +177,7 @@ enum MCP {
             let json = String(decoding: try JSONSerialization.data(withJSONObject: args), as: UTF8.self)
             // Which chat asks: a Petal chat's note (PETAL_NOTE, set by Petal for its own chats), answered about the
             // note's window; any other AI session is this process, so two sessions never share what they looked at
-            // or were allowed.
+            // or were allowed. The running Petal goes by its own record of who this process is, never by this.
             let note = ProcessInfo.processInfo.environment["PETAL_NOTE"] ?? ""
             let caller = note.isEmpty ? "mcp-\(getpid())" : note
             // Petal answers within 150 seconds, or keeps saying it's waiting (a space every 10 s) while a card is up for
@@ -217,9 +217,11 @@ enum MCP {
         return object["result"] ?? [:]
     }
 
-    /// What the running Petal does for `viaPetal`: one line of JSON, the result or the error.
+    /// What the running Petal does for `viaPetal`: one line of JSON, the result or the error. Only the write tools
+    /// `viaPetal` sends (`writeTools`); any other is refused, never done on the dock's thread.
     static func answer(_ name: String, _ json: String) -> String {
         var reply: [String: Any]
+        guard writeTools.contains(name) else { return #"{"error": "Only Petal's settings and dock tools come this way."}"# }
         do {
             let args = (try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any]) ?? [:]
             reply = ["result": try call(name, args)]

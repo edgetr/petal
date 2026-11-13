@@ -31,6 +31,8 @@ latest="$(curl -fsSL "$manifest")" || fail "couldn't reach GitHub"
 version="$(json 'd.version' "$latest")"
 url="$(json 'd.url' "$latest")"
 sha="$(json 'd.sha256' "$latest")"
+# Numbers with dots only (as UpdateTrust.plainVersion in the app): the version is shown, and checked against the app.
+[[ $version =~ ^[0-9]{1,6}(\.[0-9]{1,6}){0,3}$ ]] || fail "the newest release's version isn't one this installer can read"
 
 dest="${PETAL_APPS:-/Applications}"
 if [[ ! -w $dest ]]; then dest="$HOME/Applications"; mkdir -p "$dest"; fi
@@ -45,6 +47,9 @@ ditto -x -k "$tmp/Petal.zip" "$tmp/unpacked" || fail "couldn't unpack Petal $ver
 # The checksum came with the download. The signature can't be made by whoever made the download: every release is
 # signed with Petal's own certificate, by this hash (the same words as UpdateTrust.swift in the app).
 codesign --verify --deep --strict -R="$MAKER" "$tmp/unpacked/Petal.app" 2>/dev/null || fail "the download isn't signed by Petal's maker"
+# And it's the very version its release said, not another (older) build of the maker's under that number.
+[[ $(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$tmp/unpacked/Petal.app/Contents/Info.plist" 2>/dev/null) == "$version" ]] \
+  || fail "the download isn't the Petal $version its release said"
 
 # A Petal that's running quits first, so the new one can take its place.
 if pgrep -xq Petal; then osascript -e 'tell application id "tech.edgetr.petal" to quit' >/dev/null 2>&1 || true; sleep 1; fi

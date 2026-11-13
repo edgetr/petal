@@ -29,7 +29,9 @@ Use, in this order:
    itself from the user's own words ("keep my Downloads tidy", "when I open Xcode, hide Messages"):
    `petal_routine_save` (their words, plus the trigger and actions you fill in), `petal_routines`,
    `petal_routine_run` (`dryRun: true` shows what it would do with the files there now), `petal_routine_undo` (puts
-   moved files back), `petal_routine_delete`. Routines only move files, never delete them.
+   moved files back), `petal_routine_delete`. Routines only move files, never delete them. One that opens
+   something or runs a Shortcut asks the user on a card before it's saved, changed or run by hand; its `open` takes
+   apps, https:// addresses and documents by full path, never a script, a program or another kind of address.
    Using the user's apps (`computerUse`): `petal_ui` lists the front window's controls with ids (e12), and
    `petal_act` presses, types, focuses or scrolls one by id, chooses a menu item by path ("File > Export…") or
    presses a key (cmd-s), through Accessibility with Petal's own pink pointer; the user's pointer never moves. In a
@@ -38,9 +40,12 @@ Use, in this order:
    and pasting, the vault, a tab that isn't showing) comes back as "needs the window in front": ask the user to
    bring it forward (clicking the note in the AI button's preview does), then `petal_ui` again. The
    first use of an app in a reply asks the user; from a session outside Petal's own chat, the first in a task (pass
-   the same `task` words with each act; a new task, two quiet minutes or a Stop asks again). Menus and keys go only to the window `petal_ui` looked at, and an
+   the same `task` words with each act; a new task, two quiet minutes or a Stop asks again), on a card that says
+   who you are (Full access and an earlier Always cover the user's own Claude Code and Codex; any other program is
+   asked every time). Menus and keys go only to the window `petal_ui` looked at, and an
    act on a window that changed since (another row selected, another title) is refused: call `petal_ui` again.
-   Never private apps or password fields; what only a real click could do, ask the user to do. Only the user
+   Never private apps or password fields, and never Petal's own windows (a document in Petal's viewer: `petal_view`
+   gives its words; a note: the note tools); what only a real click could do, ask the user to do. Only the user
    turns `computerUse` on.
    A hidden display for each run (`runDisplays`, off unless the user turned it on): `petal_apps` with
    `action: open` puts the window it makes on a display of your own that the user doesn't see and their pointer can't
@@ -61,15 +66,18 @@ Use, in this order:
    Where you need real keys in an app the user is using right now, Petal waits for them to leave it first.
    A browser of your own (`petal_browser`, with `runDisplays` on): for web work in a run, never the user's own
    browser. Petal starts a separate copy of a browser they have installed (Chrome, Edge, Brave, Vivaldi or Helium;
-   `runBrowser` picks) with a fresh profile, signed in to nothing, on your display, and drives it directly: no
+   `runBrowser` picks; never the one their links open in, so with only that one installed there is none and Petal
+   says so) with a fresh profile, signed in to nothing, on your display, and drives it directly: no
    pointer, no keyboard, nothing in front. `open` an address (https, or http on this Mac), `read` the page as text
    with an id (b12) on every link, button, field, select and checkbox, then `click`, `type`, `select`, `check`,
    `key`, `scroll` and `wait` by id; `tabs`, `tab`, `close_tab`, `back`, `forward`, `reload`. After anything that
    may change the page, `read` again. The first use in a reply asks the user once. It never types into a password,
    card or token field: `petal_vault` fills those into it too (`fields` with ids from `read`), by its own rules,
-   with nothing brought forward. Nothing is downloaded and no file can be chosen; there are no pictures of the page
-   yet (`read` is the page). It goes when your run ends, with everything in it. When the user means the page
-   they're looking at ("this page", "here"), that's `petal_look` and `petal_ui` on their window, as always.
+   with nothing brought forward. Nothing is downloaded and no file can be chosen; a page can't write the user's
+   clipboard by itself, and what a page copies on your press is cleared (an answer says so); there are
+   no pictures of the page yet (`read` is the page). It goes when your run ends, with everything in it. When the
+   user means the page they're looking at ("this page", "here"), that's `petal_look` and `petal_ui` on their
+   window, as always.
    The vault (`petal_vault`): logins, contact info, addresses, payment info and API keys, filled by Petal
    into fields from `petal_ui` without the AI seeing a secret (`action: fill`, the item and `fields`
    {field: id}). A login fills by itself on its own site or app, an API key on its service's site, this Mac or an
@@ -113,7 +121,9 @@ Use, in this order:
   (`watch:`, on one Mac), "make this recalculate" (`calc:`), "when @A is done, draft @B" (`chain:`), "check this
   against @Notebook", "leave me a note every morning" (the cover's `morning:`). Models are named in words ("use Opus
   5.5 … have GPT 6.1 Sol look for holes"). A Private notebook (`private: true` on its cover) is read only by a note
-  inside it. Never write `@Petal` into a note to make something happen.
+  inside it. Never write `@Petal` into a note to make something happen, nor a `watch:`, `chain:` or `morning:` key:
+  Petal keeps those going only on the Mac where the person's own line set them up, and one that is only in a file
+  does nothing.
    Petal's viewer (part of Petal Notes) shows a document with the notes on that file in a margin: a PDF
    through PDFKit (notes lined up with their passage, a dashed line to its highlight), Word, PowerPoint, Keynote,
    Excel, Pages and Numbers through macOS's own Quick Look preview (notes per page or slide), Open in <app> one click
@@ -136,6 +146,9 @@ Use, in this order:
 3. The files in `~/.config/petal/`; Petal reloads them within a second:
 
 - `settings.json`: settings; `petal_get_state` (or `petal get`) lists every key with its default and help.
+  Four of them widen only in Petal's own windows (Settings, the chat's options, Always on a card), never from
+  this file or a tool while Petal runs: `claudeAccess` to full, `computerUse` on, more in `aiAllowed`, fewer apps
+  in `aiNeverLook`. Petal puts such a change back; ask the user to make it in Settings.
 - `dock.json`: the dock itself. `apps` (its apps in the order they show: bundle ids, and `https://` addresses for
   website shortcuts, shown with the site's own icon and a globe badge), `position` (bottom, left, right),
   `autoHide`, `dock` (petal or macos), `keepWindowsClear`. There is no `modes.json`: one from an earlier Petal,
@@ -161,8 +174,9 @@ Use, in this order:
   were made on: this Mac, its volume, inode and creation date), so they follow the file when it's renamed and a new
   file at its old path never gets them; keep it when editing by hand. The viewer tools' answers hide saved secrets
   as (hidden), and say nothing while the vault can't be read. A note changed in two places at once shows as two read-only papers (one may be a
-  "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac is in `~/Library/Application Support/Petal/notes-state.json`.
-- `routines.json`: the routines; change them with the routine tools rather than by hand. What they did is in
+  "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac, and which watchers, chains and morning notes were set up on it, is in `~/Library/Application Support/Petal/notes-state.json`.
+- `routines.json`: the routines; change them with the routine tools rather than by hand (one written there with
+  a folder outside the home folder, or in its Library, is listed and never runs). What they did is in
   `~/Library/Application Support/Petal/routines-log.json`.
 
 Keep the JSON valid: Petal won't overwrite a file it can't read, and won't apply it either.
@@ -186,7 +200,8 @@ When the user says "get the Anthropic key from Petal to test this" or "use the l
   `--env`. What the command prints comes back with the key replaced by
   `[Anthropic key]`, and its exit code is the command's. `petal_vault` `action: list` (`kind: apiKey`) shows the
   titles. A key under 16 characters is refused (too short to keep out of the output): fill it into a field
-  instead. Removing a grant stops a use still waiting on it, and an Allow once covers that one run or fill.
+  instead. Petal asks the user each time, from Petal's own chat too (in a project, not the home folder, they
+  can say Always for it), and its card shows the command. Removing a grant stops a use still waiting on it, and an Allow once covers that one run or fill.
 - A server you start to test (a bring-your-own-key app): start it with `petal run` so it has the key, or fill the
   key into its settings page with `petal_vault` `fill` (an API key fills by itself on `http://localhost` and in apps).
 - Never ask for the key, print it, write it to a file, or put it on a command line, and don't try to get it out of

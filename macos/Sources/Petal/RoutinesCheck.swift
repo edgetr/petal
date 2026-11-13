@@ -3,8 +3,11 @@ import AppKit
 /// `Petal --routines-check [--ai]`: runs routines on throwaway folders in the temporary folder, without the rest of
 /// Petal (no dock, no settings, nothing in ~/.config/petal): making one through Petal AI's tool, a dry run, tidying
 /// what's there, putting it back, new files settling (a growing file, a Chrome and a Firefox download), a second,
-/// pickier routine winning, the file-name patterns and times, and routines saved when the Mac had modes (kept as
-/// written, never run). With --ai, sorting asks Claude Haiku (the person's own `claude`, a few quick calls); without,
+/// pickier routine winning, the file-name patterns and times, links (a subfolder that is a link never filed into, a
+/// link among the files left alone, a named folder that really is elsewhere), the card before a routine that opens
+/// something or runs a Shortcut is saved, changed or run by hand (answered by the check; nothing is opened or run),
+/// what open takes, routines saved when the Mac had modes (kept as written, never run), and routines written by hand
+/// with a folder outside the home folder (never run). With --ai, sorting asks Claude Haiku (the person's own `claude`, a few quick calls); without,
 /// it sorts by kind.
 @MainActor
 enum RoutinesCheck {
@@ -48,6 +51,7 @@ enum RoutinesCheck {
         check(Routines.folderName("../Receipts/2026", among: ["receipts"]) == "Receipts 2026"
               && Routines.folderName("receipts", among: ["Receipts"]) == "Receipts" && Routines.folderName(NSNull(), among: []) == nil, "folder names made safe")
         check(!Routines.allowed(URL(fileURLWithPath: NSHomeDirectory())) && !Routines.allowed(URL(fileURLWithPath: NSHomeDirectory() + "/Library/Caches"))
+              && !Routines.allowed(URL(fileURLWithPath: NSHomeDirectory() + "/library/LaunchAgents"))
               && Routines.allowed(URL(fileURLWithPath: NSHomeDirectory() + "/Downloads")) && !Routines.allowed(URL(fileURLWithPath: "/etc")), "only folders in home")
         var at = Routines.Trigger()
         at.on = "time"; at.at = "18:00"; at.days = [1, 2, 3, 4, 5]
@@ -181,6 +185,108 @@ enum RoutinesCheck {
             _ = tool("petal_routine_delete", ["id": kid], routines)
             _ = tool("petal_routine_delete", ["id": wid], routines)
         }
+        // Links. A subfolder Petal would file into that is a link is never followed, wherever it leads; the rest of
+        // the folder is still tidied.
+        let links = root.appending(path: "Links"), elsewhere = root.appending(path: "Elsewhere")
+        try? fm.createDirectory(at: links, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: elsewhere, withIntermediateDirectories: true)
+        let inLinks = { (path: String) in fm.fileExists(atPath: links.appending(path: path).path) }
+        let isLink = { (url: URL) in (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true }
+        try? fm.createSymbolicLink(atPath: links.appending(path: "Images").path, withDestinationPath: elsewhere.path)
+        fm.createFile(atPath: links.appending(path: "a.png").path, contents: Data(repeating: 65, count: 100))
+        fm.createFile(atPath: links.appending(path: "b.pdf").path, contents: Data(repeating: 65, count: 100))
+        let linked = tool("petal_routine_save", ["words": "Sort these by kind", "trigger": ["on": "file", "folder": links.path],
+                                                 "actions": [["do": "sort", "by": "kind"]]], routines)
+        let lid = (linked["saved"] as? [String: Any])?["id"] as? String ?? ""
+        let sortedLinks = tool("petal_routine_run", ["id": lid], routines)
+        check(inLinks("a.png") && ((try? fm.contentsOfDirectory(atPath: elsewhere.path)) ?? ["?"]).isEmpty && inLinks("PDFs/b.pdf"),
+              "a kind folder that is a link is never filed into; the rest is tidied: \(sortedLinks)")
+        // A link that arrives among the files is left where it is: the files that arrive after it are sorted, it isn't.
+        RunLoop.main.run(until: Date().addingTimeInterval(1))   // its watcher starts
+        try? fm.createSymbolicLink(atPath: links.appending(path: "c.txt").path, withDestinationPath: links.appending(path: "PDFs/b.pdf").path)
+        fm.createFile(atPath: links.appending(path: "d.pdf").path, contents: Data(repeating: 65, count: 100))
+        wait(15) { inLinks("PDFs/d.pdf") }
+        fm.createFile(atPath: links.appending(path: "e.pdf").path, contents: Data(repeating: 65, count: 100))
+        wait(15) { inLinks("PDFs/e.pdf") }
+        check(inLinks("PDFs/d.pdf") && inLinks("PDFs/e.pdf") && isLink(links.appending(path: "c.txt")) && !inLinks("Documents"),
+              "a link among the files that arrive is left where it is")
+        _ = tool("petal_routine_delete", ["id": lid], routines)
+        // The folder a routine names may be a link, but only to somewhere routines file into: one that really is a
+        // hidden folder gets nothing.
+        let kept2 = root.appending(path: ".kept/Filed"), filing = root.appending(path: "Filing")
+        try? fm.createDirectory(at: kept2, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: filing, withIntermediateDirectories: true)
+        try? fm.createSymbolicLink(atPath: root.appending(path: "Filed").path, withDestinationPath: kept2.path)
+        try? fm.createSymbolicLink(atPath: root.appending(path: "Shelf").path, withDestinationPath: elsewhere.path)
+        fm.createFile(atPath: filing.appending(path: "f.pdf").path, contents: Data(repeating: 65, count: 100))
+        let hiding = tool("petal_routine_save", ["words": "File these away", "trigger": ["on": "time", "at": "03:00"],
+                                                 "actions": [["do": "move", "folder": filing.path, "to": root.appending(path: "Filed").path]]], routines)
+        let hid = (hiding["saved"] as? [String: Any])?["id"] as? String ?? ""
+        let hidden = tool("petal_routine_run", ["id": hid], routines)
+        check(fm.fileExists(atPath: filing.appending(path: "f.pdf").path) && ((try? fm.contentsOfDirectory(atPath: kept2.path)) ?? ["?"]).isEmpty,
+              "a named folder that really is a hidden one gets nothing: \(hidden)")
+        _ = tool("petal_routine_save", ["id": hid, "words": "File these on the shelf",
+                                        "actions": [["do": "move", "folder": filing.path, "to": root.appending(path: "Shelf").path]]], routines)
+        let shelved = tool("petal_routine_run", ["id": hid], routines)
+        check(fm.fileExists(atPath: elsewhere.appending(path: "f.pdf").path) && shelved["moved"] as? Int == 1,
+              "a named folder that is a link to a folder routines may use still works: \(shelved)")
+        _ = tool("petal_routine_delete", ["id": hid], routines)
+        // A routine that opens something or runs a Shortcut asks the person first, when Petal AI saves or changes it
+        // and when it's run by hand (the card is answered here in the person's place; nothing is opened or run in
+        // this check).
+        var asked: [(kind: String, title: String, detail: String)] = []
+        var answer = false
+        routines.answering = { kind, title, detail in
+            asked.append((kind, title, detail))
+            return answer
+        }
+        let before = routines.list.count
+        let morning: [String: Any] = ["words": "Send my report and open the plan every morning", "name": "Morning", "trigger": ["on": "time", "at": "09:00"],
+                                      "actions": [["do": "shortcut", "name": "Send Weekly Report"], ["do": "open", "apps": ["https://example.com/plan"]]]]
+        let declined = tool("petal_routine_save", morning, routines)
+        check(asked.count == 1 && asked.first?.kind == "routine" && asked.first?.title.contains("Morning") == true
+              && asked.first?.detail.contains("Send Weekly Report") == true && asked.first?.detail.contains("example.com") == true,
+              "saving a routine that runs a Shortcut and opens something asks first, saying what it does: \(asked.first.map { "\($0.title) \($0.detail)" } ?? "not asked")")
+        check(declined["declined"] != nil && declined["saved"] == nil && routines.list.count == before, "Don't: nothing is saved")
+        answer = true
+        let allowed = tool("petal_routine_save", morning, routines)
+        let oid = (allowed["saved"] as? [String: Any])?["id"] as? String ?? ""
+        check(asked.count == 2 && !oid.isEmpty && routines.list.count == before + 1, "Allow: it's saved")
+        _ = tool("petal_routine_save", ["id": oid, "name": "Mornings"], routines)
+        _ = tool("petal_routine_save", ["id": oid, "on": false], routines)
+        check(asked.count == 2 && routines.list.first { $0.id == oid }?.name == "Mornings" && routines.list.first { $0.id == oid }?.on == false,
+              "a new name, or turning it off, isn't asked again")
+        _ = tool("petal_routine_save", ["id": oid, "on": true], routines)
+        check(asked.count == 3 && asked.last?.title.contains("Change") == true, "turning it back on asks")
+        answer = false
+        let unchanged = tool("petal_routine_save", ["id": oid, "actions": [["do": "open", "apps": ["https://example.org/other"]]]], routines)
+        check(asked.count == 4 && unchanged["declined"] != nil && routines.list.first { $0.id == oid }?.actions.count == 2, "changing what it opens asks again; Don't keeps it as it was")
+        let notRun = tool("petal_routine_run", ["id": oid], routines)
+        check(asked.count == 5 && asked.last?.title.contains("Run") == true && notRun["declined"] != nil && notRun["ran"] == nil, "running it by hand asks; Don't: it doesn't run")
+        answer = true
+        let didRun = tool("petal_routine_run", ["id": oid], routines)
+        check(asked.count == 6 && didRun["ran"] != nil, "Allow: it runs")
+        let wouldDo = tool("petal_routine_run", ["id": oid, "dryRun": true], routines)
+        check(asked.count == 6 && wouldDo["wouldDo"] != nil, "a dry run does nothing, so it isn't asked")
+        let hides = tool("petal_routine_save", ["words": "Hide Mail at ten", "trigger": ["on": "time", "at": "10:00"], "actions": [["do": "hide", "apps": ["Mail"]]]], routines)
+        let hideID = (hides["saved"] as? [String: Any])?["id"] as? String ?? ""
+        _ = tool("petal_routine_run", ["id": hideID], routines)
+        check(asked.count == 6 && !hideID.isEmpty, "a routine that opens nothing and runs no Shortcut is never asked about")
+        // What open takes: apps, web addresses and documents. A script, a program or another kind of address is
+        // refused when the routine is saved.
+        let starter = root.appending(path: "Start.command"), plan = root.appending(path: "Plan.pdf")
+        fm.createFile(atPath: starter.path, contents: Data("#!/bin/sh\necho hi\n".utf8))
+        fm.createFile(atPath: plan.path, contents: Data("%PDF-1.4\n%%EOF\n".utf8))
+        let opening = { (item: String) -> [String: Any] in
+            tool("petal_routine_save", ["words": "Open it at eleven", "trigger": ["on": "time", "at": "11:00"], "actions": [["do": "open", "apps": [item]]]], routines)
+        }
+        let script = opening(starter.path), link = opening("shortcuts://run-shortcut?name=Send%20Weekly%20Report"), mail = opening("mailto:someone@example.com")
+        check(script["error"] != nil && link["error"] != nil && mail["error"] != nil && asked.count == 6,
+              "open refuses a script and addresses that aren't web addresses, before anything is asked: \(script["error"] ?? script)")
+        let document = opening(plan.path)
+        check(document["saved"] != nil && asked.count == 7, "open takes a document by its path")
+        for made in [oid, hideID, (document["saved"] as? [String: Any])?["id"] as? String ?? ""] { _ = tool("petal_routine_delete", ["id": made], routines) }
+        routines.answering = nil
         Routines.flush()
         check(fm.fileExists(atPath: Routines.file.path) && Routines.file.path.hasPrefix(state.path), "kept in the test's own folder")
         routines.stop()
@@ -219,6 +325,38 @@ enum RoutinesCheck {
               && ((written.first { $0["id"] as? String == "m2" }?["actions"] as? [NSDictionary])?.first) == (["do": "mode", "mode": "design"] as NSDictionary),
               "and they're written back as they were")
         kept.stop()
+
+        // Routines written into routines.json by hand with a folder routines don't tidy (outside the home folder):
+        // listed, each saying why, never run and never read, as one saved through the tool could never be.
+        let nowhere = "/System/petal-routines-check"
+        let outward: [String: Any] = ["id": "o1", "name": "Out", "words": "move these out", "on": true, "lastResult": "",
+                                      "trigger": ["on": "time", "at": "03:00", "days": [Int]()],
+                                      "actions": [["do": "move", "folder": old.path, "to": nowhere]]]
+        let inward: [String: Any] = ["id": "o2", "name": "In", "words": "bring those in", "on": true, "lastResult": "",
+                                     "trigger": ["on": "file", "folder": "/System/Library", "types": [String](), "named": [String]()],
+                                     "actions": [["do": "move", "folder": "", "to": old.path]]]
+        let fine: [String: Any] = ["id": "o3", "name": "Fine", "words": "sort these", "on": true, "lastResult": "",
+                                   "trigger": ["on": "time", "at": "03:00", "days": [Int]()],
+                                   "actions": [["do": "sort", "by": "kind", "folder": old.path, "into": ""]]]
+        Config.writeObject(["routines": [outward, inward, fine]], to: Routines.file)
+        let bounds = Routines()
+        bounds.standalone = true
+        var boundsStarted = false
+        bounds.start { boundsStarted = true }
+        wait(5) { boundsStarted }
+        let listedBounds = (tool("petal_routines", [:], bounds)["routines"] as? [[String: Any]]) ?? []
+        let skips = Dictionary(uniqueKeysWithValues: listedBounds.map { ($0["id"] as? String ?? "", $0["skipped"] as? String ?? "") })
+        check(listedBounds.count == 3 && skips["o1"]?.contains("doesn't run") == true && skips["o2"]?.contains("doesn't run") == true && skips["o3"] == "",
+              "routines with a folder outside the home folder are listed, each saying it doesn't run: \(skips)")
+        check(Routines.outOfBounds(bounds.list[0]) && Routines.outOfBounds(bounds.list[1]) && !Routines.outOfBounds(bounds.list[2]),
+              "by the same rule a saved routine's folders go by")
+        let outRun = tool("petal_routine_run", ["id": "o1"], bounds), outDry = tool("petal_routine_run", ["id": "o1", "dryRun": true], bounds)
+        let inDry = tool("petal_routine_run", ["id": "o2", "dryRun": true], bounds)
+        check(outRun["error"] != nil && outDry["error"] != nil && inDry["error"] != nil && fm.fileExists(atPath: old.appending(path: "left alone.png").path)
+              && !fm.fileExists(atPath: nowhere), "running one by hand is refused, and nothing is listed or moved: \(outRun)")
+        let fineRun = tool("petal_routine_run", ["id": "o3"], bounds)
+        check(fineRun["moved"] as? Int == 1 && fm.fileExists(atPath: old.appending(path: "Images/left alone.png").path), "the one in bounds beside them still runs: \(fineRun)")
+        bounds.stop()
         print(failures == 0 ? "routines: all good" : "routines: \(failures) failed")
         try? fm.removeItem(at: root)
         exit(failures == 0 ? 0 : 1)

@@ -93,14 +93,59 @@ struct RunBrowserCheck {
                "Safari, Arc and Chromium aren't browsers Petal starts")
         expect(R.pick(installed: all, running: [], standard: nil, setting: "")?.bundle == "com.google.Chrome", "nothing else to go by: the list's order")
         expect(R.pick(installed: all, running: ["com.google.Chrome"], standard: nil, setting: "")?.bundle == "com.microsoft.edgemac", "one the person has open comes last")
-        expect(R.pick(installed: all, running: [], standard: "com.google.Chrome", setting: "")?.bundle == "com.microsoft.edgemac", "so does the one their links open in")
-        expect(R.pick(installed: all, running: ["com.microsoft.edgemac"], standard: "com.google.Chrome", setting: "")?.bundle == "com.brave.Browser", "the one that's neither")
-        expect(R.pick(installed: ["com.google.Chrome"], running: ["com.google.Chrome"], standard: "com.google.Chrome", setting: "")?.bundle == "com.google.Chrome",
-               "the only one there is, even open")
+        expect(R.pick(installed: all, running: ["com.google.Chrome", "com.microsoft.edgemac", "com.brave.Browser"], standard: nil, setting: "")?.bundle == "com.google.Chrome",
+               "all of them open: the list's order")
         expect(R.pick(installed: all, running: ["com.brave.Browser"], standard: nil, setting: "com.brave.Browser")?.bundle == "com.brave.Browser", "the person's choice wins")
         expect(R.pick(installed: all, running: [], standard: nil, setting: "Microsoft Edge")?.bundle == "com.microsoft.edgemac", "by its name too")
         expect(R.pick(installed: all, running: [], standard: nil, setting: "com.apple.Safari")?.bundle == "com.google.Chrome", "a choice Petal can't start is no choice")
+        // Never the browser the person's links open in: macOS takes a second copy of it for the app itself, so a link
+        // they open anywhere would open in the run's copy.
+        let chrome = R.known("com.google.Chrome")!
+        expect(R.pick(installed: all, running: [], standard: "com.google.Chrome", setting: "")?.bundle == "com.microsoft.edgemac", "never the one their links open in")
+        expect(R.pick(installed: all, running: ["com.microsoft.edgemac"], standard: "com.google.Chrome", setting: "")?.bundle == "com.brave.Browser", "the one that's neither")
+        expect(R.pick(installed: all, running: ["com.microsoft.edgemac", "com.brave.Browser"], standard: "com.google.Chrome", setting: "")?.bundle == "com.microsoft.edgemac",
+               "one they have open rather than the one their links open in")
+        expect(R.pick(installed: ["com.google.Chrome"], running: ["com.google.Chrome"], standard: "com.google.Chrome", setting: "") == nil, "the only one there is, and it's theirs: none")
+        expect(R.pick(installed: ["com.google.Chrome"], running: [], standard: "com.google.Chrome", setting: "") == nil, "closed or open")
+        expect(R.pick(installed: ["com.google.Chrome"], running: [], standard: "COM.GOOGLE.CHROME", setting: "") == nil, "however macOS spells it")
+        expect(R.pick(installed: all, running: [], standard: "com.google.Chrome", setting: "com.google.Chrome") == nil, "nor when runBrowser names it")
+        expect(R.pick(installed: all, running: [], standard: "com.google.Chrome", setting: "Google Chrome") == nil, "by its name either")
+        expect(R.pick(installed: all, running: [], standard: "com.brave.Browser", setting: "com.google.Chrome")?.bundle == "com.google.Chrome", "a choice that isn't theirs stands")
+        expect(R.pick(installed: all, running: [], standard: "com.apple.Safari", setting: "")?.bundle == "com.google.Chrome", "links that open in a browser Petal doesn't start rule nothing out")
+        expect(R.choose(installed: [], running: [], standard: "com.google.Chrome", setting: "") == .none, "none installed is none, whatever the links open in")
+        expect(R.choose(installed: ["com.google.Chrome"], running: [], standard: "com.google.Chrome", setting: "") == .theirs(chrome, named: false), "only theirs: said as that")
+        expect(R.choose(installed: all, running: [], standard: "com.google.Chrome", setting: "com.google.Chrome") == .theirs(chrome, named: true), "theirs by name: said as that")
+        expect(R.choose(installed: all, running: [], standard: nil, setting: "") == .browser(chrome), "and one a run gets")
+        for standard in [nil, "com.google.Chrome", "com.microsoft.edgemac", "com.brave.Browser", "com.apple.Safari"] as [String?] {
+            for setting in ["", "com.google.Chrome", "Microsoft Edge", "com.brave.Browser", "com.apple.Safari"] {
+                for installed in [all, ["com.google.Chrome"], ["com.brave.Browser", "com.microsoft.edgemac"]] {
+                    for running in [[], ["com.google.Chrome"], Set(all)] as [Set<String>] {
+                        let got = R.pick(installed: installed, running: running, standard: standard, setting: setting)
+                        expect(got == nil || got?.bundle != standard, "whatever is installed, open or named, never theirs (\(installed), \(setting), \(standard ?? "none"))")
+                    }
+                }
+            }
+        }
+        let only = R.theirs("Google Chrome", named: false), named = R.theirs("Google Chrome", named: true)
+        expect(only.contains("Google Chrome") && only.contains("links open in") && only.contains("petal_look") && only != R.none, "why there's none, in words")
+        expect(named.contains("runBrowser") && named.contains("Google Chrome") && named != only, "and that the setting names it")
         expect(R.known("COM.GOOGLE.CHROME")?.team == "EQHXZ8M8AV" && R.known("com.apple.Safari") == nil, "each with who signs it")
+
+        // The clipboard: refused to every page, for every site.
+        let asked = R.refused.map { R.refusal($0) }
+        func refuses(_ name: String, unsanitized: Bool) -> Bool {
+            asked.contains { request in
+                let permission = request["permission"] as? [String: Any] ?? [:]
+                return permission["name"] as? String == name && (permission["allowWithoutSanitization"] as? Bool ?? false) == unsanitized
+            }
+        }
+        expect(refuses("clipboard-write", unsanitized: false), "a page writing plain text to the clipboard is refused")
+        expect(refuses("clipboard-write", unsanitized: true), "and anything else")
+        expect(refuses("clipboard-read", unsanitized: false), "and reading it")
+        expect(asked.allSatisfy { $0["setting"] as? String == "denied" && $0["origin"] == nil && $0["embeddedOrigin"] == nil }, "each denied, for every site (no origin named)")
+        expect(asked.allSatisfy { JSONSerialization.isValidJSONObject($0) && CDP.frame(id: 1, method: "Browser.setPermission", params: $0) != nil }, "as a request the pipe carries")
+        expect(R.copyWatch >= 5 && R.copyWatch <= 10, "the clipboard is watched for as long as a page holds a press, and not much longer")
+        expect(R.copyCleared.contains("cleared the clipboard") && R.copyCleared.contains("petal_vault"), "what's said when a copied secret was cleared")
 
         let frame = CGRect(x: 1512, y: 1032, width: 1280, height: 800)
         let windowed = R.arguments(profile: "/p/run-browsers/note-1-ab", frame: frame)
