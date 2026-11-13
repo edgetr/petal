@@ -578,9 +578,15 @@ final class Assist {
             told["text"] = text
             if !find.isEmpty {
                 told["found"] = made.found
-                if made.found == 0 { told["textNote"] = "No “\(index.redacted(find))” in what Petal read of this window." }
+                if made.found == 0 { told["textNote"] = "No “\(index.redacted(find))” in what Petal read of this window: try another word, or read all of it (text: true, without find)." }
                 if made.findLeft > 0 { told["more"] = "\(made.findLeft) more places with it didn't fit: find a longer phrase, or read the parts." }
                 return told
+            }
+            // A part past the end: said so, and nothing told twice.
+            if part > made.parts {
+                return ["textNote": made.parts == 1 ? "This window's words were all in one part: there's no part \(part)."
+                                                    : "This window's words have \(made.parts) parts: part \(made.parts) was the last.",
+                        "parts": made.parts]
             }
             if made.parts > 1 {
                 told["part"] = made.part
@@ -597,17 +603,20 @@ final class Assist {
     /// so a run that keeps trying doesn't keep asking.
     private static var asked: [String: Date] = [:]
 
-    private static func askOnce(_ what: String, _ ask: () -> Void) {
-        if let last = asked[what], Date().timeIntervalSince(last) < 60 { return }
+    /// Whether it asked now (else it asked within the last minute).
+    @discardableResult
+    private static func askOnce(_ what: String, _ ask: () -> Void) -> Bool {
+        if let last = asked[what], Date().timeIntervalSince(last) < 60 { return false }
         asked[what] = Date()
         ask()
+        return true
     }
 
     /// A picture was asked for without Screen Recording: macOS asks the person (`Capture.askForPermission`), and the
     /// AI is told so, in a line.
     static func askScreenRecording() -> String {
-        askOnce("screen") { Capture.askForPermission() }
-        return "Petal can't take pictures yet: it just asked the person to allow Screen Recording (Settings › Privacy shows it too). Tell them in one line; ask again once it's allowed."
+        let now = askOnce("screen") { Capture.askForPermission() }
+        return "Petal can't take pictures yet: it \(now ? "just asked" : "is waiting for") the person to allow Screen Recording (Settings › Privacy shows it too). Tell them in one line; ask again once it's allowed."
     }
 
     /// The same for Accessibility, which reading and using apps need.
