@@ -123,8 +123,9 @@ final class Config {
         setApps(apps.filter { $0 != app })
     }
 
-    /// "Import macOS's Dock" (`DockImport.merge`): on the first setup (the welcome not finished) macOS's Dock becomes
-    /// Petal's; every other time it only adds the apps and folders Petal's dock doesn't have, after its own.
+    /// "Import macOS's Dock" (`DockImport.merge`): on the first setup (the welcome not finished), into a dock with no
+    /// apps, macOS's Dock becomes Petal's; every other time it only adds the apps and folders Petal's dock doesn't
+    /// have, after its own.
     func importSystemDock() {
         let stacks = strings("stackFolders")
         let result = DockImport.merge(apps: apps, folders: stacks, systemApps: SystemDock.apps(), systemFolders: SystemDock.folders(),
