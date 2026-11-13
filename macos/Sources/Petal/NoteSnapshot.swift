@@ -211,6 +211,9 @@ extension Snapshot {
         broke.end = .failed
         broke.said = "Petal AI couldn't reach the timetable page. Check the connection, then try again."
         broke.who = "✦ Petal · couldn't finish"
+        // Sent from this Mac, as this Mac recorded it: Try again is offered.
+        broke.mac = app.paper.local.mac
+        app.paper.local.sent = ["H8": [broke.id: broke.words]]
         trip.asks = [broke]
         let failed = PaperNote(file: trip, url: root.appending(path: "Work/Train.md"), notebook: "Work")
 

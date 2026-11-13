@@ -3166,6 +3166,9 @@ struct NoteLocal: Codable, Equatable {
     var adoptPending: Bool? = nil
     /// When each note was last opened on this Mac, by note id: a note read often doesn't fade (NoteShelf.faded).
     var opened: [String: Date]? = nil
+    /// The requests this Mac sent from each note (by note id: each request's id and its words as sent): only these
+    /// may be sent again with Try again (NoteHelp.mayRetry). A request that's only in a note's file never runs.
+    var sent: [String: [String: String]]? = nil
 
     mutating func copyHandle(_ key: String, redact: ((String) -> String)? = nil) -> String {
         if let made = copies?[key] { return made }
@@ -3199,6 +3202,7 @@ struct NoteLocal: Codable, Equatable {
         if let spot = spots.removeValue(forKey: old) { spots[new] = spot }
         if let point = desk.removeValue(forKey: old) { desk[new] = point }
         if let when = opened?.removeValue(forKey: old) { opened?[new] = when }
+        if let asks = sent?.removeValue(forKey: old) { sent?[new] = asks }
         shown = shown.map { $0 == old ? new : $0 }
         if let handle = handles?.removeValue(forKey: holder) { handles?[new] = handle }
         standing = standing?.map { kept in
@@ -3227,6 +3231,7 @@ struct NoteLocal: Codable, Equatable {
         out.copies = copies?.filter { keep(String($0.key.split(separator: "#").first ?? "")) }
         out.standing = standing?.filter { keep($0.note) }
         out.opened = opened?.filter { keep($0.key) }
+        out.sent = sent?.filter { keep($0.key) }
         return out
     }
 

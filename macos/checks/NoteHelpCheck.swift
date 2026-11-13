@@ -128,6 +128,59 @@ struct NoteHelpCheck {
         expect(oldFile.asks.isEmpty && oldFile.body.hasSuffix("@Petal say hi") && oldFile.ink.first?.text == "Hi." && oldFile.serialized() == old,
                "an old note with an @Petal line and ink opens unchanged", oldFile.serialized())
 
+        // Where a line's request starts (from its @Petal), swept over generated lines: what's before it is kept unless
+        // it's only blanks, the request's words are exactly from its @Petal on, and nothing before a non-blank is cut.
+        let befores = ["", "  ", "\t", "\u{FFFC} ", "\u{FFFC} Call the bank", "Call the bank ", "Plan", "ü ğ ş: ", "email petal@example.com about it ", "a @[Bus card] note "]
+        let asks = ["@Petal find their hours", "@Petal", "@Petal what's @this?", "@petal lower case", "@[Petal] in brackets"]
+        for before in befores {
+            for request in asks {
+                for gap in ["", " ", "   "] {
+                    let line = before + gap + request
+                    // "bank@Petal" isn't a mention (it calls nothing, so it's never sent).
+                    if gap.isEmpty, let last = before.unicodeScalars.last, CharacterSet.alphanumerics.contains(last) {
+                        expect(!NoteHelp.calls(line), "a word glued to @Petal calls nothing", line.debugDescription)
+                        continue
+                    }
+                    let found = NoteHelp.request(in: line)
+                    let ns = line as NSString
+                    let words = ns.substring(from: found.start)
+                    expect(words == request, "the request is from its @Petal", "\(line.debugDescription) → \(words.debugDescription)")
+                    let kept = ns.substring(to: found.cut)
+                    let blank = (before + gap).trimmingCharacters(in: CharacterSet(charactersIn: " \t")).isEmpty
+                    expect(found.keepsBefore == !blank, "what's before it is kept unless it's only blanks", line.debugDescription)
+                    expect(!found.keepsBefore || (before + gap).hasPrefix(kept) && kept.trimmingCharacters(in: CharacterSet(charactersIn: " \t")) == before.trimmingCharacters(in: CharacterSet(charactersIn: " \t")),
+                           "nothing of what's before it is cut", "\(line.debugDescription) keeps \(kept.debugDescription)")
+                }
+            }
+        }
+        let chainLine = NoteHelp.request(in: "when @Research is done, draft @Proposal")
+        expect(chainLine == (0, 0, false), "a chain's words, with no @Petal, are the whole line")
+        // Try again only for a request this Mac sent and recorded with the very same words.
+        var mine = NoteHelp.Ask(id: "m1", words: "@Petal again", mac: "mac-1")
+        mine.end = .failed
+        expect(NoteHelp.mayRetry(mine, mac: "mac-1", sent: ["m1": "@Petal again"]), "sent from this Mac, recorded: Try again")
+        expect(!NoteHelp.mayRetry(mine, mac: "mac-1", sent: nil) && !NoteHelp.mayRetry(mine, mac: "mac-1", sent: ["m1": "@Petal something else"]),
+               "not recorded here, or recorded with other words: never")
+        expect(!NoteHelp.mayRetry(mine, mac: "mac-2", sent: ["m1": "@Petal again"]) && !NoteHelp.mayRetry(mine, mac: "", sent: ["m1": "@Petal again"]),
+               "sent from another Mac: never")
+        var mineDone = mine
+        mineDone.end = .done
+        expect(!NoteHelp.mayRetry(mineDone, mac: "mac-1", sent: ["m1": "@Petal again"]), "a request answered isn't sent again")
+        let out = NoteHelp.Ask(id: "o1", words: "@Petal elsewhere", mac: "mac-2")
+        expect(NoteHelp.askedElsewhere(out, mac: "mac-1") && !NoteHelp.askedElsewhere(out, mac: "mac-2") && !NoteHelp.askedElsewhere(mineDone, mac: "mac-2"),
+               "a request not over on another Mac reads as asked there")
+        // A note is let go only with truly nothing in it.
+        var empty = NoteFile(id: "E", created: now, body: "")
+        expect(NoteHelp.holdsNothing(empty, untouched: true) && !NoteHelp.holdsNothing(empty, untouched: false), "an empty new note holds nothing")
+        empty.asks = [out]
+        expect(!NoteHelp.holdsNothing(empty, untouched: true), "a request keeps it")
+        empty.asks = []
+        empty.ink = [NoteHelp.Ink(who: "✦ Petal", text: "An answer.")]
+        expect(!NoteHelp.holdsNothing(empty, untouched: true), "an answer keeps it")
+        empty.ink = []
+        empty.helper = NoteHelp.Helper(state: .working, who: "✦ Petal", step: "")
+        expect(!NoteHelp.holdsNothing(empty, untouched: true), "a helper at work keeps it")
+
         // MARK: Mentions
 
         let line = "@Petal bring @this back @Friday with @[Bus card]"

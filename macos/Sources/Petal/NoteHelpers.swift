@@ -840,14 +840,27 @@ final class NoteHelpers {
         sending[ask.id] = Date()
         hints[noteID] = nil
         keptHints[noteID] = nil
-        write(noteID, { $0.asks.append(ask) }) { landed in
-            // Couldn't be kept on the note: the words go back where they were written.
-            guard !landed else { return }
-            self.sending[ask.id] = nil
-            ticket.view?.putBack(trimmed)
-            self.reply(noteID, giveBack: nil) { _ in "Petal couldn't save this just now, so it wasn't sent. Press Return again." }
+        // Asked from this note: never let go as an empty new note. Sent from this Mac: its own record of it.
+        desk?.asked(paper.key)
+        if let desk {
+            desk.local.sent = (desk.local.sent ?? [:]).merging([noteID: (desk.local.sent?[noteID] ?? [:]).merging([ask.id: trimmed]) { _, b in b }]) { _, b in b }
+            desk.local.save(pending: desk.store.pendingIDs)
         }
-        go(noteID, trimmed, at: ticket)
+        // It starts only once the note says it was sent (the write landed). Refused at once, nothing of it was kept:
+        // its words go back where they were written. Written but not landed (kept and tried again, or kept beside a
+        // second version of the note): it's on the note and never started; its bubble says so, with Try again.
+        var refusedAtOnce = true
+        write(noteID, { $0.asks.append(ask) }) { landed in
+            if landed { return self.go(noteID, trimmed, at: ticket) }
+            self.sending[ask.id] = nil
+            if refusedAtOnce {
+                ticket.view?.putBack(trimmed)
+                self.reply(noteID, giveBack: nil) { _ in "Petal couldn't save this just now, so it wasn't sent. Press Return again." }
+            } else {
+                self.settle(noteID, ask: ask.id, .refused, said: "This note couldn't be saved just now, so this wasn't sent. Try again once it's saved.")
+            }
+        }
+        refusedAtOnce = false
     }
 
     /// A request on its way: the vault's redaction settled and readable, then taken.
@@ -867,8 +880,8 @@ final class NoteHelpers {
     /// goes; nothing is sent while a run on this note holds it.
     func retry(_ noteID: String, ask id: String) {
         guard let desk, desk.takesChanges() else { return }
-        guard let paper = paper(noteID), !desk.store.readOnly(paper), let ask = paper.file.asks.first(where: { $0.id == id }), ask.again,
-              askState(noteID, ask) == .over else { return }
+        guard let paper = paper(noteID), !desk.store.readOnly(paper), let ask = paper.file.asks.first(where: { $0.id == id }),
+              mayRetry(noteID, ask), askState(noteID, ask) == .over else { return }
         let ticket = NoteLine(ask: id)
         sending[id] = Date()
         write(noteID) { file in
@@ -887,7 +900,16 @@ final class NoteHelpers {
         guard let editor = desk.editors[paper.key] else { return }
         editor.putBack(ask.words)
         write(noteID) { $0.asks.removeAll { $0.id == id } }
+        if desk.local.sent?[noteID]?.removeValue(forKey: id) != nil { desk.local.save(pending: desk.store.pendingIDs) }
     }
+
+    /// Whether Try again is offered for this request here: sent from this Mac, as this Mac recorded it.
+    func mayRetry(_ noteID: String, _ ask: NoteHelp.Ask) -> Bool {
+        NoteHelp.mayRetry(ask, mac: mac, sent: desk?.local.sent?[noteID])
+    }
+
+    /// This Mac's own id (what a request sent from here says).
+    var thisMac: String { mac }
 
     /// Where a request is now: held by the run at work on its note (its turn, or one waiting for Go on), queued after
     /// that run's turn, being sent, or over (its ending, if any, on it).
