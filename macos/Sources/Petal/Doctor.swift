@@ -259,30 +259,15 @@ enum Skill {
         return (try? Data(contentsOf: folder(for: provider).appending(path: "SKILL.md"))) == ours
     }
 
-    /// Petal's own skill taken out of each AI app's skills folder (the folder too, once empty); someone else's skill
-    /// by the same name is left alone.
-    static func remove() {
-        for provider in Provider.allCases {
-            let folder = folder(for: provider), target = folder.appending(path: "SKILL.md")
-            guard let existing = try? Data(contentsOf: target), String(decoding: existing, as: UTF8.self).contains("name: petal") else { continue }
-            try? FileManager.default.removeItem(at: target)
-            if (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.isEmpty == true { try? FileManager.default.removeItem(at: folder) }
-        }
+    /// Each AI app's home (~/.claude, ~/.codex) and the folder Petal's skill goes in there.
+    static var folders: [(home: URL, folder: URL)] {
+        Provider.allCases.map { (FileManager.default.homeDirectoryForCurrentUser.appending(path: ".\($0.rawValue)"), folder(for: $0)) }
     }
 
-    /// For each AI app that's on this Mac; an older copy of Petal's own skill is replaced.
+    /// For each AI app that's on this Mac; an older copy of Petal's own skill is replaced, and a skill kept through a
+    /// symbolic link is never written through (`AgentSetup.installSkill`).
     static func install() {
         guard let source, let ours = try? Data(contentsOf: source) else { return }
-        for provider in Provider.allCases {
-            let home = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".\(provider.rawValue)")
-            guard FileManager.default.fileExists(atPath: home.path) else { continue }
-            let target = folder(for: provider).appending(path: "SKILL.md")
-            if let existing = try? Data(contentsOf: target) {
-                if existing == ours { continue }
-                guard String(decoding: existing, as: UTF8.self).contains("name: petal") else { continue }   // someone else's
-            }
-            try? FileManager.default.createDirectory(at: folder(for: provider), withIntermediateDirectories: true)
-            try? ours.write(to: target, options: .atomic)
-        }
+        for (home, folder) in folders where FileManager.default.fileExists(atPath: home.path) { AgentSetup.installSkill(ours, in: folder) }
     }
 }
