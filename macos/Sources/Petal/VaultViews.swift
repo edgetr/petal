@@ -105,7 +105,7 @@ struct VaultFormView: View {
                 }
             }
             if form.kind == .apiKey {
-                labelled("Service (website)") { TextField("platform.openai.com", text: $answer.site) }
+                labelled("Website it’s for") { TextField("platform.openai.com", text: $answer.site) }
             }
             if form.fills && form.kind == .login {
                 Toggle("Save to your vault", isOn: $answer.save).toggleStyle(.checkbox).font(.system(size: TextSize.body))
@@ -118,7 +118,7 @@ struct VaultFormView: View {
             HStack(alignment: .center, spacing: 10) {
                 Text(form.footnote).font(.system(size: TextSize.small)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 8)
-                Button(form.fills ? "Submit" : "Save") { submit() }
+                Button(form.fills ? "Fill it in" : "Save") { submit() }
                     .buttonStyle(.glassProminent).tint(Color(nsColor: app.accent))
                     .disabled(!form.complete(answer))
             }
@@ -211,10 +211,6 @@ struct VaultSettings: View {
                 }
                 tabs
             }
-            if let editing {
-                VaultEditor(item: editing, isNew: isNew) { self.editing = nil }
-                    .id(editing.id + editing.kind.rawValue)
-            }
             if tab == nil, model.loaded, !model.unreadable, !unsorted.isEmpty { sortGroup }
             SettingsGroup(footer: "Petal AI never sees a password, card number, security code or key.") {
                 let shown = filtered
@@ -225,7 +221,7 @@ struct VaultSettings: View {
                         Text("Your vault can't be read right now. The Keychain didn't answer, or the Mac is locked.")
                             .font(.system(size: TextSize.callout)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                         Spacer()
-                        Button("Try Again") { model.load() }.buttonStyle(.glass)
+                        Button("Try again") { model.load() }.buttonStyle(.glass)
                     }
                 } else if shown.isEmpty {
                     Text(model.items.isEmpty ? "Nothing yet." : "Nothing matches.")
@@ -241,8 +237,16 @@ struct VaultSettings: View {
             AgentsCard()
             transfer
         }
-        .onAppear { if !snapshotting { model.load() } }
+        .onAppear { if !snapshotting { model.load(); AgentGrants.shared.load() } }
         .modifier(DropExport(on: !snapshotting, dropping: $dropping) { importFile($0) })
+        // The item being edited, over the page wherever the person clicked: the page stays put, and another row can't
+        // be clicked until this one is saved or cancelled, so nothing typed is dropped.
+        .sheet(item: $editing) { item in
+            VaultEditor(item: item, isNew: isNew) { editing = nil }
+                .environment(app)
+                .padding(20)
+                .frame(width: 600)
+        }
     }
 
     /// Secrets from before kinds, under All: what each one is decides where it fills by itself.
@@ -312,7 +316,7 @@ struct VaultSettings: View {
             SettingRow(title: "Export") {
                 Menu("Choose…") {
                     Button("Everything, as a Petal file") { export(.petal) }
-                    Button("Logins, as CSV (Apple Passwords, Chrome)") { export(.csv) }
+                    Button("Logins, for Apple Passwords or Chrome") { export(.csv) }
                 }
                 .menuStyle(.button).buttonStyle(.glass).fixedSize()
             }
@@ -396,7 +400,7 @@ struct VaultSettings: View {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.commaSeparatedText, .json, .zip, .plainText]
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a password export"
+        panel.message = "Choose the file your password app exported"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         importFile(url)
     }
@@ -509,6 +513,8 @@ struct VaultEditor: View {
     /// The item changed in the vault since this editor opened (an import, Petal AI): nothing was saved, and Reload
     /// shows it as it is now. What was typed stays until then.
     @State private var stale = false
+    /// Delete was pressed: it asks first.
+    @State private var confirmingDelete = false
 
     init(item: VaultItem, isNew: Bool, close: @escaping () -> Void) {
         _item = State(initialValue: item)
@@ -532,7 +538,7 @@ struct VaultEditor: View {
                     }
                 }
                 if item.kind == .login || item.kind == .apiKey {
-                    row(item.kind == .login ? "Websites" : "Service (website)") {
+                    row(item.kind == .login ? "Websites" : "Website it’s for") {
                         TextField(item.kind == .login ? "github.com, gist.github.com" : "platform.openai.com", text: $sites)
                     }
                 }
@@ -560,7 +566,13 @@ struct VaultEditor: View {
                 }
                 HStack(spacing: 8) {
                     if !isNew {
-                        Button("Delete", role: .destructive) { model.remove(item.id); close() }.buttonStyle(.glass).disabled(saving)
+                        Button("Delete", role: .destructive) { confirmingDelete = true }.buttonStyle(.glass).disabled(saving)
+                            .confirmationDialog("Delete “\(model.items.first { $0.id == item.id }?.title ?? item.title)”?", isPresented: $confirmingDelete) {
+                                Button("Delete", role: .destructive) { model.remove(item.id); close() }
+                                Button("Cancel", role: .cancel) {}
+                            } message: {
+                                Text("It can’t be brought back.")
+                            }
                     }
                     Spacer()
                     Button("Cancel") { close() }.buttonStyle(.glass).disabled(saving)
@@ -618,6 +630,11 @@ struct VaultEditor: View {
                                 if let team, item.apps.contains(id) { item.appSigners[id] = team }
                             }
                         }
+                    }
+                    Divider()
+                    // An app that isn't open: added without knowing who made it, so Petal asks before filling there.
+                    Button("Other…") {
+                        if let id = AppChooser.choose(), !item.apps.contains(id) { item.apps.append(id) }
                     }
                 }
                 .fixedSize()
