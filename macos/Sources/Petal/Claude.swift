@@ -469,7 +469,7 @@ final class Agent {
         failure = nil
         failureOpensSettings = false
         guard let provider = ownProvider ?? app.chatProvider else { return refuse("Choose an AI in Petal's settings first.") }
-        guard let path = app.paths[provider] else { return refuse("Petal couldn't find \(provider.appName). Set it up in Petal's settings, under AI.") }
+        guard let path = app.paths[provider] else { return refuse("Petal couldn't find \(provider.appName). Set it up in Settings › Petal AI.") }
         // On an API key with none saved, say so rather than quietly using the subscription.
         guard app.aiReady(provider) else {
             return refuse("\(provider.name) is set to use an API key, and there isn't one yet. Add it in Settings › Petal AI, or switch back to your subscription.", opensSettings: true)
