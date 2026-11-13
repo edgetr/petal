@@ -1,7 +1,8 @@
 import Foundation
 
 /// Petal's own bookkeeping on this Mac (state.json in Application Support): what its AI runs spent on an API key
-/// this month (`aiSpend`), and when each stack was last opened (`stacksSeen`).
+/// this month (`aiSpend`), when each stack was last opened (`stacksSeen`), and the version Petal last ran as
+/// (`lastVersion`: What's New opens once after an update, `ReleaseNotes.afterLaunch`).
 enum PetalState {
     static let file = Config.supportFolder.appending(path: "state.json")
 

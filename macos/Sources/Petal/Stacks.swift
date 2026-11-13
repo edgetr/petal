@@ -193,7 +193,25 @@ final class StackContents {
 enum Capture {
     static var allowed: Bool { CGPreflightScreenCaptureAccess() }
 
-    static func askForPermission() { CGRequestScreenCaptureAccess() }
+    private static let askedLock = NSLock()
+    nonisolated(unsafe) private static var askedOnce = false
+
+    /// Asked already while Petal runs. macOS often counts a permission given then only once Petal opens again.
+    static var asked: Bool { askedLock.withLock { askedOnce } }
+
+    /// macOS's own prompt the first time; asked again (macOS prompts only once), the Screen Recording list in System
+    /// Settings.
+    static func askForPermission() {
+        let again = askedLock.withLock { () -> Bool in
+            defer { askedOnce = true }
+            return askedOnce
+        }
+        if again, let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        } else {
+            CGRequestScreenCaptureAccess()
+        }
+    }
 
     /// One picture per window, matched to Accessibility's windows by their window server id, else by app and frame.
     static func capture(_ windows: [(window: AppWindow, number: CGWindowID?)], height: CGFloat = 150) async -> [String: NSImage] {

@@ -66,8 +66,17 @@ enum Windows {
         NSWorkspace.shared.openApplication(at: url, configuration: configuration)
     }
 
-    /// Shows macOS's own prompt, once, pointing at the Accessibility list.
+    /// Asked once already while Petal runs: macOS shows its prompt only the first time.
+    private static var askedForPermission = false
+
+    /// Shows macOS's own prompt pointing at the Accessibility list; asked again (macOS shows that prompt only once),
+    /// opens that list in System Settings.
     static func askForPermission() {
+        if askedForPermission {
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
+            return
+        }
+        askedForPermission = true
         let key = "AXTrustedCheckOptionPrompt"   // kAXTrustedCheckOptionPrompt, which Swift 6 calls unsafe to share
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }

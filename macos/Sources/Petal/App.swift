@@ -26,6 +26,8 @@ final class PetalApp {
     @ObservationIgnored let welcome = Welcome()
     @ObservationIgnored let menuBar = MenuBar()
     @ObservationIgnored let releaseNotes = ReleaseNotes()
+    /// The switches whose turning does something once (`followSwitches`), as they were last seen.
+    @ObservationIgnored private var switches: [String: Bool] = [:]
     let hotkeys = Hotkeys()
     @ObservationIgnored private(set) var docks: DockController!
     /// Quick calls to the chosen AI's small model: routines' sorting and helpers in notes (Focus.swift).
@@ -105,8 +107,9 @@ final class PetalApp {
             self.paper.settingsChanged()   // Petal Notes on or off, its look or its folder
             self.assist.computer.settingsChanged()   // using apps turned off, or an app made private: what's under way stops
             self.displays.settingsChanged()   // hidden displays turned off: every one goes; the limit raised: the next waiting gets one
-
+            self.followSwitches()   // other agents connected or taken back; the usage read at once
         }
+        switches = ["otherAgents": config.bool("otherAgents"), "claudeUsage": config.bool("claudeUsage"), "autoUpdate": config.bool("autoUpdate")]
         // The notes for the AI, while the settings show them: a change made elsewhere comes in.
         config.everySecond = { [weak self] in self?.instructions.tick() }
         registerIPC()
@@ -133,15 +136,38 @@ final class PetalApp {
         claude.startNotes()
         selection.start()
         routines.start()
-        Skill.install()
+        if config.bool("otherAgents") { Skill.install() }
         Windows.startManaging()
         runBrowsers.sweep()   // browsers a Petal that crashed left for its runs are ended, their profiles removed
-        if !config.welcomed {
+        let welcomed = config.welcomed
+        if !welcomed {
             welcome.show()
         } else {
             useDock(config.whichDock)
         }
+        // After an update, What's New opens by itself once, a moment after the dock is up (never on a first install).
+        let running = version
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            self?.releaseNotes.afterLaunch(running: running, welcomed: welcomed)
+        }
         ModesLeftovers.settle()
+    }
+
+    /// What turning a switch does at once, rather than at the next start: other AI agents get Petal's tools, skill and
+    /// command, or lose them (`OtherAgents`); the usage ring reads the usage instead of waiting for its next look; and
+    /// updates turned on look for one now.
+    private func followSwitches() {
+        for (key, was) in switches {
+            let now = config.bool(key)
+            guard now != was else { continue }
+            switches[key] = now
+            switch key {
+            case "otherAgents": now ? OtherAgents.connect(paths: paths) : OtherAgents.disconnect(paths: paths)
+            case "claudeUsage": if now { Task { await usage.refreshAll() } }
+            case "autoUpdate": if now { updater.check(manual: false) }
+            default: break
+            }
+        }
     }
 
     func stop() {

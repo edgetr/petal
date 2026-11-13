@@ -42,6 +42,10 @@ cp "$ROOT/brand/macos/Assets.car" "$ROOT/brand/macos/Petal.icns" "$APP/Contents/
 # Personal.swift runs it); and Petal's skill for Claude Code and Codex (skill/SKILL.md), which Petal copies into
 # their skills folders.
 cp -R "$ROOT/macos/Resources/." "$APP/Contents/Resources/"
+# Each version's notes (macos/notes/<version>.md, also each release's text), so What's New opens after an update
+# with no network (ReleaseNotes reads Resources/notes/).
+mkdir -p "$APP/Contents/Resources/notes"
+cp "$ROOT"/macos/notes/*.md "$APP/Contents/Resources/notes/"
 
 # The commit it's built from: `petal personal` takes Petal's source from it (a release's tag has the same one).
 COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"

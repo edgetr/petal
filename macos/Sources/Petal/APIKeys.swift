@@ -256,7 +256,7 @@ final class APIKeyCheck {
 extension SettingsList {
     /// How each chosen AI is paid for: the person's subscription, or an API key of theirs.
     static let paying = SettingsBlock("Paying", says: { app in
-        app.providers.contains(where: app.usesAPIKey) ? "A key stays in your Mac’s Keychain, for Petal’s own runs only." : nil
+        app.providers.contains(where: app.usesAPIKey) ? "Your key stays in your Mac’s Keychain. Only Petal AI uses it." : nil
     }, when: { !$0.providers.isEmpty }, Provider.allCases.map { provider in
         SettingsEntry(provider.authSetting, provider.name, words: "pay paying subscription api key billing \(provider.keyMaker.lowercased())",
                       when: { $0.providers.contains(provider) }) { APIKeyRows(provider: provider, title: $0) }

@@ -82,21 +82,72 @@ enum CLI {
     }
 }
 
-/// Lets the person's other AI sessions (T3 Code, Claude Code or Codex in a terminal) change Petal too: Petal's MCP
+/// Lets the person's other AI agents (Claude Code or Codex, in any app or a terminal) change Petal too: Petal's MCP
 /// server is registered with Claude Code and Codex through their own `mcp add`, the skill is in their skills
-/// folders, and `petal` is on the PATH. Kept current on every start while `otherAgents` is on.
+/// folders, and `petal` is on the PATH. Kept current on every start while `otherAgents` is on; turning it off takes
+/// all three back at once (`disconnect`), and turning it on sets them up at once.
 @MainActor
 enum OtherAgents {
-    static func connect(paths: [Provider: String]) {
+    /// This Petal's executable when it's an installed Petal.app: a build or test copy never takes over, or takes back.
+    private static var installed: String? {
         guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath().path,
-              // Only an installed Petal.app registers itself; a build or test copy never takes over.
-              executable.hasSuffix("Petal.app/Contents/MacOS/Petal"), !executable.contains("/build/"), !executable.contains("/tmp/") else { return }
+              executable.hasSuffix("Petal.app/Contents/MacOS/Petal"), !executable.contains("/build/"), !executable.contains("/tmp/") else { return nil }
+        return executable
+    }
+
+    static func connect(paths: [Provider: String]) {
+        guard let executable = installed else { return }
         Skill.install()
         linkCommand(executable)
         let environment = PetalApp.shared.childEnvironment
         Task.detached {
             for (provider, path) in paths { register(provider, cli: path, server: executable, environment: environment) }
         }
+    }
+
+    /// Takes back what `connect` set up, each only where it is Petal's own: its registration in each AI app, its
+    /// skill, and the `petal` command's link. Anything else by those names is left alone.
+    static func disconnect(paths: [Provider: String]) {
+        guard installed != nil else { return }
+        Skill.remove()
+        unlinkCommand()
+        let environment = PetalApp.shared.childEnvironment
+        Task.detached {
+            for (provider, path) in paths { unregister(provider, cli: path, environment: environment) }
+        }
+    }
+
+    /// ~/.local/bin/petal, when it is Petal's own link.
+    static func unlinkCommand() {
+        let link = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin/petal")
+        guard let existing = try? FileManager.default.destinationOfSymbolicLink(atPath: link.path),
+              existing.hasSuffix("Petal.app/Contents/MacOS/Petal") else { return }
+        try? FileManager.default.removeItem(at: link)
+    }
+
+    /// Removes Petal's registration from the agent, when the one named `petal` is Petal's.
+    nonisolated static func unregister(_ provider: Provider, cli: String, environment: [String: String]) {
+        let (status, current) = run(cli, ["mcp", "get", "petal"], environment: environment)
+        guard status == 0, current.contains("Petal.app/Contents/MacOS/Petal") else { return }
+        switch provider {
+        case .claude: _ = run(cli, ["mcp", "remove", "-s", "user", "petal"], environment: environment)
+        case .codex: _ = run(cli, ["mcp", "remove", "petal"], environment: environment)
+        }
+    }
+
+    nonisolated private static func run(_ cli: String, _ arguments: [String], environment: [String: String]) -> (Int32, String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: cli)
+        process.arguments = arguments
+        process.environment = environment
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        process.standardInput = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return (-1, "") }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return (process.terminationStatus, String(decoding: data, as: UTF8.self))
     }
 
     /// ~/.local/bin/petal → Petal's executable, unless something else already has that name.
@@ -119,20 +170,7 @@ enum OtherAgents {
 
     /// Registers `petal` with the agent, replacing an older registration that points somewhere else.
     nonisolated static func register(_ provider: Provider, cli: String, server: String, environment: [String: String]) {
-        func run(_ arguments: [String]) -> (Int32, String) {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: cli)
-            process.arguments = arguments
-            process.environment = environment
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = pipe
-            process.standardInput = FileHandle.nullDevice
-            guard (try? process.run()) != nil else { return (-1, "") }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            return (process.terminationStatus, String(decoding: data, as: UTF8.self))
-        }
+        func run(_ arguments: [String]) -> (Int32, String) { Self.run(cli, arguments, environment: environment) }
         let (status, current) = run(["mcp", "get", "petal"])
         if status == 0 && current.contains(server) { return }
         switch provider {

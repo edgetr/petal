@@ -131,7 +131,7 @@ final class Routines {
         /// Made when the Mac had modes, to start with one or switch to one: it can't do what it says any more, so it
         /// doesn't run at all.
         var usesModes: Bool { trigger.on == "mode" || actions.contains { $0.kind == "mode" } }
-        static let modesGone = "It used modes, which Petal for macOS no longer has, so it doesn't run."
+        static let modesGone = "It was made for modes, which Petal no longer has, so it doesn’t run."
     }
 
     struct Move: Equatable, Sendable {
@@ -1330,7 +1330,7 @@ final class Routines {
         }
         return false
     }
-    nonisolated static let outOfBoundsLine = "It names a folder routines don't tidy (outside your home folder, or in its Library), so it doesn't run."
+    nonisolated static let outOfBoundsLine = "It uses a folder outside your home folder, or in its Library, so it doesn’t run."
 
     /// Why a routine never runs, in a line for the person; nil when it does.
     nonisolated static func skipped(_ routine: Routine) -> String? {
@@ -1688,12 +1688,17 @@ extension SettingsList {
             SettingsEntry("newRoutine", "Make a routine", words: "new add create tidy downloads") { title in
                 WithApp { app in
                     SettingRow(title: title, help: "“Keep my Downloads tidy”") {
-                        Button("Ask Petal AI") { app.claude.open(asking: "Make a routine: ", send: false) }.buttonStyle(.glass)
+                        if app.chatProvider == nil {
+                            // Routines are made by Petal AI: with none chosen, the way to one.
+                            Button("Choose an AI") { SettingsBench.commands.send(.select(.ai)) }.buttonStyle(.glass)
+                        } else {
+                            Button("Ask Petal AI") { app.claude.open(asking: "Make a routine: ", send: false) }.buttonStyle(.glass)
+                        }
                     }
                 }
             },
         ]),
-        SettingsBlock("Yours", when: { !$0.routines.list.isEmpty }, [
+        SettingsBlock("Your routines", when: { !$0.routines.list.isEmpty }, [
             SettingsEntry("routineList", "Your routines", words: "routines list") { _ in RoutineList() },
         ]),
         SettingsBlock("What they did", [
@@ -1706,6 +1711,8 @@ extension SettingsList {
 struct RoutineList: View {
     @Environment(PetalApp.self) private var app
     @Environment(\.settingsTint) private var tint
+    /// The routine whose × was pressed: it asks first.
+    @State private var deleting: Routines.Routine?
 
     var body: some View {
         let _ = BodyCount.hit("RoutinesSettings")
@@ -1723,12 +1730,16 @@ struct RoutineList: View {
                     }
                 }
                 Spacer(minLength: 8)
-                RoundButton(symbol: "xmark") { routines.delete(routine.id) }
+                RoundButton(symbol: "xmark") { deleting = routine }
                 // The switch last, in the column every page's switches are in; none for a routine that can't run.
                 Toggle(routine.words, isOn: Binding(get: { routine.on }, set: { routines.setOn(routine.id, $0) }))
                     .toggleStyle(.switch).labelsHidden().controlSize(.small).tint(tint)
                     .opacity(Routines.skipped(routine) == nil ? 1 : 0).disabled(Routines.skipped(routine) != nil)
             }
+        }
+        .confirmationDialog("Delete “\(deleting?.words ?? "")”?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
+            Button("Delete", role: .destructive) { if let deleting { routines.delete(deleting.id) }; deleting = nil }
+            Button("Cancel", role: .cancel) { deleting = nil }
         }
     }
 }
@@ -1753,7 +1764,7 @@ struct RoutineLog: View {
                 if entry.canUndo {
                     Button("Put back") { routines.undo(entry.id) }.buttonStyle(.glass).controlSize(.small)
                 } else if entry.undone {
-                    Text("Put back").font(.system(size: TextSize.small)).foregroundStyle(.tertiary)
+                    Text("Was put back").font(.system(size: TextSize.small)).foregroundStyle(.tertiary)
                 }
             }
         }
