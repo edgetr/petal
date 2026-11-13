@@ -706,7 +706,15 @@ final class DockPanel: NSPanel {
         default: break
         }
         super.sendEvent(event)
-        if event.type == .leftMouseUp { updateMouseThrough() }
+        guard event.type == .leftMouseUp else { return }
+        updateMouseThrough()
+        // The release ends any drag of an app: one whose slot went while it was held (the app quit) never heard it,
+        // and a drag left standing would keep the dock out, its icons from growing and lifting, for good.
+        if dock.dragging != nil {
+            dock.dragging = nil
+            dock.dragOffset = 0
+            dock.dragOut = false
+        }
     }
 
     /// Posted as the dock stops taking the mouse: whatever was hovered in it isn't any more.
