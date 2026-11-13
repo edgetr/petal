@@ -257,8 +257,11 @@ struct HelperBar: View {
             }
             if !denials.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("\(run?.who ?? "Petal") wants to run:").font(.system(size: TextSize.small, weight: .semibold))
-                    Text(denials.map(\.label).joined(separator: "\n")).font(.system(size: TextSize.small, design: .monospaced)).lineLimit(4)
+                    Text(Agent.Denial.heading(denials)).font(.system(size: TextSize.small, weight: .semibold)).lineLimit(3)
+                    let details = Agent.Denial.details(denials)
+                    if !details.isEmpty {
+                        Text(details).font(.system(size: TextSize.small, design: .monospaced)).foregroundStyle(PaperLook.footer).lineLimit(4)
+                    }
                     HStack(spacing: 6) {
                         Spacer()
                         NoteButton(title: "Don't", primary: true) { desk?.helpers.denyDenials(noteID) }

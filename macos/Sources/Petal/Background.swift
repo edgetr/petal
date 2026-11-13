@@ -350,9 +350,9 @@ enum Background {
             case .didntStick: why = "The text didn't stay in that field in the background."
             case .opens: why = "That opens something (a link, a file, a window, or another app), which would come to the front over what the person is using."
             case .tab:
-                return "Another tab is showing in this note's window, and nothing can use a tab that isn't showing. Nothing was done. Ask the person to switch back to it (clicking this note in the AI button's preview does), then petal_ui again."
+                return "Another tab is showing in this note's window, and nothing can use a tab that isn't showing. Nothing was done. Ask the person to switch back to it, then petal_ui again."
             }
-            return why + " Nothing was done, and Petal didn't bring it forward, so as not to interrupt the person. Say in one line what you need and ask them to bring the window forward (clicking this note in the AI button's preview does it); once it's in front, petal_ui again and carry on."
+            return why + " Nothing was done, and Petal didn't bring it forward, so as not to interrupt the person. Say in one line what you need and ask them to click that window; once it's in front, petal_ui again and carry on."
         }
 
         /// The same for a window on the run's own display: nothing there can come forward, so the ways out are another

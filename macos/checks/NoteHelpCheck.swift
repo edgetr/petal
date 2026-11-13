@@ -285,6 +285,12 @@ struct NoteHelpCheck {
         expect(NoteHelp.repository(url: "https://github.com/edgetr/petal/pull/16") == NoteHelp.Repository(slug: "edgetr/petal", kind: .pull, number: 16), "a pull request")
         expect(NoteHelp.repository(url: "https://github.com/edgetr/petal/issues/3")?.kind == .issue && NoteHelp.repository(url: "https://example.com/a/b") == nil, "an issue; not GitHub")
         expect(NoteHelp.pullNumber(NoteHelp.repository(url: "https://github.com/edgetr/petal/pull/16")!) == 16, "a pull request starts from its head")
+        expect(NoteHelp.repository(url: "https://github.com/settings/profile") == nil && NoteHelp.repository(url: "https://github.com/notifications/x") == nil,
+               "GitHub's own pages are no repository")
+        expect(NoteHelp.asksForWork("@Petal fix the failing test") && NoteHelp.asksForWork("@Petal add a dark mode, open a PR")
+               && NoteHelp.asksForWork("@Petal can you look at this in ~/petal"), "a line asking for work, or naming a checkout")
+        expect(!NoteHelp.asksForWork("@Petal what does this project do?") && !NoteHelp.asksForWork("@Petal summarize this PR")
+               && !NoteHelp.asksForWork("@Petal is this safe to merge?"), "a question is answered, not a coding job")
         expect(NoteHelp.pullNumber(NoteHelp.repository(url: "https://github.com/edgetr/petal/issues/3")!) == nil, "an issue starts from the default branch")
         let config = "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = git@github.com:Edgetr/petal.git\n\tfetch = +refs/heads/*\n[branch \"main\"]\n\tremote = origin"
         expect(NoteHelp.remotes(config: config).map { "\($0.name) \($0.url)" } == ["origin git@github.com:Edgetr/petal.git"], "a git config's remotes, by name")
@@ -799,6 +805,8 @@ struct NoteHelpCheck {
         var providerGone = facts
         providerGone.available = ["codex"]
         expect(NoteHelp.admit(providerGone) == .fail("Claude Code isn't set up in Petal."), "the pinned AI disabled while it waited: fails, never another", "\(NoteHelp.admit(providerGone))")
+        providerGone.available = []
+        expect(NoteHelp.admit(providerGone) == .fail("Petal AI isn't set up yet."), "no AI chosen at all: Petal AI, not an app never picked")
         var unmodelled = facts
         unmodelled.provider = "codex"; unmodelled.available = ["codex"]; unmodelled.model = "gpt-6.1-sol"; unmodelled.models = ["gpt-6"]
         if case .fail = NoteHelp.admit(unmodelled) { expect(true, "") } else { expect(false, "its pinned model gone: fails") }

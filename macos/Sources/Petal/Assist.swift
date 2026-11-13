@@ -112,9 +112,20 @@ final class Assist {
             else if let owner, let note = app.claude.note(withID: owner) { app.claude.present(note) }
             else if !app.claude.isOpen { app.claude.open(asking: nil) }
         }
-        let work = DispatchWorkItem { [weak self] in self?.settle(false) }
+        // A helper's card waits on its note for as long as it takes (the run holds its place; Stop ends it). Anyone
+        // else's goes after two minutes, told as unanswered, not as a no.
+        if let owner, app.paper.helpers.owns(owner) { return }
+        let work = DispatchWorkItem { [weak self] in self?.settle(false, unanswered: true) }
         giveUp = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 120, execute: work)
+    }
+
+    /// The last card closed with nobody answering it (two minutes went by), rather than with Don't.
+    @ObservationIgnored private(set) var unanswered = false
+
+    /// What the AI is told when its card came back without a yes: `words` for a Don't, or that nobody answered.
+    func declined(_ words: String) -> String {
+        unanswered ? "The person hasn't answered yet (the card closed after two minutes). Say in one line what you need, and stop." : words
     }
 
     @ObservationIgnored private var formTyped: ((VaultForm.Answer) -> Void)?
@@ -144,7 +155,8 @@ final class Assist {
         settle(choice != .no)
     }
 
-    private func settle(_ allowed: Bool) {
+    private func settle(_ allowed: Bool, unanswered: Bool = false) {
+        self.unanswered = unanswered
         formTyped = nil
         keptAlways = nil
         giveUp?.cancel()
@@ -493,7 +505,7 @@ final class Assist {
                                 result["screenshotNote"] = "A PNG of the \(what); read it to see it. Black boxes are fields that may hold a password, card number, security code or key: Petal hides them."
                                     + (picture.note.map { " " + $0 } ?? "")
                             } else {
-                                result["screenshotNote"] = picture.note ?? (Capture.allowed ? "Couldn't take the picture." : "Petal needs Screen Recording for pictures (Petal's settings, Permissions).")
+                                result["screenshotNote"] = picture.note ?? (Capture.allowed ? "Couldn't take the picture." : Self.askScreenRecording())
                             }
                             deliver(picture.path)
                         }
@@ -538,7 +550,10 @@ final class Assist {
     /// Never Petal's own windows. Off the main thread.
     nonisolated static func words(pid: pid_t, window: CGWindowID?, find: String, part: Int) -> [String: Any] {
         if let own = UIMap.petalsOwn(pid) { return ["textNote": own] }
-        guard Windows.trusted else { return ["textNote": "Petal needs Accessibility to read a window's words (Petal's settings, Permissions)."] }
+        guard Windows.trusted else {
+            DispatchQueue.main.async { MainActor.assumeIsolated { _ = Assist.askAccessibility() } }
+            return ["textNote": Assist.accessibilityAsked]
+        }
         let unreadable: [String: Any] = ["textNote": VaultStore.unreadableText + " Petal can't hide its secrets, so it doesn't read a window's words until it can: try again in a moment."]
         let made: [String: Any]?? = VaultIndex.settled { index -> [String: Any]? in
             guard !index.unreadable else { return nil }
@@ -582,6 +597,32 @@ final class Assist {
         guard case .some(.some(let told)) = made else { return unreadable }
         return told
     }
+
+    /// When Petal last asked the person for Screen Recording or Accessibility from a tool: at most once a minute each,
+    /// so a run that keeps trying doesn't keep asking.
+    private static var asked: [String: Date] = [:]
+
+    private static func askOnce(_ what: String, _ ask: () -> Void) {
+        if let last = asked[what], Date().timeIntervalSince(last) < 60 { return }
+        asked[what] = Date()
+        ask()
+    }
+
+    /// A picture was asked for without Screen Recording: macOS asks the person (`Capture.askForPermission`), and the
+    /// AI is told so, in a line.
+    static func askScreenRecording() -> String {
+        askOnce("screen") { Capture.askForPermission() }
+        return "Petal can't take pictures yet: it just asked the person to allow Screen Recording (Settings › Privacy shows it too). Tell them in one line; ask again once it's allowed."
+    }
+
+    /// The same for Accessibility, which reading and using apps need.
+    @discardableResult
+    static func askAccessibility() -> String {
+        askOnce("accessibility") { Windows.askForPermission() }
+        return accessibilityAsked
+    }
+
+    nonisolated static let accessibilityAsked = "Petal can't read or use apps yet: it just asked the person to allow Accessibility (Settings › Privacy shows it too). Tell them in one line; ask again once it's allowed."
 
     nonisolated static let tooMuchClipboard = "The clipboard holds too much to check for saved secrets: Petal doesn't read it."
     nonisolated static let selectionInSecret = "The selection is in a field holding a secret (a password, key, card number or security code): Petal doesn't read it."
@@ -870,7 +911,7 @@ final class Assist {
                 // Its own, which the person never saw: the run's to put away, with nobody to ask.
                 if answer == .go { return quit() }
                 ask("quit", "Quit \(label)", wants: "quit \(label)", detail: "It asks to save anything unsaved.", owner: caller) { allowed in
-                    guard allowed, live() else { return send(["declined": "The person didn't allow quitting \(label)."]) }
+                    guard allowed, live() else { return send(["declined": self.declined("The person didn't allow quitting \(label).")]) }
                     quit()
                 }
             }
@@ -1077,7 +1118,7 @@ final class Assist {
                         // (its app still asks to save anything unsaved, there, where the run can answer).
                         if self.app.displays.owns(window: window.number, for: caller) { return close() }
                         self.ask("close", "Close “\(label)”", wants: "close “\(label)”", detail: "Its app asks to save anything unsaved.", owner: caller) { allowed in
-                            guard allowed, live() else { return send(["declined": "The person didn't allow closing it."]) }
+                            guard allowed, live() else { return send(["declined": self.declined("The person didn't allow closing it.")]) }
                             close()
                         }
                     case "arrange":
@@ -1152,7 +1193,7 @@ final class Assist {
         let moving = urls.count == 1 ? "“\(urls[0].lastPathComponent)”" : "\(urls.count) items"
         ask("trash", "Move \(moving) to the Trash", wants: "move \(moving) to the Trash",
             detail: urls.count == 1 ? "You can put it back." : names, owner: caller) { allowed in
-            guard allowed, live() else { return send(["declined": "The person didn't allow it."]) }
+            guard allowed, live() else { return send(["declined": self.declined("The person didn't allow it.")]) }
             NSWorkspace.shared.recycle(urls) { moved, error in
                 MainActor.assumeIsolated {
                     self.trashed = moved.map { (from: $0.key, to: $0.value) }

@@ -1615,10 +1615,31 @@ enum NoteHelp {
         var number: Int?
     }
 
+    static let githubPages: Set<String> = ["settings", "orgs", "organizations", "marketplace", "notifications", "explore", "topics",
+                                           "sponsors", "login", "logout", "signup", "features", "pulls", "issues", "new", "about",
+                                           "enterprise", "pricing", "search", "apps", "codespaces", "collections", "trending",
+                                           "dashboard", "account", "security", "customer-stories", "readme", "github-copilot", "copilot"]
+
+    /// Whether a line on a repository's note asks for work in it (a coding helper in a worktree), rather than a
+    /// question about it: fix, change, add, implement, write, make or build something, a pull request, a commit or a
+    /// push, or a checkout named ("in ~/x"). A question ("what does this do?", "summarize this PR") is answered.
+    static func asksForWork(_ line: String) -> Bool {
+        let lower = spoken(line).lowercased()
+        if lower.range(of: #"\bin\s+~/"#, options: .regularExpression) != nil { return true }
+        let first = lower.split(whereSeparator: { !$0.isLetter && $0 != "'" }).first.map(String.init) ?? ""
+        if ["what", "why", "how", "who", "when", "where", "which", "is", "are", "does", "do", "can", "could", "should", "summarize",
+            "explain", "describe", "tell", "show", "list", "read", "review", "check", "compare"].contains(first) { return false }
+        let verbs = ["fix", "change", "implement", "add", "write", "refactor", "rename", "remove", "update", "make", "build",
+                     "port", "migrate", "bump", "upgrade", "commit", "push", "merge", "rebase", "resolve", "address", "finish", "continue"]
+        if verbs.contains(first) { return true }
+        return ["open a pr", "open a pull request", "make a pr", "pull request for", "send a pr"].contains { lower.contains($0) }
+    }
+
     static func repository(url: String) -> Repository? {
         guard let parts = URLComponents(string: url), let host = parts.host?.lowercased(), host == "github.com" || host == "www.github.com" else { return nil }
         let path = parts.path.split(separator: "/").map(String.init)
-        guard path.count >= 2 else { return nil }
+        // GitHub's own pages (settings, notifications, …) are no repository.
+        guard path.count >= 2, !githubPages.contains(path[0].lowercased()) else { return nil }
         let slug = (path[0] + "/" + path[1]).lowercased().replacingOccurrences(of: ".git", with: "")
         if path.count >= 4, let number = Int(path[3]) {
             if path[2] == "pull" { return Repository(slug: slug, kind: .pull, number: number) }
@@ -2295,6 +2316,8 @@ extension NoteHelp {
         if f.landing { return .go }
         guard f.notesReady else { return .wait("Petal Notes are getting ready.") }
         guard f.available.contains(f.provider) else {
+            // No AI chosen at all: Petal AI, not an app the person never picked.
+            if f.available.isEmpty { return .fail("Petal AI isn't set up yet.") }
             return .fail("\(f.provider == "codex" ? "Codex" : "Claude Code") isn't set up in Petal.")
         }
         if let models = f.models, !f.model.isEmpty, !models.contains(f.model) { return .fail("\(f.model) isn't available in Petal now.") }
@@ -2720,7 +2743,7 @@ extension NoteHelp {
         if computerUse { words = words + "\n\nYou may use the user's apps with petal_ui and petal_act; call petal_ui first and again after anything changes the window." }
         if runDisplays { words = words + "\n\n" + ownDisplay }
         if t.placeIsFile {
-            words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look reads it there, and petal_view gives the words of the page it shows (page: another one); petal_ui and petal_act never read or use Petal's own windows. Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
+            words = words + "\n\nThe note is on a document. Open in Petal's viewer, that viewer's window is the note's place: petal_look reads it there, and petal_view (no path needed: it's this note's document) gives the words of the page it shows (page: another one; pages: \"all\" every page's); petal_ui and petal_act never read or use Petal's own windows. Never change the user's own file from there: try a change on copies first (petal_view_versions), and change the original only after they allow it."
         }
         if !t.place.isEmpty {
             words = words + "\n\nThe note is on: \(t.place). This, here, this page and this sentence mean that place, even after the user has gone elsewhere."

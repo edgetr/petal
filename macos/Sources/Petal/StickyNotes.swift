@@ -111,6 +111,9 @@ extension ClaudePanel {
         }
     }
 
+    /// The quick question is answering with its panel closed (the AI button shows it's working).
+    var looseWorking: Bool { loose.agent.running && !(isOpen && current === loose) }
+
     /// The one chat stuck to no window: kept, so closing and opening again (or turning notes off) never loses it.
     var looseNote: StickyNote {
         if !notes.contains(where: { $0 === loose }) { notes.append(loose) }
@@ -628,7 +631,7 @@ extension ClaudePanel {
         case .shown:
             return "This note's tab changed while Petal read it (another page, or it moved), so nothing of what was read is told: look again."
         case .another:
-            return "Another tab is showing in this note's window, so Petal didn't read or use it: a tab's note works only on its own tab. Ask the person to switch back to that tab (clicking this note in the AI button's preview does); front: true uses what's in front instead."
+            return "Another tab is showing in this note's window, so Petal didn't read or use it: a tab's note works only on its own tab. Ask the person to switch back to that tab; front: true uses what's in front instead."
         case .unsure(.notAsked):
             help = "Petal hasn't been allowed to see \(name)'s tabs yet: the person can allow it from this note's place menu (Let Petal see \(name)’s tabs…), then ask again."
         case .unsure(.refused):
@@ -1101,7 +1104,8 @@ extension ClaudePanel {
         startWaiting()
         // A helper in a note: its answer goes on the note.
         if note.paper != nil { return PetalApp.shared.paper.helpers.finished(note) }
-        guard notesOn, !(isOpen && current === note), note.agent.messages.contains(where: { $0.kind == .user }) else { return }
+        // The quick question (stuck nowhere) too: its answer came while its panel was closed.
+        guard notesOn || note === loose, !(isOpen && current === note), note.agent.messages.contains(where: { $0.kind == .user }) else { return }
         note.ready = true
         updateReady()
         if let app = note.place?.app, !app.isEmpty { PetalApp.shared.signals.bounce(app) }

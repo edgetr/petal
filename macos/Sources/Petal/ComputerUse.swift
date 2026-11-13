@@ -177,8 +177,8 @@ final class ComputerUse {
 
     /// Why Petal can't use apps now (turned off, or no Accessibility), or nil.
     func refusal() -> String? {
-        guard app.config.bool("computerUse") else { return "Using apps is off in Petal's settings (computerUse); only the person can turn it on." }
-        guard Windows.trusted else { return "Petal needs Accessibility for this (Petal's settings, Permissions)." }
+        guard app.config.bool("computerUse") else { return "Using apps is off (computerUse). The person turns it on in Settings › Petal AI; only they can." }
+        guard Windows.trusted else { return Assist.askAccessibility() }
         return nil
     }
 
@@ -638,13 +638,12 @@ final class ComputerUse {
         let caller = job.caller, name = job.appName, bundle = job.bundle, caption = job.caption
         let send = job.send, fail = job.fail
         let first = caption.prefix(1).lowercased() + caption.dropFirst()
-        let lasting = session.turn == Self.outside ? "For this task" : "Until this reply is done"
-        // A note on its own window works there in the background: said so, since nothing will show it working.
-        let detail = job.map.hidden
-            ? "First, \(first). \(lasting) it can press and type in a \(name) window on a display of its own, out of your way: nothing comes forward, and your pointer and keyboard stay yours. Stop it from its note or the AI button."
-            : job.map.ownPlace
-            ? "First, \(first). \(lasting) it can press and type in this note's \(name) window in the background, while you work elsewhere: nothing comes forward, and your pointer and keyboard stay yours. Stop it from its note."
-            : "First, \(first). \(lasting) it can press, type and choose menus in \(name) with its own pointer; yours stays where it is. Esc stops it."
+        let lasting = session.turn == Self.outside ? "for this task" : "for this reply"
+        // How it works there, in a few words: in the background on a note's own window, on a display of its own, or
+        // in front with its own pointer.
+        let detail = job.map.hidden ? "First: \(first). On a display of its own, \(lasting)."
+            : job.map.ownPlace ? "First: \(first). In the background, \(lasting)."
+            : "First: \(first). With its own pointer, \(lasting). Esc stops it."
         assist.ask("computer:\(bundle)", "Let Petal AI use \(name)?", wants: "use \(name)", detail: detail,
                    owner: caller) { allowed in
             // The note was stuck somewhere else while the person was asked (its card was taken away): look again.
@@ -652,7 +651,7 @@ final class ComputerUse {
             // Its turn ended, the person stopped it, or turned it off, while they were asked.
             if job.cancel.stopped { return fail(self.whyStopped(job)) }
             guard allowed else {
-                return send(["declined": "The person didn't let Petal AI use \(name). Don't find another way; say what you would have done."])
+                return send(["declined": self.assist.declined("The person didn't let Petal AI use \(name). Don't find another way; say what you would have done.")])
             }
             guard self.sessions[caller]?.cancel === session.cancel else { return fail(Self.stoppedText) }
             if let refusal = self.refusal(for: bundle, name: name) { return fail(refusal) }

@@ -234,7 +234,7 @@ grep -q 'app.paper.handle(name, args, asker: note.flatMap { app.claude.note(with
 grep -q 'return desk?.scene.map { NoteMatch.fits(required, $0) } ?? false' Sources/Petal/NoteHelpers.swift \
     && grep -q 'if required.map({ place.samePlace($0) }) ?? true { return (model, place) }' Sources/Petal/NoteHelpers.swift \
     && grep -q 'let file = ViewerFiles.locate(stick, mac: mac, follow: ViewerLoader.follow)?.path' Sources/Petal/NoteHelpers.swift \
-    && grep -q 'if compare == nil, let stick, ViewerFiles.namesFile(stick) {' Sources/Petal/NoteHelpers.swift \
+    && grep -q 'if work, let stick, ViewerFiles.namesFile(stick) {' Sources/Petal/NoteHelpers.swift \
     && grep -q 'if item.kind == "file" { return located(item, mac: mac, follow: follow).map(decide) }' Sources/Petal/NoteTasks.swift \
     && ! grep -n 'documentShowing\|sceneFile\|run\.document' Sources/Petal/NoteHelpers.swift Sources/Petal/NoteHelp.swift \
     || { echo "NoteHelpers: a helper's files go by the one file resolver, never a path comparison"; exit 1; }

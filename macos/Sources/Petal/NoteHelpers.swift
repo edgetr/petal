@@ -1443,10 +1443,13 @@ final class NoteHelpers {
             self.ask(paper, text, asked: asked, compare: compare)
         }
         let stick = here(paper).flatMap { paper.file.places.indices.contains($0) ? paper.file.places[$0] : nil } ?? paper.file.places.first
-        if compare == nil, let stick, let repo = NoteHelp.repository(url: stick.url) {
+        // Work in a checkout only when the line asks for work, or the note already has its worktree; a question about
+        // a repository or a file in one is answered.
+        let work = compare == nil && (NoteHelp.asksForWork(text) || paper.file.worktree != nil)
+        if work, let stick, let repo = NoteHelp.repository(url: stick.url) {
             return code(run, paper, text, slug: repo.slug, number: NoteHelp.pullNumber(repo), file: nil, pick: pick)
         }
-        if compare == nil, let stick, ViewerFiles.namesFile(stick) {
+        if work, let stick, ViewerFiles.namesFile(stick) {
             // The file the place names now, by the one file resolver (its own file wherever it went, else its
             // bookmark's, else its path's), and that file's real git repository, as AgentAccess resolves a project:
             // the nearest one above it, a linked worktree's main checkout only when git made it one (so a file under
@@ -1602,7 +1605,8 @@ final class NoteHelpers {
             let checkout: String
             switch NoteHelp.chooseCheckout(candidates, words: run.asked, home: NSHomeDirectory()) {
             case .one(let one): checkout = one
-            case .none: return self.fail(run, "Petal couldn't find a checkout of \(slug ?? "this repository") in your home folder.")
+            // No checkout here: answered as any line is, with Petal's tools.
+            case .none: return self.think(run, paper, text, pick: pick, compare: nil)
             case .mismatch(let named):
                 return self.fail(run, "\((named as NSString).abbreviatingWithTildeInPath) isn't a checkout of \(slug ?? "this repository") in your home folder.")
             case .ask(let several):
@@ -1682,7 +1686,7 @@ final class NoteHelpers {
         switch provider(for: pick) {
         case .use(let id): return Provider(rawValue: id)
         case .missing(let name): fail(run, "\(name) isn't set up in Petal.", settings: true); return nil
-        case .none: fail(run, "Choose an AI in Petal's settings first (Claude Code or Codex).", settings: true); return nil
+        case .none: fail(run, "Petal AI isn't set up yet.", settings: true); return nil
         }
     }
 
@@ -2452,7 +2456,7 @@ final class NoteHelpers {
         guard let desk, desk.on else { return answer(.couldnt("Petal Notes is off.")) }
         guard desk.acceptsChanges else { return answer(.couldnt(NoteStore.gettingReady)) }
         guard let paper = paper(request.noteID) else { return answer(.couldnt("This note has two versions: keep one first.")) }
-        guard app.brain.enabled else { return answer(.couldnt("Choose an AI in Petal's settings, under AI, and this note can answer here.")) }
+        guard app.brain.enabled else { return answer(.couldnt("Petal AI isn't set up yet: choose an AI in Settings › Petal AI, and this note can answer here.")) }
         let made = Run(token: lenses.start(paper.noteID), noteID: paper.noteID, asked: "", who: Self.petalWho)
         made.kind = .lens
         made.startNotebook = paper.notebook
