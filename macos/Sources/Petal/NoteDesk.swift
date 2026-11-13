@@ -1095,12 +1095,22 @@ final class NoteDesk {
 
     private var primaryHeight: CGFloat { Screens.all.first?.frame.height ?? 0 }
 
-    /// The visible frame (Accessibility's coordinates) of the screen a window is on.
+    /// The visible frame (Accessibility's coordinates) of the screen a window is on, less Petal's dock (paperArea).
     private func visible(for window: CGRect) -> CGRect? {
         let screens = Screens.all
         guard let screen = NoteRules.screen(for: NoteRules.appKitFrame(window, primaryHeight: primaryHeight), in: screens.map(\.frame)),
-              let visible = screens.first(where: { $0.frame == screen })?.visibleFrame else { return nil }
+              let visible = screens.first(where: { $0.frame == screen }).map(Self.paperArea) else { return nil }
         return CGRect(x: visible.minX, y: primaryHeight - visible.maxY, width: visible.width, height: visible.height)
+    }
+
+    /// Where papers may go on a screen (AppKit's coordinates): its visible area less the strip Petal's own dock takes
+    /// there while it shows (it draws over papers, and macOS keeps room only for its own Dock).
+    static func paperArea(_ screen: NSScreen) -> NSRect {
+        let app = PetalApp.shared
+        guard !Headless.on, let docks = app.docks, app.config.whichDock == "petal" else { return screen.visibleFrame }
+        let panel = docks.panels.values.first { $0.screenRef?.frame == screen.frame }
+        let reach = panel.flatMap { $0.hides ? nil : $0.reach }
+        return NoteRoom.freeOfDock(visible: screen.visibleFrame, screen: screen.frame, reach: reach, position: app.config.position)
     }
 
     /// The tabs on the window in front, and its notes that are showing beside it.
@@ -1452,6 +1462,7 @@ final class NoteDesk {
     private func closeStandalone(_ key: String, escape: Bool) {
         keyboardWanted.cancel(key)
         editors[key]?.flush()
+        petalWanted.remove(key)
         let fromLibrary = standalone.removeValue(forKey: key)?.fromLibrary == true
         faces[key] = nil
         if keyboard == key { keyboard = nil }
@@ -1526,7 +1537,7 @@ final class NoteDesk {
                 origin = CGPoint(x: point[0], y: point[1])
             } else {
                 // Nobody put it anywhere yet (a tool stuck it there): down the main screen's right side.
-                origin = NoteShelf.screenRest(index: resting, visible: Screens.all.first?.visibleFrame ?? .zero, paper: PaperLook.folded)
+                origin = NoteShelf.screenRest(index: resting, visible: Screens.all.first.map(Self.paperArea) ?? .zero, paper: PaperLook.folded)
                 resting += 1
             }
             panel.place(paperFrame: CGRect(x: origin.x, y: origin.y - size.height, width: size.width, height: size.height))
@@ -1619,6 +1630,7 @@ final class NoteDesk {
         }
         Self.roomTurn.cancel()
         editors[key]?.flush()
+        petalWanted.remove(key)
         faces[key] = .folded
         if keyboard == key { keyboard = nil }
         // (An empty new note stays: it's let go of only once its window is left or it's put away.)
@@ -1696,6 +1708,8 @@ final class NoteDesk {
     /// The corner's @: the paper open (it opens first when folded or turned over), and a new "@Petal " line at the end
     /// of its writing with the cursor after it.
     func askPetal(_ key: String) {
+        // A read-only paper (one of a conflict's) has no editor to write the line in: nothing waits for one.
+        guard let paper = store.paper(key), !store.readOnly(paper) else { return }
         if faces[key] != .open { open(key) }
         guard faces[key] == .open else { return }
         if let editor = editors[key] { return editor.startPetal() }
@@ -1734,6 +1748,7 @@ final class NoteDesk {
     func hide(_ key: String) {
         standalone[key] = nil
         keyboardWanted.cancel(key)
+        petalWanted.remove(key)
         Self.roomTurn.cancel()
         editors[key]?.flush()
         faces[key] = nil
@@ -1798,9 +1813,13 @@ final class NoteDesk {
     /// forward, until a fresh read of what's in front after it.
     func viewerFront() { concealWindowNotes() }
 
-    /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
+    /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright). What's
+    /// typed and not saved yet (the editor saves half a second after the last key) is saved first, so a note written
+    /// in just before its window was left is kept; one whose typing still couldn't be saved stays too.
     func letGoIfEmpty(_ key: String) {
-        guard fresh.contains(key), let paper = store.paper(key), faces[key] != .open,
+        guard fresh.contains(key) else { return }
+        editors[key]?.flush()
+        guard fresh.contains(key), editors[key]?.busy() != true, let paper = store.paper(key), faces[key] != .open,
               NoteShelf.mayTrash(bodyEmpty: NoteShelf.untouched(paper.file.body, madeWith: madeWith[key]), picturesPending: store.picturesPending(key),
                                  importing: store.importing(key))
         else { return }
@@ -1908,7 +1927,7 @@ final class NoteDesk {
         // Only notes there by their window placement (never one opened on its own, or moved off by the person): one
         // open makes room; once made, any paper of it showing, folded too, keeps it (NoteRoom.keepsRoom).
         if on, !quitting, let frame, let scene, let number = scene.window {
-            let notes = here.keys.map { (placement: placementNow($0), face: faces[$0], moved: local.spots[store.paper($0)?.noteID ?? ""] != nil) }
+            let notes = here.keys.map { (placement: placementNow($0), face: faces[$0], moved: movedAway($0, window: frame)) }
             let opening = NoteRoom.wanted(notes.map { ($0.placement, $0.face == .open, $0.moved) })
             let showing = NoteRoom.wanted(notes.map { ($0.placement, $0.face != nil, $0.moved) })
             if opening || showing {
@@ -1926,6 +1945,17 @@ final class NoteDesk {
             guard let wanted, plan.narrow == wanted.number, let target = wanted.target, Self.roomTurn.current(turn) else { return }
             Self.narrow(wanted.number, pid: wanted.pid, from: wanted.frame, to: target, turn: turn)
         }
+    }
+
+    /// Whether the person moved a paper away from its window's side (it has a spot that isn't right beside the
+    /// window): it no longer asks for room there. One they only moved within the room beside it still does.
+    private func movedAway(_ key: String, window: CGRect) -> Bool {
+        guard let id = store.paper(key)?.noteID, let spot = local.spots[id] else { return false }
+        let size = panels[key]?.paperSize ?? CGSize(width: PaperLook.folded, height: PaperLook.folded)
+        let appKitWindow = NoteRules.appKitFrame(window, primaryHeight: primaryHeight)
+        // Where its spot puts it, kept on no screen: as it was left, whatever width the window has now.
+        let left = spot.frame(size: size, window: appKitWindow, screen: CGRect(x: -1e7, y: -1e7, width: 2e7, height: 2e7))
+        return !NoteRoom.leftBeside(left, window: appKitWindow)
     }
 
     /// Narrows one window, on `queue`: only while it's still where it was when this was decided, recorded before it
@@ -3367,7 +3397,7 @@ final class NotePanel: NSPanel {
         let screens = Screens.all
         let area = { (screen: NSScreen) -> CGFloat in let cut = screen.frame.intersection(rect); return cut.isNull ? 0 : cut.width * cut.height }
         guard let screen = screens.max(by: { area($0) < area($1) }).flatMap({ area($0) > 0 ? $0 : nil }) ?? Screens.main else { return rect }
-        return NoteShelf.wholeOnScreen(rect, visible: screen.visibleFrame)
+        return NoteShelf.wholeOnScreen(rect, visible: NoteDesk.paperArea(screen))
     }
 
     /// The keyboard, only for a paper layout already showed (NoteShelf.mayTakeKeyboard): never unveiled here.

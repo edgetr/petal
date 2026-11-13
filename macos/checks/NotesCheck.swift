@@ -1147,6 +1147,41 @@ struct NotesCheck {
         let widthBack = lay(browser, [("n", foldedSize), ("m", foldedSize)], after: secondPaper)
         expect(apart(widthBack) && widthBack.allSatisfy { screen1920.insetBy(dx: shadow, dy: shadow).contains($0.frame) },
                "the width given back: the papers on the screen, apart", "\(widthBack)")
+        // A paper the person moved a little within the room made beside a narrowed window keeps that room: its spot
+        // is by the window's right corner, so with the width given back it would land over the page.
+        let wideUp = CGRect(x: 0, y: 0, width: 1920, height: 1000), narrowUp = CGRect(x: 0, y: 0, width: 1520, height: 1000)   // y up, AppKit's
+        let movedDown = CGRect(x: narrowUp.maxX + NoteRoom.gap, y: 400, width: 360, height: 420)
+        let spotBeside = NoteSpot.stick(panel: movedDown, window: narrowUp)
+        let unclamped = CGRect(x: -1e7, y: -1e7, width: 2e7, height: 2e7)
+        expect(NoteRoom.leftBeside(spotBeside.frame(size: movedDown.size, window: narrowUp, screen: unclamped), window: narrowUp),
+               "moved within the room beside its window: still beside it")
+        let wouldLand = spotBeside.frame(size: movedDown.size, window: wideUp, screen: CGRect(x: 0, y: 0, width: 1920, height: 1080))
+        expect(wouldLand.maxX > wideUp.maxX - 400 && NoteRoom.leftBeside(spotBeside.frame(size: movedDown.size, window: wideUp, screen: unclamped), window: wideUp),
+               "(given the width back it would land over the window; it asks for the room again)", "\(wouldLand)")
+        let overPage = NoteSpot.stick(panel: movedDown.offsetBy(dx: -600, dy: 0), window: narrowUp)
+        expect(!NoteRoom.leftBeside(overPage.frame(size: movedDown.size, window: narrowUp, screen: unclamped), window: narrowUp), "moved onto the window: room given back")
+        let otherScreen = NoteSpot.stick(panel: movedDown.offsetBy(dx: 900, dy: 0), window: narrowUp)
+        expect(!NoteRoom.leftBeside(otherScreen.frame(size: movedDown.size, window: narrowUp, screen: unclamped), window: narrowUp), "moved far off its side: room given back")
+        expect(!NoteRoom.leftBeside(movedDown.offsetBy(dx: 0, dy: 1200), window: narrowUp), "moved below the window: not beside it")
+        expect(NoteRoom.leftBeside(movedDown.offsetBy(dx: -40, dy: 0), window: narrowUp), "a little over the window's edge: still beside it")
+        // Petal's own dock takes a strip macOS's visible area doesn't know of, and draws over papers: papers and the
+        // room made for them keep out of it, whichever edge it's on (AppKit's coordinates here, y up).
+        let mac = CGRect(x: 0, y: 0, width: 1440, height: 900), macVisible = CGRect(x: 0, y: 4, width: 1440, height: 871)
+        expect(NoteRoom.freeOfDock(visible: macVisible, screen: mac, reach: 80, position: "bottom") == CGRect(x: 0, y: 80, width: 1440, height: 795), "a dock at the bottom")
+        expect(NoteRoom.freeOfDock(visible: macVisible, screen: mac, reach: 80, position: "right") == CGRect(x: 0, y: 4, width: 1360, height: 871), "on the right")
+        expect(NoteRoom.freeOfDock(visible: macVisible, screen: mac, reach: 80, position: "left") == CGRect(x: 80, y: 4, width: 1360, height: 871), "on the left")
+        expect(NoteRoom.freeOfDock(visible: macVisible, screen: mac, reach: nil, position: "right") == macVisible, "hidden: the whole visible area")
+        let leftScreen = CGRect(x: -1920, y: 0, width: 1920, height: 1080)
+        expect(NoteRoom.freeOfDock(visible: leftScreen, screen: leftScreen, reach: 70, position: "right") == CGRect(x: -1920, y: 0, width: 1850, height: 1080),
+               "on a screen left of the main one")
+        // A dock on the right: a full-width window kept clear of it, then narrowed for a note: the paper beside it and
+        // whole left of the dock.
+        let rightFree = CGRect(x: 0, y: 25, width: 1440 - 80, height: 875)
+        let clearOfDock = CGRect(x: 0, y: 30, width: 1360, height: 860)
+        let roomRight = NoteRoom.narrowed(window: clearOfDock, visible: rightFree, note: 360, margin: shadow) ?? clearOfDock
+        let besideDock = NoteRoom.stack(window: roomRight, visible: rightFree, papers: [NoteRoom.Paper(id: "n", size: openSize, top: 52)], margin: shadow)
+        expect(besideIt(besideDock, "n", roomRight) && frame(besideDock, "n").maxX + shadow <= rightFree.maxX, "a dock on the right: the paper beside the window, clear of the dock",
+               "\(roomRight) \(besideDock)")
         // Every screen and window width: narrowed, the open paper is beside the window where it was clamped before.
         for screenWidth in [1280, 1440, 1512, 1728, 1920, 2560] as [CGFloat] {
             for left in stride(from: CGFloat(-200), through: 600, by: 40) {

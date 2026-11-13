@@ -125,9 +125,10 @@ struct PaperView: View {
                     .padding(.trailing, 8).padding(.bottom, 9).contentShape(.rect)
             }
             .buttonStyle(.plain)
-            .disabled(desk == nil || flipped != nil)
-            .opacity(face == .folded && paper.file.watch != nil ? 0 : 1)
-            .allowsHitTesting(!(face == .folded && paper.file.watch != nil))
+            .disabled(desk == nil || flipped != nil || conflict)
+            // A conflict's paper is read only: nothing can be written on it, so no @ either.
+            .opacity((face == .folded && paper.file.watch != nil) || conflict ? 0 : 1)
+            .allowsHitTesting(!(face == .folded && paper.file.watch != nil) && !conflict)
             .help("Ask Petal AI: write what you want, then press Return")
             Button { if let flipped { flipped() } else { desk?.flip(paper.key) } } label: { FoldCorner().fill(Color.black.opacity(0.13)).frame(width: 24, height: 24).contentShape(.rect) }
                 .buttonStyle(.plain)

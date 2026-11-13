@@ -26,7 +26,7 @@ struct PetalProcessCheck {
             [petal, "--display-check", "/tmp/shots"], [petal, "--display-check"],
             [petal, "--browser-check"], [petal, "--browser-check", "--live", "/tmp/shots"], [petal, "--browser-check", "--live"],
             [petal, "--look-check", "com.apple.Safari"], [petal, "--look-check"],
-            [petal, "--helpers-check"], [petal, "--helpers-check", "--ai"], [petal, "--viewer-check", "/tmp/a.pdf"], [petal, "--viewer-check"],
+            [petal, "--helpers-check"], [petal, "--helpers-check", "--ai"], [petal, "--notes-desk-check"], [petal, "--viewer-check", "/tmp/a.pdf"], [petal, "--viewer-check"],
             [petal, "--bench-notes"], [petal, "--bench-notes", "--json", "/tmp/n.json"],
             [petal, "dock", "macos"], [petal, "doctor"], [petal, "report"], [petal, "run", "--key", "x", "--", "env"],
             [petal, "no-such-command"], [petal, "-psn_0_1", "--mcp"],
@@ -68,6 +68,7 @@ struct PetalProcessCheck {
             ([petal, "--bench-dock"], .benchDock), ([petal, "--bench-dock", "/tmp/strips"], .benchDock), ([petal, "--bench"], .bench),
             ([petal, "--routines-check", "--ai"], .routinesCheck(ai: true)), ([petal, "--routines-check"], .routinesCheck(ai: false)),
             ([petal, "--helpers-check", "--ai"], .helpersCheck(ai: true)), ([petal, "--helpers-check"], .helpersCheck(ai: false)),
+            ([petal, "--notes-desk-check"], .notesDeskCheck),
         ]
         for (argv, launch) in launches {
             let parsed = PetalProcess.parse(argv)
