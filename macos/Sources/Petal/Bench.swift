@@ -272,7 +272,7 @@ enum DockBench {
         // Magnification, driven with a made-up pointer (DockMagnifyCheck): a failure makes the bench fail.
         let arguments = CommandLine.arguments
         let folder = arguments.firstIndex(of: "--bench-dock").flatMap { arguments.count > $0 + 1 ? arguments[$0 + 1] : nil }
-        let failures = DockMagnifyCheck.run(app: app, apps: apps + loose, folder: folder)
+        let failures = DockMagnifyCheck.run(app: app, apps: apps + loose, folder: folder) + DockDropsCheck.run()
         SettingsBench.cleanUp()
         exit(failures == 0 ? 0 : 1)
     }

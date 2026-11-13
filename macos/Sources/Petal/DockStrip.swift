@@ -483,14 +483,8 @@ final class AppStripView: NSView {
         return under == nil ? [] : .copy
     }
 
-    /// What the drag under way holds, read once per drag.
-    private func dropped(_ sender: NSDraggingInfo) -> [DockRules.Dropped] {
-        if let held, held.0 == sender.draggingSequenceNumber { return held.1 }
-        let items = DockDrops.items(sender.draggingPasteboard)
-        held = (sender.draggingSequenceNumber, items)
-        return items
-    }
-    private var held: (Int, [DockRules.Dropped])?
+    /// What the drag under way holds, from its URLs (no disk read: `DockDrops`).
+    private func dropped(_ sender: NSDraggingInfo) -> [DockRules.Dropped] { DockDrops.items(sender) }
 
     override func draggingExited(_ sender: NSDraggingInfo?) { setFileOver(nil) }
 
@@ -501,9 +495,7 @@ final class AppStripView: NSView {
             app.paper.use(id, in: target)
             return true
         }
-        let items = dropped(sender)
-        held = nil
-        return DockDrops.perform(items, onApp: target)
+        return DockDrops.perform(dropped(sender), onApp: target)
     }
 
     private func setFileOver(_ id: String?) {

@@ -2022,9 +2022,7 @@ struct SlotMouse: NSViewRepresentable {
             return handlers?.dropOperation ?? .copy
         }
 
-        private static func urls(_ sender: NSDraggingInfo) -> [URL] {
-            sender.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] ?? []
-        }
+        private static func urls(_ sender: NSDraggingInfo) -> [URL] { DockDrops.urls(sender) }
 
         override func draggingExited(_ sender: NSDraggingInfo?) { handlers?.fileOver(false) }
 
@@ -2062,11 +2060,16 @@ struct RightClickCatcher: NSViewRepresentable {
 
         override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
             PetalApp.shared.docks.revealAll()
-            return DockDrops.action(DockDrops.items(sender.draggingPasteboard), onApp: nil) == nil ? [] : .copy
+            return draggingUpdated(sender)
+        }
+
+        // (Weighed again as it moves: a folder Petal looked at off the main thread counts from then on.)
+        override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+            DockDrops.action(DockDrops.items(sender), onApp: nil) == nil ? [] : .copy
         }
 
         override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-            DockDrops.perform(DockDrops.items(sender.draggingPasteboard), onApp: nil)
+            DockDrops.perform(DockDrops.items(sender), onApp: nil)
         }
     }
 }
