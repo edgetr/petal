@@ -1096,6 +1096,7 @@ final class NoteDesk {
         defer { reconcileRoom() }
         prunePassageGeometry()
         guard on, let frame, let scene, scene.window != nil else {
+            placedBeside = []
             for panel in tabPanels.values { panel.conceal() }
             for panel in pinPanels.values { panel.conceal() }
             concealUnplaced()
@@ -1109,7 +1110,6 @@ final class NoteDesk {
             return EdgeNote(id: key, line: lines[key], color: notebookKey(paper.notebook), faded: NoteShelf.faded(modified: paper.file.modified, now: now))
         }
         let tabs = EdgeLayout.tabs(edgeNotes, height: frame.height)
-        let visible = visible(for: frame) ?? frame
         // Inside the window's right edge, as the sketch has them; the window's own edge stays in sight beside them.
         let outside = false
         var keep: Set<String> = []
@@ -1124,33 +1124,71 @@ final class NoteDesk {
             spareTab(panel)
             tabPanels[key] = nil
         }
-        // The notes showing on this window, stacked down its right side where nobody moved them.
-        var placed: [CGRect] = []
-        let showing = here.keys.filter { faces[$0] != nil && !hiddenForTab($0) && standalone[$0] == nil }.sorted { (lines[$0] ?? 0, $0) < (lines[$1] ?? 0, $1) }
+        edgeTabs = tabs
+        let showing = placeBeside()
+        // Shown only where its one placement says it belongs now; every other paper hidden.
+        for (key, panel) in panels where !showing.contains(key) && !NoteShelf.restsOffWindow(placementNow(key)) { panel.conceal() }
+        drawPins(showing)
+        reconcilePassages()
+    }
+
+    /// The window in front's tabs as last laid out: where a paper with no line of its own would sit.
+    @ObservationIgnored private var edgeTabs: [EdgeTab] = []
+    /// Where each paper beside a window sat at its last layout there (its top and column, NoteRoom.Was, and whether
+    /// it was open), by window: the order they keep down the window, and where one held still stays.
+    @ObservationIgnored private var besides: [UInt32: [String: (was: NoteRoom.Was, open: Bool)]] = [:]
+    /// The papers placed beside the window in front by the last layout.
+    @ObservationIgnored private var placedBeside: Set<String> = []
+
+    /// The notes showing on the window in front, placed beside it the one way (NoteRoom.stack): where the person
+    /// left one, it stays; the others at their lines, never over one another. Returns them, in order.
+    private func placeBeside() -> [String] {
+        guard let frame, let number = scene?.window else { placedBeside = []; return [] }
+        let visible = visible(for: frame) ?? frame
+        let showing = here.keys.filter { faces[$0] != nil && !hiddenForTab($0) && standalone[$0] == nil }.sorted()
+        let was = besides[number] ?? [:]
+        var papers: [NoteRoom.Paper] = []
         for key in showing {
             let panel = panel(for: key)
             // Placed by its window (it fits the window in front): not the Desktop's or the screen's, whatever else
             // it's stuck to.
             panel.rest = .window
             let size = panel.paperSize
-            var rect: CGRect
-            if let spotted = spotFrame(key, size: size) {
-                // Where the person left it, by its window's nearest corner: over the window or anywhere else.
-                rect = spotted
-            } else {
-                let top = lines[key] ?? tabs.first { $0.ids.contains(key) }?.y ?? EdgeLayout.top
-                var ax = NoteRoom.beside(window: frame, visible: visible, size: size, top: top)
-                while let clash = placed.first(where: { $0.intersects(ax) }), ax.maxY < visible.maxY { ax.origin.y = clash.maxY + 10 }
-                placed.append(ax)
-                rect = NoteRules.appKitFrame(ax, primaryHeight: primaryHeight)
-            }
-            panel.place(paperFrame: rect)
-            shown(key, panel)
+            // Its line; with none, its tab's place, or higher where it already sat (a new note's tab taking a place
+            // above never moves a paper down).
+            let tab = edgeTabs.first { $0.ids.contains(key) }?.y ?? EdgeLayout.top
+            let top = lines[key] ?? min(tab, was[key]?.was.top ?? tab)
+            // Where the person left it, by its window's nearest corner: over the window or anywhere else.
+            let moved = spotFrame(key, size: size).map { NoteRules.appKitFrame($0, primaryHeight: primaryHeight) }
+            // Held by the pointer, or being written in (open with the keyboard, and open already at the last layout:
+            // the moment it opens it still goes around a paper the person moved): it stays still, and the others go
+            // around it.
+            let held = panel.held || (keyboard == key && faces[key] == .open && was[key]?.open == true)
+            papers.append(NoteRoom.Paper(id: key, size: size, top: top, moved: moved, was: was[key]?.was, held: held))
         }
-        // Shown only where its one placement says it belongs now; every other paper hidden.
-        for (key, panel) in panels where !showing.contains(key) && !NoteShelf.restsOffWindow(placementNow(key)) { panel.conceal() }
+        var record: [String: (was: NoteRoom.Was, open: Bool)] = [:]
+        for spot in NoteRoom.stack(window: frame, visible: visible, papers: papers) {
+            guard let panel = panels[spot.id] else { continue }
+            if spot.column >= 0 {
+                record[spot.id] = (NoteRoom.Was(top: spot.frame.minY - frame.minY, column: spot.column), faces[spot.id] == .open)
+            }
+            panel.place(paperFrame: NoteRules.appKitFrame(spot.frame, primaryHeight: primaryHeight))
+            shown(spot.id, panel)
+        }
+        if besides[number] == nil, besides.count >= 24 { besides = [:] }
+        besides[number] = record
+        placedBeside = Set(showing)
+        return showing
+    }
+
+    /// A paper beside the window in front changed size (opened, its writing grew, a helper's answer came): every
+    /// paper there placed again, so the ones below it move with it. False: it isn't placed beside the window now.
+    func refitBeside(_ key: String) -> Bool {
+        guard on, !missionControlOpen, !awaitingRead, placedBeside.contains(key), frame != nil else { return false }
+        let showing = placeBeside()
+        guard showing.contains(key) else { return false }
         drawPins(showing)
-        reconcilePassages()
+        return true
     }
 
     /// Where a paper the person moved sits on the window in front (its NoteSpot, by the window's nearest corner), at
@@ -3116,6 +3154,8 @@ final class NotePanel: NSPanel {
     var desktop: Bool { rest != .window }
     private var restingLevel: NSWindow.Level { rest == .desktop && desk?.faces[key] != .open ? Self.desktopLevel : .floating }
     private var dragStart: (mouse: CGPoint, origin: CGPoint)?
+    /// Held by the pointer (picked up, not yet let go).
+    var held: Bool { dragStart != nil }
 
     static let desktopLevel = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopIconWindow)) + 1)
 
@@ -3174,6 +3214,11 @@ final class NotePanel: NSPanel {
         let size = hosting.fittingSize
         // Held by the pointer: left where it is until it's let go.
         guard dragStart == nil else { return }
+        // Beside the window in front: every paper there placed again the one way, so none covers another.
+        if unveiled, rest == .window, desk?.refitBeside(key) == true {
+            level = restingLevel
+            return
+        }
         var wanted = NSRect(x: frame.minX, y: frame.maxY - size.height, width: size.width, height: size.height)
         let paper = CGSize(width: size.width - PaperLook.margin * 2, height: size.height - PaperLook.margin * 2)
         if unveiled, let spotted = desk?.spotFrame(key, size: paper) { wanted = spotted.insetBy(dx: -PaperLook.margin, dy: -PaperLook.margin) }
