@@ -834,6 +834,13 @@ swiftc -parse-as-library -O -o "$out/whatsnew" Sources/Petal/UpdateTrust.swift S
 "$out/whatsnew" notes
 grep -q 'cp "$ROOT"/macos/notes/\*.md "$APP/Contents/Resources/notes/"' build.sh \
     || { echo "what's new: build.sh doesn't put the notes in the app"; exit 1; }
+# AgentSetup.swift: turning other AI agents off takes back only Petal's own skill copy, command link and MCP
+# registration (on throwaway folders: links never followed); DockImport.swift: importing macOS's Dock replaces only on
+# the first setup and otherwise adds.
+swiftc -parse-as-library -O -o "$out/agentsetup" Sources/Petal/AgentSetup.swift checks/AgentSetupCheck.swift
+"$out/agentsetup"
+swiftc -parse-as-library -O -o "$out/dockimport" Sources/Petal/DockImport.swift checks/DockImportCheck.swift
+"$out/dockimport"
 # An update rebuilt with the person's own changes to Petal's code takes its source from the release Petal checked:
 # Personal.update asks the updater for the commit that release's own Petal.app says (Updater.source, which checks the
 # download as an installed update is and reads the commit through UpdateTrust.source) and hands petal-personal that

@@ -85,23 +85,48 @@ enum CLI {
 /// Lets the person's other AI agents (Claude Code or Codex, in any app or a terminal) change Petal too: Petal's MCP
 /// server is registered with Claude Code and Codex through their own `mcp add`, the skill is in their skills
 /// folders, and `petal` is on the PATH. Kept current on every start while `otherAgents` is on; turning it off takes
-/// all three back at once (`disconnect`), and turning it on sets them up at once.
+/// all three back at once (`disconnect`), and turning it on sets them up at once. Connecting and disconnecting run
+/// one after another, in the order they were asked, and each step looks first at what the person chose last
+/// (`wanted`), so a connect still under way when the switch goes off changes nothing more, and the last choice holds.
+/// Taking back removes only what is Petal's own (`AgentSetup`).
 @MainActor
 enum OtherAgents {
+    /// One at a time, in the order asked.
+    nonisolated private static let queue = DispatchQueue(label: "petal.other-agents", qos: .utility)
+    nonisolated private static let wantedLock = NSLock()
+    nonisolated(unsafe) private static var wantedNow = false
+
+    /// What the person chose last: connected (true) or not.
+    nonisolated static var wanted: Bool {
+        get { wantedLock.withLock { wantedNow } }
+        set { wantedLock.withLock { wantedNow = newValue } }
+    }
+
     /// This Petal's executable when it's an installed Petal.app: a build or test copy never takes over, or takes back.
     private static var installed: String? {
         guard let executable = Bundle.main.executableURL?.resolvingSymlinksInPath().path,
-              executable.hasSuffix("Petal.app/Contents/MacOS/Petal"), !executable.contains("/build/"), !executable.contains("/tmp/") else { return nil }
+              executable.hasSuffix(AgentSetup.executableSuffix), !executable.contains("/build/"), !executable.contains("/tmp/") else { return nil }
         return executable
     }
 
+    /// ~/.local/bin/petal.
+    nonisolated static var commandLink: URL { FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin/petal") }
+
     static func connect(paths: [Provider: String]) {
         guard let executable = installed else { return }
-        Skill.install()
-        linkCommand(executable)
-        let environment = PetalApp.shared.childEnvironment
-        Task.detached {
-            for (provider, path) in paths { register(provider, cli: path, server: executable, environment: environment) }
+        wanted = true
+        let skill = Skill.source, folders = Skill.folders, environment = PetalApp.shared.childEnvironment
+        queue.async {
+            guard wanted else { return }
+            if let skill, let ours = try? Data(contentsOf: skill) {
+                for (home, folder) in folders where FileManager.default.fileExists(atPath: home.path) { AgentSetup.installSkill(ours, in: folder) }
+            }
+            guard wanted else { return }
+            linkCommand(executable)
+            for (provider, path) in paths {
+                guard wanted else { return }   // turned off meanwhile: the disconnect queued after this takes back the rest
+                register(provider, cli: path, server: executable, environment: environment)
+            }
         }
     }
 
@@ -109,26 +134,25 @@ enum OtherAgents {
     /// skill, and the `petal` command's link. Anything else by those names is left alone.
     static func disconnect(paths: [Provider: String]) {
         guard installed != nil else { return }
-        Skill.remove()
-        unlinkCommand()
-        let environment = PetalApp.shared.childEnvironment
-        Task.detached {
-            for (provider, path) in paths { unregister(provider, cli: path, environment: environment) }
+        wanted = false
+        let skill = Skill.source, folders = Skill.folders, environment = PetalApp.shared.childEnvironment
+        queue.async {
+            guard !wanted else { return }
+            if let skill, let ours = try? Data(contentsOf: skill) {
+                for (_, folder) in folders { AgentSetup.removeSkill(ours, from: folder) }
+            }
+            AgentSetup.unlinkCommand(commandLink)
+            for (provider, path) in paths {
+                guard !wanted else { return }   // turned on again meanwhile: the connect queued after this sets it up
+                unregister(provider, cli: path, environment: environment)
+            }
         }
     }
 
-    /// ~/.local/bin/petal, when it is Petal's own link.
-    static func unlinkCommand() {
-        let link = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin/petal")
-        guard let existing = try? FileManager.default.destinationOfSymbolicLink(atPath: link.path),
-              existing.hasSuffix("Petal.app/Contents/MacOS/Petal") else { return }
-        try? FileManager.default.removeItem(at: link)
-    }
-
-    /// Removes Petal's registration from the agent, when the one named `petal` is Petal's.
+    /// Removes Petal's registration from the agent, when the one named `petal` is Petal's (`AgentSetup.isPetalRegistration`).
     nonisolated static func unregister(_ provider: Provider, cli: String, environment: [String: String]) {
         let (status, current) = run(cli, ["mcp", "get", "petal"], environment: environment)
-        guard status == 0, current.contains("Petal.app/Contents/MacOS/Petal") else { return }
+        guard status == 0, AgentSetup.isPetalRegistration(current, claude: provider == .claude) else { return }
         switch provider {
         case .claude: _ = run(cli, ["mcp", "remove", "-s", "user", "petal"], environment: environment)
         case .codex: _ = run(cli, ["mcp", "remove", "petal"], environment: environment)
@@ -151,11 +175,10 @@ enum OtherAgents {
     }
 
     /// ~/.local/bin/petal → Petal's executable, unless something else already has that name.
-    static func linkCommand(_ executable: String) {
+    nonisolated static func linkCommand(_ executable: String) {
         // Only an installed Petal.app: a bare build or a test copy running for a moment must never take the link.
-        guard executable.hasSuffix("Petal.app/Contents/MacOS/Petal"), !executable.contains("/build/"), !executable.contains("/tmp/") else { return }
-        let bin = FileManager.default.homeDirectoryForCurrentUser.appending(path: ".local/bin")
-        let link = bin.appending(path: "petal")
+        guard executable.hasSuffix(AgentSetup.executableSuffix), !executable.contains("/build/"), !executable.contains("/tmp/") else { return }
+        let link = commandLink, bin = link.deletingLastPathComponent()
         if let existing = try? FileManager.default.destinationOfSymbolicLink(atPath: link.path) {
             // Petal's own link (or a broken one: pointing nowhere, or at itself) is made anew.
             let broken = !FileManager.default.fileExists(atPath: link.path)
@@ -168,11 +191,13 @@ enum OtherAgents {
         try? FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: executable)
     }
 
-    /// Registers `petal` with the agent, replacing an older registration that points somewhere else.
+    /// Registers `petal` with the agent, replacing an older registration of Petal's own that points at another copy.
+    /// A `petal` registration that isn't Petal's is someone else's: it's left as it is, and Petal adds none.
     nonisolated static func register(_ provider: Provider, cli: String, server: String, environment: [String: String]) {
         func run(_ arguments: [String]) -> (Int32, String) { Self.run(cli, arguments, environment: environment) }
         let (status, current) = run(["mcp", "get", "petal"])
         if status == 0 && current.contains(server) { return }
+        if status == 0 && !AgentSetup.isPetalRegistration(current, claude: provider == .claude) { return }
         switch provider {
         case .claude:
             if status == 0 { _ = run(["mcp", "remove", "-s", "user", "petal"]) }

@@ -136,7 +136,6 @@ final class PetalApp {
         claude.startNotes()
         selection.start()
         routines.start()
-        if config.bool("otherAgents") { Skill.install() }
         Windows.startManaging()
         runBrowsers.sweep()   // browsers a Petal that crashed left for its runs are ended, their profiles removed
         let welcomed = config.welcomed
