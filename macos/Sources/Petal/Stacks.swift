@@ -101,8 +101,27 @@ enum Stacks {
         finder.async {
             var error: NSDictionary?
             NSAppleScript(source: "tell application \"Finder\" to empty trash")?.executeAndReturnError(&error)
-            DispatchQueue.main.async { MainActor.assumeIsolated { PetalApp.shared.signals.lookAtTrash() } }
+            // Not allowed to use Finder (the person once said Don't Allow): said, with the way to allow it.
+            let refused = [-1743, -1744].contains(error?[NSAppleScript.errorNumber] as? Int ?? 0)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    PetalApp.shared.signals.lookAtTrash()
+                    if refused { askForFinder() }
+                }
+            }
         }
+    }
+
+    @MainActor private static func askForFinder() {
+        let alert = NSAlert()
+        alert.messageText = "Petal needs Finder to empty the Trash"
+        alert.informativeText = "Allow Petal to use Finder in System Settings."
+        alert.addButton(withTitle: "Open Settings")
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate()
+        guard alert.runModal() == .alertFirstButtonReturn,
+              let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation") else { return }
+        NSWorkspace.shared.open(url)
     }
 }
 
