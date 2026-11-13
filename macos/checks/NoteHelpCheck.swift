@@ -346,6 +346,14 @@ struct NoteHelpCheck {
                && NoteHelp.asksForWork("@Petal can you look at this in ~/petal"), "a line asking for work, or naming a checkout")
         expect(!NoteHelp.asksForWork("@Petal what does this project do?") && !NoteHelp.asksForWork("@Petal summarize this PR")
                && !NoteHelp.asksForWork("@Petal is this safe to merge?"), "a question is answered, not a coding job")
+        expect(!NoteHelp.asksForWork("@Petal fix the typo in this note") && !NoteHelp.asksForWork("@Petal add a summary of the PR to my note")
+               && !NoteHelp.asksForWork("@Petal please rewrite the note shorter") && NoteHelp.asksForWork("@Petal add a test for what this note says") && NoteHelp.asksForWork("@Petal open a PR for this note")
+               && !NoteHelp.asksForWork("@Petal rewrite the note shorter") && NoteHelp.asksForWork("@Petal fix the note parser in ~/petal"),
+               "work on the note itself is no coding job; the repository named with it is")
+        expect(NoteHelp.repository(url: "https://github.com/edgetr/edgetr.github.io/blob/main/index.html") == NoteHelp.Repository(slug: "edgetr/edgetr.github.io", kind: .file, number: nil)
+               && NoteHelp.repository(url: "https://github.com/edgetr/petal.git")?.slug == "edgetr/petal"
+               && NoteHelp.repository(url: "https://github.com/edgetr/petal/blob/main/macos/build.sh#L10")?.kind == .file,
+               "a repository whose name has .git inside it keeps its name", "\(String(describing: NoteHelp.repository(url: "https://github.com/edgetr/edgetr.github.io/blob/main/index.html")))")
         let polite = ["@Petal Can you fix the failing test?", "@Petal Could you add a test for this", "@Petal Please fix this",
                       "@Petal could you please rename the helper", "@Petal would you mind updating the README?", "@Petal can we open a PR for this?"]
         expect(polite.allSatisfy(NoteHelp.asksForWork), "a polite request for work is a coding job", polite.filter { !NoteHelp.asksForWork($0) }.joined(separator: " | "))

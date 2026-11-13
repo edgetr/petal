@@ -1673,6 +1673,11 @@ enum NoteHelp {
             }
             break
         }
+        // Work on the note itself ("fix the typo in this note", "add the PR's summary to my note", "rewrite the
+        // note"), not on the repository.
+        let note = #"(this|the|my)\s+note\b"#
+        if lower.range(of: #"\b(in|to|into|on|onto)\s+"# + note, options: .regularExpression) != nil
+            || (words.count >= 3 && words[1...2].joined(separator: " ").range(of: "^" + note, options: .regularExpression) != nil) { return false }
         let first = words.first ?? ""
         let verbs = ["fix", "change", "implement", "add", "write", "refactor", "rename", "remove", "update", "make", "build",
                      "port", "migrate", "bump", "upgrade", "commit", "push", "merge", "rebase", "resolve", "address", "finish", "continue",
@@ -1688,7 +1693,10 @@ enum NoteHelp {
         let path = parts.path.split(separator: "/").map(String.init)
         // GitHub's own pages (settings, notifications, …) are no repository.
         guard path.count >= 2, !githubPages.contains(path[0].lowercased()) else { return nil }
-        let slug = (path[0] + "/" + path[1]).lowercased().replacingOccurrences(of: ".git", with: "")
+        // "owner/repo.git" is "owner/repo"; "owner/owner.github.io" stays itself.
+        var name = path[1]
+        if name.lowercased().hasSuffix(".git") { name.removeLast(4) }
+        let slug = (path[0] + "/" + name).lowercased()
         if path.count >= 4, let number = Int(path[3]) {
             if path[2] == "pull" { return Repository(slug: slug, kind: .pull, number: number) }
             if path[2] == "issues" { return Repository(slug: slug, kind: .issue, number: number) }
