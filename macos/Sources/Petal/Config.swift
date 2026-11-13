@@ -123,23 +123,16 @@ final class Config {
         setApps(apps.filter { $0 != app })
     }
 
-    /// "Import macOS's Dock". Into an empty dock (the first run), macOS's Dock becomes Petal's: its apps in its order,
-    /// and its folders as Petal's stacks. Into a dock that has apps, it only adds: macOS's Dock's apps and folders that
-    /// Petal's doesn't have yet go after the ones it has, so nothing the person arranged is lost.
+    /// "Import macOS's Dock" (`DockImport.merge`): on the first setup (the welcome not finished) macOS's Dock becomes
+    /// Petal's; every other time it only adds the apps and folders Petal's dock doesn't have, after its own.
     func importSystemDock() {
-        let imported = SystemDock.apps(), folders = SystemDock.folders()
-        guard !apps.isEmpty else {
-            setApps(imported)
-            if !folders.isEmpty { set("stackFolders", folders) }
-            return
-        }
-        let added = imported.filter { !apps.contains($0) }
-        if !added.isEmpty { setApps(apps + added) }
         let stacks = strings("stackFolders")
-        // By the folder each stack really shows (Screenshots may stand for the Desktop), so none comes twice.
-        let have = Set(stacks.map { Stacks.url(Stacks.resolve([$0]).first ?? $0).standardizedFileURL.path })
-        let newFolders = folders.filter { !have.contains(Stacks.url($0).standardizedFileURL.path) }
-        if !newFolders.isEmpty { set("stackFolders", stacks + newFolders) }
+        let result = DockImport.merge(apps: apps, folders: stacks, systemApps: SystemDock.apps(), systemFolders: SystemDock.folders(),
+                                      firstSetup: !welcomed,
+                                      // By the folder each stack really shows (Screenshots may stand for the Desktop).
+                                      key: { Stacks.url(Stacks.resolve([$0]).first ?? $0).standardizedFileURL.path })
+        if result.apps != apps { setApps(result.apps) }
+        if result.folders != stacks { set("stackFolders", result.folders) }
     }
 
     // MARK: Files
