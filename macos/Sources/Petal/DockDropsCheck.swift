@@ -36,6 +36,34 @@ enum DockDropsCheck {
         let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000 / 10
         print(String(format: "drops: %@ weighed from their URLs (200 items in %.2f ms)%@", problems.isEmpty ? "ok  " : "FAIL", ms,
                      problems.isEmpty ? "" : "; " + problems.joined(separator: ", ")))
+        return (problems.isEmpty ? 0 : 1) + searchStacks()
+    }
+
+    /// The "+" search knows a stack by the folder it shows, worked out off the main thread: a row drawn before that's
+    /// in reads "+ Stack", and once it's in, the stack reads as added; a change of the setting is worked out again.
+    private static func searchStacks() -> Int {
+        let config = PetalApp.shared.config
+        let was = config.strings("stackFolders")
+        defer { config.set("stackFolders", was) }
+        let folder = SettingsBench.scratch.appending(path: "stack-folder")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        config.set("stackFolders", [folder.path])
+        let search = AppSearch()
+        let row = AppSearch.Result(id: "folder:" + folder.path, name: folder.lastPathComponent, isFolder: true, path: folder.path)
+        var problems: [String] = []
+        if search.added(row) { problems.append("added before it was worked out") }
+        func waitFor(_ wanted: Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline {
+                if search.added(row) == wanted { return true }
+                RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            }
+            return false
+        }
+        if !waitFor(true) { problems.append("never seen as added") }
+        config.set("stackFolders", [String]())
+        if !waitFor(false) { problems.append("still added once the setting dropped it") }
+        print("search stacks: \(problems.isEmpty ? "ok  " : "FAIL") worked out off the main thread\(problems.isEmpty ? "" : "; " + problems.joined(separator: ", "))")
         return problems.isEmpty ? 0 : 1
     }
 }
