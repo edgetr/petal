@@ -68,7 +68,7 @@ struct PetalProcessCheck {
             ([petal, "--bench-dock"], .benchDock), ([petal, "--bench-dock", "/tmp/strips"], .benchDock), ([petal, "--bench"], .bench),
             ([petal, "--routines-check", "--ai"], .routinesCheck(ai: true)), ([petal, "--routines-check"], .routinesCheck(ai: false)),
             ([petal, "--helpers-check", "--ai"], .helpersCheck(ai: true)), ([petal, "--helpers-check"], .helpersCheck(ai: false)),
-            ([petal, "--notes-desk-check"], .notesDeskCheck),
+            ([petal, "--notes-desk-check"], .notesDeskCheck), ([petal, "--dock-check"], .dockCheck),
         ]
         for (argv, launch) in launches {
             let parsed = PetalProcess.parse(argv)

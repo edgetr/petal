@@ -96,6 +96,66 @@ enum DockRules {
         return to != from ? .move(to: to) : .click   // let go in its own slot: the click it started as
     }
 
+    // MARK: Where the dock takes the mouse
+
+    /// Whether the dock's panel takes the mouse at `point` (panel coordinates, top-left origin), from the glass as
+    /// it's drawn now: the glass, out to the panel's edge on the screen's side (the panel runs to the screen's edge,
+    /// and every point between the glass and the edge is the dock's), and `inward` past it for icons drawn grown or
+    /// lifted over it. Anywhere else the click goes to what's under the panel.
+    static func takesMouse(_ point: CGPoint, glass: CGRect, panel: CGSize, position: String, inward: CGFloat) -> Bool {
+        guard glass.width > 0, glass.height > 0 else { return false }
+        let area: CGRect = switch position {
+        case "left": CGRect(x: 0, y: glass.minY, width: glass.maxX + inward, height: glass.height)
+        case "right": CGRect(x: glass.minX - inward, y: glass.minY, width: panel.width - glass.minX + inward, height: glass.height)
+        default: CGRect(x: glass.minX, y: glass.minY - inward, width: glass.width, height: panel.height - glass.minY + inward)
+        }
+        return area.contains(point)
+    }
+
+    /// The dock's glass growing or shrinking: SwiftUI draws it from where it was drawn (`from`) to its new layout
+    /// (`to`) along an ease-out of `duration` seconds, while its layout already says `to`.
+    struct GlassMove: Equatable {
+        var from: CGRect
+        var to: CGRect
+        var start: Double
+        var duration: Double
+
+        /// Where the glass is drawn `now`.
+        func at(_ now: Double) -> CGRect {
+            let t = duration > 0 ? min(1, max(0, (now - start) / duration)) : 1
+            let p = DockRules.easeOut(t)
+            return CGRect(x: from.minX + (to.minX - from.minX) * p, y: from.minY + (to.minY - from.minY) * p,
+                          width: from.width + (to.width - from.width) * p, height: from.height + (to.height - from.height) * p)
+        }
+
+        func done(at now: Double) -> Bool { now - start >= duration }
+    }
+
+    /// A glass moving from `old` to `new` (both layouts, panel coordinates) animates when it only grew or shrank
+    /// around the same middle (an app, a minimized window or the player came or went); moved or laid out anew (another
+    /// position, icon size or screen), it's drawn where it is at once. `drawn` is where the last move had got to.
+    static func glassMove(from old: CGRect, drawn: CGRect, to new: CGRect, now: Double, duration: Double) -> GlassMove? {
+        guard old.width > 0, old.height > 0, new.width > 0, new.height > 0, old != new,
+              abs(old.midX - new.midX) < 1, abs(old.midY - new.midY) < 1,
+              abs(old.width - new.width) < 1 || abs(old.height - new.height) < 1 else { return nil }
+        return GlassMove(from: drawn, to: new, start: now, duration: duration)
+    }
+
+    /// Core Animation's and SwiftUI's ease-out: the cubic Bézier (0, 0), (0.58, 1), at `t` of the way in time.
+    static func easeOut(_ t: Double) -> Double {
+        guard t > 0 else { return 0 }
+        guard t < 1 else { return 1 }
+        // x(s) = 3(1-s)s²·0.58 + s³ (the first control point is at 0); solve x(s) = t by bisection, then y(s).
+        var low = 0.0, high = 1.0
+        for _ in 0..<40 {
+            let s = (low + high) / 2
+            let x = 3 * (1 - s) * s * s * 0.58 + s * s * s
+            if x < t { low = s } else { high = s }
+        }
+        let s = (low + high) / 2
+        return 3 * (1 - s) * (1 - s) * s + 3 * (1 - s) * s * s + s * s * s
+    }
+
     // MARK: Dropped on the dock
 
     enum Dropped: Equatable {

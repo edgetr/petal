@@ -95,6 +95,10 @@ MainActor.assumeIsolated {
         // Its own throwaway folders, set before anything reads a setting (never a copy of the person's).
         app.setActivationPolicy(.prohibited)
         HelpersCheck.run(ai: ai)
+    case .dockCheck:
+        // Its own throwaway folders, set before anything reads a setting (never a copy of the person's).
+        app.setActivationPolicy(.prohibited)
+        DockCheck.run()
     case .notesDeskCheck:
         // Its own throwaway folders, set before anything reads a setting (never a copy of the person's).
         app.setActivationPolicy(.prohibited)
