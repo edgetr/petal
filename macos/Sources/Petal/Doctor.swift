@@ -17,6 +17,8 @@ enum Doctor {
         let area: String
         let text: String
         var fixed: String?
+        /// `doctor --fix` can repair it (nil, from an older Petal's JSON: it can't).
+        var fixable: Bool?
     }
 
     static let repo = "edgetr/petal"
@@ -24,8 +26,8 @@ enum Doctor {
 
     static func check(fix: Bool) -> [Finding] {
         var found: [Finding] = []
-        func note(_ level: String, _ area: String, _ text: String, fixed: String? = nil) {
-            found.append(Finding(level: level, area: area, text: text, fixed: fixed))
+        func note(_ level: String, _ area: String, _ text: String, fixed: String? = nil, fixable: Bool = false) {
+            found.append(Finding(level: level, area: area, text: text, fixed: fixed, fixable: fixable))
         }
         let folder = Config.folder
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -50,17 +52,17 @@ enum Doctor {
                 try? fallback.write(to: url, options: .atomic)
                 fixed = "kept a copy (\(URL(fileURLWithPath: backup).lastPathComponent)) and started fresh"
             }
-            note("error", "files", "\(name == "dock.json" ? "Your dock’s file" : "Your settings file") (\(name)) can’t be read, so Petal ignores it.", fixed: fixed)
+            note("error", "files", "\(name == "dock.json" ? "Your dock file" : "Your settings file") (\(name)) is damaged, so Petal is using its defaults.", fixed: fixed, fixable: true)
         }
         let settings = Config.parse(folder.appending(path: "settings.json")) ?? [:]
         let unknown = settings.keys.filter { Settings.defaults[$0] == nil }.sorted()
-        if !unknown.isEmpty { note("warn", "files", "Unknown settings (ignored): \(unknown.joined(separator: ", ")).") }
+        if !unknown.isEmpty { note("warn", "files", "Settings Petal doesn’t know, left alone: \(unknown.joined(separator: ", ")).") }
 
         // The dock's apps.
         let dock = Config.parse(folder.appending(path: "dock.json")) ?? [:]
         if let apps = dock["apps"] as? [String] {
             let missing = apps.filter { !Sites.isWeb($0) && NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) == nil }.sorted()
-            note("ok", "apps", "\(apps.count) in your dock." + (missing.isEmpty ? "" : " Not installed (skipped in the dock): \(missing.prefix(8).joined(separator: ", "))."))
+            note("ok", "apps", "\(apps.count) apps in your dock." + (missing.isEmpty ? "" : " \(missing.count) aren’t installed and are left out."))
         } else if FileManager.default.fileExists(atPath: folder.appending(path: "modes.json").path) {
             // Petal for macOS had modes once; opening it moves the default mode's apps into the dock, unless it can't read them.
             note("warn", "apps", "Your dock from when Petal had modes hasn't been moved over. Open Petal; if the dock stays empty, "
@@ -72,21 +74,21 @@ enum Doctor {
             .contains { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && PetalProcess.isDock(pid: $0.processIdentifier) }
         if SystemDock.isReplaced && !running {
             if fix { SystemDock.restore() }
-            note("error", "dock", "macOS's Dock is hidden but Petal isn't running.", fixed: fix ? "gave macOS its Dock back" : nil)
+            note("error", "dock", "macOS's Dock is hidden but Petal isn't running.", fixed: fix ? "gave macOS its Dock back" : nil, fixable: true)
         } else if dock["welcomed"] as? Bool != true {
             note("ok", "dock", "Petal hasn't been set up yet: open it to start.")
         } else if (dock["dock"] as? String ?? "petal") == "petal" && !running {
             note("warn", "dock", "Petal is set to be your dock but isn't running: open Petal.")
         } else if running && !IPC.answering() {
             // Running, but `petal` and the AI's tools can't reach it (another copy took its socket, say).
-            note("error", "dock", "Petal is running but doesn't answer: quit it and open it again.")
+            note("error", "dock", "Petal AI can’t reach Petal. Quit Petal and open it again.")
         } else {
             note("ok", "dock", (dock["dock"] as? String ?? "petal") == "petal" ? "Petal is your dock." : "macOS's Dock is in use; Petal's is off.")
         }
         if !FileManager.default.fileExists(atPath: DockGuard.plist.path) && dock["welcomed"] as? Bool == true
             && (dock["dock"] as? String ?? "petal") == "petal" {
             if fix { DockGuard.install() }
-            note("warn", "dock", "The guard that gives macOS its Dock back if Petal crashes isn't installed.", fixed: fix ? "installed it" : nil)
+            note("warn", "dock", "The helper that gives macOS its Dock back if Petal crashes is missing.", fixed: fix ? "installed it" : nil, fixable: true)
         }
 
         // The AI apps.
@@ -94,18 +96,18 @@ enum Doctor {
         if chosen.isEmpty { note("ok", "ai", "No AI chosen: Petal works as a dock without it.") }
         for provider in chosen {
             guard let path = PetalApp.find(provider, setting: settings[provider.pathSetting] as? String ?? "") else {
-                note("error", "ai", "\(provider.name) is chosen but isn't installed: install it from Petal's settings, under Petal AI.")
+                note("error", "ai", "\(provider.name) isn’t installed. Install it in Settings › Petal AI.")
                 continue
             }
             let status = shell(path, provider.statusArguments)
             if provider.signedIn(status: status.status, output: status.output) != nil {
                 note("ok", "ai", "\(provider.name) is installed and signed in.")
             } else {
-                note("error", "ai", "\(provider.name) isn't signed in: sign in from Petal's settings, under Petal AI.")
+                note("error", "ai", "\(provider.name) isn’t signed in. Sign in in Settings › Petal AI.")
             }
-            if !Skill.installed(for: provider) {
+            if settings["otherAgents"] as? Bool ?? true, !Skill.installed(for: provider) {
                 if fix { Skill.install() }
-                note("warn", "ai", "\(provider.name) doesn't have Petal's skill.", fixed: fix ? "installed it" : nil)
+                note("warn", "ai", "\(provider.name) doesn’t know about Petal yet.", fixed: fix ? "installed it" : nil, fixable: true)
             }
         }
 
@@ -115,9 +117,9 @@ enum Doctor {
         if let line = tools.output.split(separator: "\n").first,
            let reply = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
            let list = (reply["result"] as? [String: Any])?["tools"] as? [Any], !list.isEmpty {
-            note("ok", "tools", "Petal's AI tools answer (\(list.count) tools).")
+            note("ok", "tools", "Petal AI’s tools work.")
         } else {
-            note("error", "tools", "Petal's AI tools don't answer (Petal.app may be damaged: reinstall it).")
+            note("error", "tools", "Petal AI’s tools don’t work. Install Petal again from petal.codes.")
         }
 
         // The person's own changes to Petal's code (Personal.swift).
@@ -126,7 +128,7 @@ enum Doctor {
         // Recent trouble in the log.
         let problems = logLines(minutes: 30).filter { $0.localizedCaseInsensitiveContains("error") || $0.localizedCaseInsensitiveContains("fault") }
         note(problems.isEmpty ? "ok" : "warn", "logs",
-             problems.isEmpty ? "No recent errors in Petal's log." : "\(problems.count) recent errors in Petal's log, the last: \(redact(problems.last ?? "").prefix(200))")
+             problems.isEmpty ? "Nothing went wrong in the last 30 minutes." : "\(problems.count) things went wrong in the last 30 minutes. Report a problem sends the details.")
         return found
     }
 
@@ -153,7 +155,7 @@ enum Doctor {
         var components = URLComponents(string: "https://github.com/\(repo)/issues/new")!
         components.queryItems = [URLQueryItem(name: "title", value: title), URLQueryItem(name: "body", value: String(body.prefix(6000)))]
         if let url = components.url { NSWorkspace.shared.open(url) }
-        return "Opened the issue page in your browser; check it and press Submit."
+        return "The report is open in your browser. Sign in to GitHub there and press Submit."
     }
 
     static func ghPath() -> String? {
@@ -255,6 +257,17 @@ enum Skill {
     static func installed(for provider: Provider) -> Bool {
         guard let source, let ours = try? Data(contentsOf: source) else { return true }
         return (try? Data(contentsOf: folder(for: provider).appending(path: "SKILL.md"))) == ours
+    }
+
+    /// Petal's own skill taken out of each AI app's skills folder (the folder too, once empty); someone else's skill
+    /// by the same name is left alone.
+    static func remove() {
+        for provider in Provider.allCases {
+            let folder = folder(for: provider), target = folder.appending(path: "SKILL.md")
+            guard let existing = try? Data(contentsOf: target), String(decoding: existing, as: UTF8.self).contains("name: petal") else { continue }
+            try? FileManager.default.removeItem(at: target)
+            if (try? FileManager.default.contentsOfDirectory(atPath: folder.path))?.isEmpty == true { try? FileManager.default.removeItem(at: folder) }
+        }
     }
 
     /// For each AI app that's on this Mac; an older copy of Petal's own skill is replaced.

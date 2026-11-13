@@ -287,7 +287,7 @@ enum Personal {
             if fix { installDeveloperTools() }
             return [Doctor.Finding(level: inUse ? "error" : "warn", area: "code",
                                    text: "Your changes to Petal's code need Apple's command line tools, which aren't installed: updates can't bring them along.",
-                                   fixed: fix ? "asked macOS to install them" : nil)]
+                                   fixed: fix ? "asked macOS to install them" : nil, fixable: true)]
         }
         let output = core(["doctor"] + (fix ? ["--fix"] : []), tools: tools).output
         guard let line = output.split(separator: "\n").last,
