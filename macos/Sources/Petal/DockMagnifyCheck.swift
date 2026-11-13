@@ -118,6 +118,17 @@ enum DockMagnifyCheck {
                 problems.append("\(short(id)) outside the strip's view")
             }
         }
+        // Tooltips, previews and stacks sit beyond the grown icons.
+        let edge = panel.popupEdge
+        let beyond: CGFloat = switch position {
+        case "left": edge.maxX - panel.frame.minX
+        case "right": edge.minX - panel.frame.minX
+        default: panel.frame.maxY - edge.maxY
+        }
+        for (id, rect) in grown {
+            let over = switch position { case "left": rect.maxX - beyond; case "right": beyond - rect.minX; default: beyond - rect.minY }
+            if over > 0.5 { problems.append(String(format: "%@ under the tooltips by %.0f", short(id), over)); break }
+        }
         let stretch = magnifier.glassStretch.scale
         if stretch < 1.05 { problems.append(String(format: "glass ×%.2f", stretch)) }
         if layers, let folder { write(dock, panel, folder: folder, name: "magnified-\(position)\(late ? "-late" : "")") }

@@ -768,6 +768,21 @@ final class DockPanel: NSPanel {
                       width: content.width - room.leading - room.trailing, height: content.height - room.top - room.bottom)
     }
 
+    /// What tooltips, previews and stacks sit beyond: the glass, and with magnification on, the icons grown past it
+    /// (they grow from the edge the dock sits on by a slot times the amount, from 4 points inside the glass).
+    var popupEdge: CGRect {
+        var edge = glassFrame
+        guard Magnifier.enabled else { return edge }
+        let inset = config.number("iconPadding") >= 0 ? config.number("iconPadding") : 5
+        let grown = max(0, (dock.icon + inset * 2) * Magnifier.amount - 4)
+        switch config.position {
+        case "left": edge.size.width += grown
+        case "right": edge.origin.x -= grown; edge.size.width += grown
+        default: edge.size.height += grown
+        }
+        return edge
+    }
+
     /// The gap between the dock and the screen's edge.
     var gap: CGFloat { config.number("dockMargin") >= 0 ? config.number("dockMargin") : 4 }
 

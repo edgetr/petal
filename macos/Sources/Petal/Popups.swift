@@ -40,7 +40,7 @@ final class GlassPanel: NSPanel {
         }
         let screen = dock?.screenRef ?? Screens.main ?? Screens.all[0]
         let area = screen.frame.insetBy(dx: gap, dy: gap)
-        let edge = dock?.glassFrame ?? slot
+        let edge = dock?.popupEdge ?? slot
         var origin: CGPoint
         switch PetalApp.shared.config.position {
         case "left": origin = CGPoint(x: edge.maxX + gap, y: slot.midY - size.height / 2)
