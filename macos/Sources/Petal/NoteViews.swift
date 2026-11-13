@@ -13,6 +13,10 @@ enum PaperLook {
     /// Room around the paper in its panel, for its shadow.
     static let margin: CGFloat = 16
 
+    /// The open editor's height for writing `writing` points tall: with an answer, a step or a card under it, only
+    /// what the writing needs (the answer follows its question); with nothing under it, room to write in.
+    static func editorRoom(writing: CGFloat, below: Bool) -> CGFloat { below ? max(writing, 24) : max(minOpen - 70, writing) }
+
     static func rgb(_ color: NSColor) -> NoteInk.RGB {
         let c = color.usingColorSpace(.sRGB) ?? NSColor.systemBlue
         return NoteInk.RGB(r: Double(c.redComponent), g: Double(c.greenComponent), b: Double(c.blueComponent))
@@ -196,6 +200,12 @@ struct PaperView: View {
         return NoteHelp.paperHeights(screen: screen, chrome: 110 + corner, editor: PaperLook.maxOpen - 70, ink: .greatestFiniteMagnitude, controls: max(controlsHeight, 40))
     }
 
+    /// Something of a helper's under the writing: its answer, a task's chips, a sum, or its bar (a step, a card).
+    private var helperShows: Bool {
+        let file = paper.file
+        return !file.ink.isEmpty || !file.task.isEmpty || file.calc != nil || controlsHeight > 1
+    }
+
     /// The helper's ink and its controls, the controls measured (a form's buttons too) so the paper keeps their room.
     private var helperFront: some View {
         HelperFront(paper: paper, tint: tint, glass: glass, desk: desk, inkRoom: heights.ink).padding(.bottom, 18)
@@ -262,7 +272,7 @@ struct PaperView: View {
                            helperReturn: { desk.helpers.returned(paper.key, line: $0, at: $1) },
                            names: { desk.helpers.names(for: paper.key) },
                            accent: color, tint: tint)
-                .frame(height: min(heights.editor, max(PaperLook.minOpen - 70, editorHeight)))
+                .frame(height: min(heights.editor, PaperLook.editorRoom(writing: editorHeight, below: helperShows)))
             helperFront
         }
     }
