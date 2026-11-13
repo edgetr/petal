@@ -97,6 +97,7 @@ struct NoteHelpCheck {
         // MARK: Requests
 
         let ask = { (text: String) in NoteHelp.request(text, now: now, calendar: calendar) }
+        let ask2 = { (text: String, now: Date) in NoteHelp.request(text, now: now, calendar: calendar) }
         if case .bringBack(let date, _, let others) = ask(line) { expect(parts(date).weekday == 6 && others == ["Bus card"], "bring back, with another note", "\(others)") } else { expect(false, "bring back") }
         // More ways to say when, from Monday 9 November 2026, 10:30.
         let full = { (date: Date) in calendar.dateComponents([.month, .day, .hour, .minute], from: date) }
@@ -119,11 +120,57 @@ struct NoteHelpCheck {
         expect(NoteHelp.timeWords("remind me next month at 17:30", now: now, calendar: calendar).count == 1, "one time, not a day and a time apart")
         expect(whenOf("bring this back Friday 9:00") == DateComponents(month: 11, day: 13, hour: 9, minute: 0), "the old ways still the same")
         expect(whenOf("bring this back in 3 days") != nil && whenOf("what was in 3") == nil && whenOf("page 20 of the report") == nil, "a number alone is no time")
+        // Said in the evening and in the morning: "tonight at 9" is 9 in the evening, a time today that has gone by is
+        // never taken (Petal asks when), and nothing is ever brought back in the past, at any hour of any day.
+        let evening = calendar.date(from: DateComponents(year: 2026, month: 11, day: 9, hour: 18, minute: 30))!
+        let whenAt = { (text: String, now: Date) in NoteHelp.when(text, now: now, calendar: calendar).map { full($0.date) } }
+        expect(whenAt("bring this back tonight at 9", now) == DateComponents(month: 11, day: 9, hour: 21, minute: 0)
+               && whenAt("remind me tonight at 8", evening) == DateComponents(month: 11, day: 9, hour: 20, minute: 0)
+               && whenAt("remind me tomorrow night at 11", now) == DateComponents(month: 11, day: 10, hour: 23, minute: 0)
+               && whenAt("bring it back Friday evening at 7", now) == DateComponents(month: 11, day: 13, hour: 19, minute: 0)
+               && whenAt("remind me tomorrow morning at 7", now) == DateComponents(month: 11, day: 10, hour: 7, minute: 0),
+               "an hour said with the evening is the evening's, with the morning the morning's")
+        expect(whenAt("remind me at 8", evening) == DateComponents(month: 11, day: 9, hour: 20, minute: 0)
+               && whenAt("remind me today at 9", now) == DateComponents(month: 11, day: 9, hour: 21, minute: 0)
+               && whenAt("remind me at 11", now) == DateComponents(month: 11, day: 9, hour: 11, minute: 0),
+               "a bare hour whose morning has gone by is this evening's")
+        expect(whenAt("remind me at midnight", evening) == DateComponents(month: 11, day: 10, hour: 0, minute: 0)
+               && whenAt("remind me this evening", now) == DateComponents(month: 11, day: 9, hour: 18, minute: 0)
+               && whenAt("remind me this afternoon", now) == DateComponents(month: 11, day: 9, hour: 14, minute: 0)
+               && whenAt("remind me in 2 hrs", now) == DateComponents(month: 11, day: 9, hour: 12, minute: 30)
+               && whenAt("remind me in half an hour", now) == DateComponents(month: 11, day: 9, hour: 11, minute: 0),
+               "midnight, this evening, hrs and half an hour")
+        expect(whenAt("remind me today at 10am", now) == nil && whenAt("remind me today", evening) == nil && whenAt("remind me in 0 minutes", now) == nil
+               && whenAt("bring this back tonight", calendar.date(byAdding: .hour, value: 3, to: evening)!) == nil,
+               "a time today that has gone by is no time")
+        expect(ask("@Petal remind me today at 10am") == .askWhen && ask("@Petal remind me later") == .askWhen && ask("@Petal remind me in 5") == .askWhen,
+               "a reminder with no time Petal can take: asked when, never handed to a helper that can't set one")
+        if case .ask = ask("@Petal remind me when this was due") { expect(true, "") } else { expect(false, "“remind me when …” is a question") }
+        let phrasings = ["tonight", "tonight at 9", "tonight at 11:30", "today", "today at 9", "today at 10am", "today 3", "this morning",
+                         "this afternoon", "this evening at 7", "tomorrow", "tomorrow night at 11", "tomorrow morning at 7", "Friday",
+                         "next Friday 8pm", "monday at 9", "at 5", "at 8", "at 11", "at 12", "at midnight", "at noon", "5pm", "17:30",
+                         "in 0 minutes", "in 5 mins", "in an hour", "in half an hour", "in 3 days", "next week", "next month", "the 9th",
+                         "the 31st", "Nov 9 at 9am", "Feb 29", "1 January"]
+        var past: [String] = []
+        for day in [9, 13, 15, 30] {
+            for hour in 0..<24 {
+                let then = calendar.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour, minute: 30))!
+                for words in phrasings {
+                    for line in ["@Petal bring this back \(words)", "@Petal remind me \(words)"] {
+                        if case .bringBack(let date, _, _) = ask2(line, then), date <= then { past.append("\(line) at \(day) \(hour):30") }
+                        for time in NoteHelp.timeWords(line, now: then, calendar: calendar) where time.date <= then { past.append("\(line) bound at \(day) \(hour):30") }
+                    }
+                }
+            }
+        }
+        expect(past.isEmpty, "nothing is ever brought back in the past (\(phrasings.count * 2 * 4 * 24) lines)", past.prefix(5).joined(separator: "; "))
         if case .bringBack = ask("@Petal remind me at 5pm to call the bank") { expect(true, "") } else { expect(false, "remind me at a time alone") }
         expect(ask("@Petal remind me to call the bank") == .askWhen && ask("@Petal bring this back") == .askWhen, "no time said: asked when")
         if case .ask = ask("@Petal remind me what this project was about") { expect(true, "") } else { expect(false, "“remind me what …” is a question") }
         expect(ask("@Petal remember that Sam takes no sugar") == .remember("Sam takes no sugar"), "remember")
         expect(ask("@Petal forget the hotel") == .forget("the hotel"), "forget")
+        expect(ask("@Petal remember: Sam takes no sugar") == .remember("Sam takes no sugar") && ask("@Petal forget, the hotel") == .forget("the hotel"),
+               "remember and forget with a mark after them", "\(ask("@Petal remember: Sam takes no sugar"))")
         expect(ask("@Petal put this away") == .putAway, "put away")
         expect(ask("@Petal check this every morning, tell me under $300") == .watch(every: "1d", at: "09:00", line: "under $300"), "a watcher", "\(ask("@Petal check this every morning, tell me under $300"))")
         expect(ask("@Petal check every 6 hours and tell me over 50") == .watch(every: "6h", at: "", line: "over 50"), "every 6 hours")
@@ -299,6 +346,14 @@ struct NoteHelpCheck {
                && NoteHelp.asksForWork("@Petal can you look at this in ~/petal"), "a line asking for work, or naming a checkout")
         expect(!NoteHelp.asksForWork("@Petal what does this project do?") && !NoteHelp.asksForWork("@Petal summarize this PR")
                && !NoteHelp.asksForWork("@Petal is this safe to merge?"), "a question is answered, not a coding job")
+        expect(!NoteHelp.asksForWork("@Petal fix the typo in this note") && !NoteHelp.asksForWork("@Petal add a summary of the PR to my note")
+               && !NoteHelp.asksForWork("@Petal please rewrite the note shorter") && NoteHelp.asksForWork("@Petal add a test for what this note says") && NoteHelp.asksForWork("@Petal open a PR for this note")
+               && !NoteHelp.asksForWork("@Petal rewrite the note shorter") && NoteHelp.asksForWork("@Petal fix the note parser in ~/petal"),
+               "work on the note itself is no coding job; the repository named with it is")
+        expect(NoteHelp.repository(url: "https://github.com/edgetr/edgetr.github.io/blob/main/index.html") == NoteHelp.Repository(slug: "edgetr/edgetr.github.io", kind: .file, number: nil)
+               && NoteHelp.repository(url: "https://github.com/edgetr/petal.git")?.slug == "edgetr/petal"
+               && NoteHelp.repository(url: "https://github.com/edgetr/petal/blob/main/macos/build.sh#L10")?.kind == .file,
+               "a repository whose name has .git inside it keeps its name", "\(String(describing: NoteHelp.repository(url: "https://github.com/edgetr/edgetr.github.io/blob/main/index.html")))")
         let polite = ["@Petal Can you fix the failing test?", "@Petal Could you add a test for this", "@Petal Please fix this",
                       "@Petal could you please rename the helper", "@Petal would you mind updating the README?", "@Petal can we open a PR for this?"]
         expect(polite.allSatisfy(NoteHelp.asksForWork), "a polite request for work is a coding job", polite.filter { !NoteHelp.asksForWork($0) }.joined(separator: " | "))

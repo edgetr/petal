@@ -595,12 +595,17 @@ extension ClaudePanel {
         let app = AXUIElementCreateApplication(place.pid)
         AXUIElementSetMessagingTimeout(app, 0.3)
         let element: AXUIElement?
+        // Whether the browser listed its windows (and the note's isn't among them), or is gone.
+        var listed = false
         if let number = place.window {
-            let all: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
-            element = all.first { Windows.id(of: $0) == number }
+            let all: [AXUIElement]? = Windows.value(app, kAXWindowsAttribute)
+            listed = all != nil || NSRunningApplication(processIdentifier: place.pid) == nil
+            element = all?.first { Windows.id(of: $0) == number }
         } else {
             element = Windows.value(app, kAXFocusedWindowAttribute)
         }
+        // Its window not among the browser's (closed, on another Desktop, the browser quit): said so, never "try again".
+        if element == nil, listed { return .unsure(.noWindow) }
         guard let element, let number = Windows.id(of: element), let frame = Windows.frame(of: element) else { return unsure }
         let window = Browsers.Window(number: number, title: Windows.value(element, kAXTitleAttribute) ?? "", frame: frame)
         if let now = Browsers.shownTab(pid: place.pid, bundleID: place.app, window: window, element: element) {
@@ -631,13 +636,15 @@ extension ClaudePanel {
         case .shown:
             return "This note's tab changed while Petal read it (another page, or it moved), so nothing of what was read is told: look again."
         case .another:
-            return "Another tab is showing in this note's window, so Petal didn't read or use it: a tab's note works only on its own tab. Ask the person to switch back to that tab; front: true uses what's in front instead."
+            return "Another tab is showing in this note's window, so Petal didn't read or use it: a tab's note works only on its own tab. Ask the person to switch back to that tab (if they closed it, the note has nothing to read); front: true uses what's in front instead."
         case .unsure(.notAsked):
             help = "Petal hasn't been allowed to see \(name)'s tabs yet: the person can allow it from this note's place menu (Let Petal see \(name)’s tabs…), then ask again."
         case .unsure(.refused):
             help = "\(name) refused to let Petal see its tabs: the person can allow it in System Settings › Privacy & Security › Automation, then ask again."
         case .unsure(.unknown):
             help = "Try once more in a moment."
+        case .unsure(.noWindow):
+            return "This note's window isn't open in \(name) where Petal can see it (it was closed, is on another Desktop, or \(name) quit), so nothing was read or used. Say so to the person in one line; front: true uses what's in front instead."
         }
         return "Petal couldn't tell which tab this note's window is showing, so nothing was read or used there (it never works on another tab). \(help) Don't ask the person to switch tabs: they may be looking at it."
     }

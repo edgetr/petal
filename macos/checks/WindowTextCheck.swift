@@ -200,6 +200,73 @@ struct WindowTextCheck {
         let plain = WindowText.told(shown: mailLines.isEmpty ? [] : mail.nodes, raw: mail.nodes, part: 1, find: "", redact: { $0 }, matches: { _ in false })
         expect(plain.text == mailLines.joined(separator: "\n") && !plain.hid && plain.parts == 1, "nothing secret: the words as they are", plain.text ?? "nil")
 
+        // MARK: Generated windows: every part within the cap, the parts the whole, no secret in any
+
+        var seed: UInt64 = 0x5eed
+        func random(_ n: Int) -> Int { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Int((seed >> 33) % UInt64(max(n, 1))) }
+        let secrets = ["sk-ant-api03-Zq9xT7", "4111111111111111", "correct-horse-battery"]
+        let sweepIndex = UIMap.SecretIndex(secrets)
+        let pool = ["Hello", "world.", "👩‍👩‍👧 family", "שלום עולם", "مرحبا بالعالم", "e\u{301}te\u{301}", "", " ", "\n", "a\nb", "Price: $12",
+                    "#tag", "…more", "Show transcript", String(repeating: "word ", count: 600), String(repeating: "🙂", count: 3000),
+                    String(repeating: "x", count: 13_000)]
+        let roles = ["AXGroup", "AXStaticText", "AXStaticText", "AXStaticText", "AXLink", "AXHeading", "AXButton", "AXTextArea", "AXCell",
+                     "AXRow", "AXImage", "AXList", "AXTextField"]
+        var sweepFailures: [String] = []
+        for round in 0..<80 {
+            var tree = Tree()
+            let root = tree.add("AXWindow")
+            let top = random(3) == 0 ? tree.add("AXWebArea", parent: root) : root
+            var holders = [top]
+            for _ in 0..<(1 + random(round % 20 == 0 ? 400 : 60)) {
+                let parent = holders[random(holders.count)]
+                let role = roles[random(roles.count)]
+                var text = pool[random(pool.count)]
+                // A secret whole in a sentence, or split across pieces of one paragraph or across lines.
+                switch random(12) {
+                case 0: text = "Key: " + secrets[random(secrets.count)] + " end"
+                case 1: text = secrets[random(secrets.count)]
+                case 2: text = "4111 1111\n1111 1111"
+                default: break
+                }
+                let at = tree.add(role, parent: parent, value: role == "AXStaticText" || role.hasSuffix("Field") || role == "AXTextArea" ? text : "",
+                                  title: role == "AXButton" || role == "AXLink" || role == "AXHeading" ? text : "",
+                                  subrole: role == "AXTextField" && random(4) == 0 ? "AXSecureTextField" : "")
+                if ["AXGroup", "AXLink", "AXHeading", "AXCell", "AXRow", "AXList", "AXTextArea"].contains(role) { holders.append(at) }
+            }
+            let shownNodes = UIMap.hideJoined(tree.nodes, matches: sweepIndex.matches, spans: sweepIndex.spans).nodes
+                .map { UIMap.redactWords($0, secret: sweepIndex.matches, redacted: sweepIndex.redacted) }
+            let first = WindowText.told(shown: shownNodes, raw: tree.nodes, part: 1, find: "", redact: sweepIndex.redacted,
+                                        matches: sweepIndex.matches, spans: sweepIndex.spans)
+            guard first.parts > 0 else { continue }
+            var texts: [String] = []
+            var lefts: [Int] = []
+            for part in 1...first.parts {
+                let told = part == 1 ? first : WindowText.told(shown: shownNodes, raw: tree.nodes, part: part, find: "", redact: sweepIndex.redacted,
+                                                              matches: sweepIndex.matches, spans: sweepIndex.spans)
+                guard let text = told.text else { sweepFailures.append("round \(round) part \(part) unchecked"); break }
+                if text.count > WindowText.cap { sweepFailures.append("round \(round) part \(part) is \(text.count) characters") }
+                if secrets.contains(where: text.contains) || sweepIndex.matches(text) { sweepFailures.append("round \(round) part \(part) shows a secret") }
+                if told.part != part || told.parts != first.parts { sweepFailures.append("round \(round) part \(part) says it's \(told.part) of \(told.parts)") }
+                texts.append(text)
+                lefts.append(told.left)
+            }
+            // Each part but the last says more is left, about what the parts after it hold; the last says none.
+            for (at, left) in lefts.enumerated() {
+                let rest = texts.dropFirst(at + 1).joined(separator: "\n").count
+                if (left == 0) != (rest == 0) || abs(left - rest) > max(texts.count, rest / 100) {
+                    sweepFailures.append("round \(round) part \(at + 1) says \(left) left, the rest is \(rest)"); break
+                }
+            }
+            for word in ["Hello", "Show", "zzz", "4111"] {
+                let found = WindowText.told(shown: shownNodes, raw: tree.nodes, part: 1, find: word, redact: sweepIndex.redacted,
+                                            matches: sweepIndex.matches, spans: sweepIndex.spans)
+                if let text = found.text, text.count > WindowText.cap + 3 * found.found { sweepFailures.append("round \(round) find \(word): \(text.count) characters") }
+                if let text = found.text, secrets.contains(where: text.contains) { sweepFailures.append("round \(round) find \(word) shows a secret") }
+            }
+        }
+        expect(sweepFailures.isEmpty, "80 generated windows: every part within the cap, says how much is left, and shows no secret",
+               sweepFailures.prefix(6).joined(separator: "; "))
+
         print(failures == 0 ? "ok: \(passed) checks" : "\(failures) failed, \(passed) passed")
         exit(failures == 0 ? 0 : 1)
     }
