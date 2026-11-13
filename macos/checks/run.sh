@@ -35,8 +35,11 @@ swiftc -parse-as-library -O -o "$out/signals" Sources/Petal/SignalRules.swift ch
 "$out/signals"
 # Clicking an app in front again brings its next window forward, through every one of them and back, whatever order
 # the app lists them in as they come forward; which running apps the dock lists and their dots; what letting go of a
-# dragged app does (a wobble is a click, out of the dock removes it); what a drop adds or opens; and a window moved
-# into the dock's strip moved back out at its size (DockRules).
+# dragged app does (a wobble is a click, out of the dock removes it); what a drop adds or opens; and windows kept
+# clear of the dock, look after look, over 1500 generated runs (screens left of and above the main one, docks on
+# every side, apps that keep a minimum size, looks a moment old, the person dragging and resizing into the strip):
+# Petal stops moving windows within a few looks, a window dragged in at its size goes back out at that size and is
+# never shortened later, nothing creeps, and turning it off gives every window back (DockRules).
 swiftc -parse-as-library -O -o "$out/dockrules" Sources/Petal/DockRules.swift checks/DockRulesCheck.swift
 "$out/dockrules"
 # Magnification: the icon under the pointer grows by the amount set and stays under it, its neighbours ease aside

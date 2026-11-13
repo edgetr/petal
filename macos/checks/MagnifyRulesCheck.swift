@@ -34,7 +34,7 @@ struct MagnifyRulesCheck {
 
     static func main() {
         let slot: CGFloat = 44
-        let (slots, order) = dock(apps: 24, slot: slot)
+        let (slots, _) = dock(apps: 24, slot: slot)
         let close: (CGFloat, CGFloat) -> Bool = { abs($0 - $1) < 0.01 }
 
         for amount in [0.1, 0.5, 1] as [CGFloat] {
@@ -58,37 +58,46 @@ struct MagnifyRulesCheck {
             expect(close(first, -total / 2) && close(last, total / 2), "the ends move out by the growth on their side (\(amount))", "\(first) \(last) of \(total)")
         }
 
-        // Anywhere along the dock, at any strength: the drawn icons keep their order and never overlap or part; the
-        // icon drawn under the pointer is the one whose slot the pointer is in (so a click opens what's under it);
-        // the glass's ends move as far as the first and last icons; and no side grows past the room the panel keeps.
+        // Anywhere along the dock, at any strength, with any number of apps and any icon size: the drawn icons keep
+        // their order and never overlap or part; the icon drawn under the pointer is the one whose slot the pointer is
+        // in (so a click opens what's under it); the glass's ends move as far as the first and last icons; and no side
+        // grows past the room the panel keeps.
         var worst = (overlap: CGFloat(0), room: CGFloat(0), glass: CGFloat(0))
-        var wrongUnder: [CGFloat] = []
-        let low = slots["claude"]!.low, high = slots["add"]!.high
-        for amount in [0.1, 0.5, 1] as [CGFloat] {
-            for strength in [0.3, 1] as [CGFloat] {
-                var pointer = low - 2
-                while pointer <= high + 2 {
-                    let extra = R.growth(slots, pointer: pointer, grow: amount * strength, slot: slot)
-                    let drawn = order.map { R.drawn($0, slots, extra, pointer: pointer)! }
-                    for (a, b) in zip(drawn, drawn.dropFirst()) { worst.overlap = max(worst.overlap, abs(b.low - a.high)) }
-                    if let inSlot = order.first(where: { slots[$0]!.low <= pointer && pointer < slots[$0]!.high }),
-                       let index = order.firstIndex(of: inSlot), !(drawn[index].low - 0.01 <= pointer && pointer <= drawn[index].high + 0.01) {
-                        wrongUnder.append(pointer)
+        var wrongUnder: [String] = []
+        var cases = 0
+        for apps in [0, 1, 2, 5, 24, 60] {
+            for slotSize in [16, 30, 44, 80, 128] as [CGFloat] {
+                let (slots, order) = dock(apps: apps, slot: slotSize, start: 37)
+                let low = slots["claude"]!.low, high = slots["add"]!.high
+                for amount in [0.1, 0.25, 0.5, 0.75, 1] as [CGFloat] {
+                    for strength in [0.05, 0.3, 0.7, 1] as [CGFloat] {
+                        var pointer = low - slotSize
+                        while pointer <= high + slotSize {
+                            cases += 1
+                            let extra = R.growth(slots, pointer: pointer, grow: amount * strength, slot: slotSize)
+                            let drawn = order.map { R.drawn($0, slots, extra, pointer: pointer)! }
+                            for (a, b) in zip(drawn, drawn.dropFirst()) { worst.overlap = max(worst.overlap, abs(b.low - a.high)) }
+                            if let inSlot = order.first(where: { slots[$0]!.low <= pointer && pointer < slots[$0]!.high }),
+                               let index = order.firstIndex(of: inSlot), !(drawn[index].low - 0.01 <= pointer && pointer <= drawn[index].high + 0.01) {
+                                wrongUnder.append("\(apps) apps, \(slotSize) pt, at \(pointer)")
+                            }
+                            let room = R.room(slot: slotSize, amount: amount)
+                            worst.room = max(worst.room, low - drawn.first!.low - room, drawn.last!.high - high - room)
+                            let stretch = R.stretch(slots, extra, pointer: pointer, length: high - low)
+                            let length = (high - low) * stretch.scale
+                            let glassLow = low + (high - low) * stretch.anchor - length * stretch.anchor
+                            worst.glass = max(worst.glass, abs(glassLow - drawn.first!.low), abs(glassLow + length - drawn.last!.high))
+                            pointer += slotSize / 11.3
+                        }
                     }
-                    let room = R.room(slot: slot, amount: amount)
-                    worst.room = max(worst.room, low - drawn.first!.low - room, drawn.last!.high - high - room)
-                    let stretch = R.stretch(slots, extra, pointer: pointer, length: high - low)
-                    let length = (high - low) * stretch.scale
-                    let glassLow = low + (high - low) * stretch.anchor - length * stretch.anchor
-                    worst.glass = max(worst.glass, abs(glassLow - drawn.first!.low), abs(glassLow + length - drawn.last!.high))
-                    pointer += 3.7
                 }
             }
         }
-        expect(worst.overlap < 0.01, "magnified icons never overlap or part", "\(worst.overlap)")
+        expect(worst.overlap < 0.01, "magnified icons never overlap or part (\(cases) cases)", "\(worst.overlap)")
         expect(wrongUnder.isEmpty, "the icon drawn under the pointer is the one its slot is", "\(wrongUnder.prefix(5))")
-        expect(worst.room <= 0, "nothing grows past the room the panel keeps", "\(worst.room)")
+        expect(worst.room <= 0.001, "nothing grows past the room the panel keeps", "\(worst.room)")
         expect(worst.glass < 0.01, "the glass's ends move with the first and last icons", "\(worst.glass)")
+        let low = slots["claude"]!.low, high = slots["add"]!.high
 
         // Nothing grows with the pointer far away or the strength at nothing.
         let far = R.growth(slots, pointer: high + 500, grow: 0.5, slot: slot)

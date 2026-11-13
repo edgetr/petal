@@ -387,90 +387,45 @@ final class DockController {
     private func keepWindowsClear(_ snapshot: WindowList) {
         guard Windows.trusted else { return }
         let on = config.keepWindowsClear && !config.autoHide
-        guard on || !cleared.isEmpty else { return }
+        guard on || !clearing.isEmpty else { return }
         let top = Screens.all.first?.frame.maxY ?? 0
-        let docks = panels.values.compactMap { panel -> (panel: DockPanel, screen: CGRect)? in
+        let docks = panels.values.compactMap { panel -> DockRules.ClearDock? in
             guard let area = panel.screenRef?.frame else { return nil }
-            return (panel, CGRect(x: area.minX, y: top - area.maxY, width: area.width, height: area.height))   // top-left origin
+            // Top-left origin, as Accessibility counts.
+            return DockRules.ClearDock(screen: CGRect(x: area.minX, y: top - area.maxY, width: area.width, height: area.height),
+                                       reach: panel.reach, fullScreen: panel.fullScreen)
         }
-        var moves: [(pid: pid_t, number: CGWindowID, from: CGRect, to: CGRect)] = []
-        for window in snapshot.onScreenWindows {
-            let now = window.frame
-            var before = now
-            if let record = cleared[window.number] {
-                // A frame Petal gave it, or one it had on the way (the look may be a moment old): still Petal's
-                // doing. Any other frame is the person's.
-                if record.knows(now) { before = record.before } else { cleared[window.number] = nil }
-            }
-            var target = before
-            let center = CGPoint(x: before.midX, y: before.midY)
-            if on, let dock = docks.first(where: { $0.screen.contains(center) }), !dock.panel.fullScreen {
-                // Moved there at its own size since the last look (dragged down past the dock): moved back up, not
-                // shortened.
-                let moved = cleared[window.number] == nil && (lastFrames[window.number].map {
-                    !$0.equalTo(now, within: 1) && abs($0.width - now.width) < 2 && abs($0.height - now.height) < 2
-                } ?? false)
-                target = DockRules.clear(before, screen: dock.screen, reach: dock.panel.reach, position: config.position, moved: moved)
-            }
-            let moving = !target.equalTo(now, within: 2)
-            guard moving || cleared[window.number] != nil || !target.equalTo(before, within: 1) else { continue }
-            var record = cleared[window.number] ?? Cleared(before: before)
-            record.saw(now)
-            record.saw(target)
-            cleared[window.number] = record
-            if moving { moves.append((window.pid, window.number, now, target)) }
-        }
-        // Windows that closed: nothing to give back.
-        cleared = cleared.filter { snapshot.numbers.contains($0.key) }
-        lastFrames = Dictionary(snapshot.onScreenWindows.map { ($0.number, $0.frame) }, uniquingKeysWith: { a, _ in a })
+        let windows = snapshot.onScreenWindows
+        let pids = Dictionary(windows.map { ($0.number, $0.pid) }, uniquingKeysWith: { a, _ in a })
+        let moves = clearing.look(windows.map { (number: $0.number, frame: $0.frame) }, alive: snapshot.numbers, docks: docks, on: on,
+                                  position: config.position)
         guard !moves.isEmpty else { return }
         // Accessibility waits on each app: never on the main thread.
         Self.clearQueue.async {
             for move in moves {
-                let app = AXUIElementCreateApplication(move.pid)
+                guard let pid = pids[move.number] else { continue }
+                let app = AXUIElementCreateApplication(pid)
                 AXUIElementSetMessagingTimeout(app, 0.3)
                 let list: [AXUIElement] = Windows.value(app, kAXWindowsAttribute) ?? []
-                guard let element = list.first(where: { Windows.id(of: $0) == move.number }),
-                      // Still where it was when this was decided: moved since (by the person, a newer look), it's
-                      // left alone.
-                      let there = Windows.frame(of: element), there.equalTo(move.from, within: 4) else { continue }
-                let actual = Windows.place(element, pid: move.pid, move.to)
+                // Still where it was when this was decided: moved since (by the person, a newer look), it's left
+                // alone, and weighed again at the next look.
+                var actual: CGRect?
+                if let element = list.first(where: { Windows.id(of: $0) == move.number }),
+                   let there = Windows.frame(of: element), there.equalTo(move.from, within: 4) {
+                    actual = Windows.place(element, pid: pid, move.to)
+                }
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         // Where the app let it go (an app may keep a minimum size), which is now Petal's frame for it.
-                        guard let controller = PetalApp.shared.docks, let actual else { return }
-                        controller.cleared[move.number]?.saw(actual)
+                        PetalApp.shared.docks?.clearing.landed(move.number, asked: move.to, at: actual)
                     }
                 }
             }
         }
     }
 
-    /// A window kept clear of the dock: its own frame from before, and the frames it has had since through Petal
-    /// (the ones Petal gave it, where it was moving from, where the app let it go). Kept until the window closes or
-    /// the person moves it, so a look at the windows from a moment before a move never mistakes Petal's frame for
-    /// theirs.
-    struct Cleared {
-        var before: CGRect
-        private var frames: [CGRect] = []
-
-        init(before: CGRect) { self.before = before }
-
-        func knows(_ frame: CGRect) -> Bool {
-            before.equalTo(frame, within: 4) || frames.contains { $0.equalTo(frame, within: 4) }
-        }
-
-        mutating func saw(_ frame: CGRect) {
-            guard !knows(frame) else { return }
-            frames.append(frame)
-            if frames.count > 12 { frames.removeFirst() }
-        }
-    }
-
-    /// Windows kept clear of the dock, by window number: the frame each had before and the one Petal gave it.
-    private var cleared: [CGWindowID: Cleared] = [:]
-    /// Every window's frame at the last look: one that comes into the dock's strip at the same size was moved there.
-    private var lastFrames: [CGWindowID: CGRect] = [:]
+    /// Windows kept clear of the dock, and every window's frame at the last look (DockRules.ClearLedger).
+    private var clearing = DockRules.ClearLedger()
     nonisolated private static let clearQueue = DispatchQueue(label: "petal.windows.clear", qos: .userInitiated)
 
     /// How far the dock on `screen` reaches in from its edge: where windows kept clear of it end.
@@ -681,13 +636,6 @@ struct WindowList {
     var onScreenWindows: [(pid: pid_t, frame: CGRect, number: CGWindowID)] { onScreen.map { ($0.pid, $0.frame, $0.number) } }
 }
 
-extension CGRect {
-    func equalTo(_ other: CGRect, within tolerance: CGFloat) -> Bool {
-        abs(minX - other.minX) < tolerance && abs(minY - other.minY) < tolerance
-            && abs(width - other.width) < tolerance && abs(height - other.height) < tolerance
-    }
-}
-
 extension NSScreen {
     var displayID: CGDirectDisplayID? { deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID }
 }
@@ -758,7 +706,15 @@ final class DockPanel: NSPanel {
         default: break
         }
         super.sendEvent(event)
-        if event.type == .leftMouseUp { updateMouseThrough() }
+        guard event.type == .leftMouseUp else { return }
+        updateMouseThrough()
+        // The release ends any drag of an app: one whose slot went while it was held (the app quit) never heard it,
+        // and a drag left standing would keep the dock out, its icons from growing and lifting, for good.
+        if dock.dragging != nil {
+            dock.dragging = nil
+            dock.dragOffset = 0
+            dock.dragOut = false
+        }
     }
 
     /// Posted as the dock stops taking the mouse: whatever was hovered in it isn't any more.
@@ -1497,6 +1453,7 @@ struct AppSlot: View {
         .zIndex(dragged ? 10 : 0)
         .slotFrame(dock, item.id)
         .slotMouse(SlotMouse(
+            id: item.id,
             left: { app.popups.closeAll(); app.docks.activate(item) },
             right: { Menus.app(item) },
             middle: { app.docks.newWindow(item.id) },
@@ -1903,6 +1860,8 @@ struct TrashSlot: View {
 /// A slot's mouse: left, right and middle clicks, hover, dragging along the dock, and files dropped on it. AppKit
 /// does this directly, since the dock never becomes the key window.
 struct SlotMouse: NSViewRepresentable {
+    /// Whose mouse it is (an app's bundle identifier), for `Petal --bench-dock` to tell which slot a click reaches.
+    var id: String?
     var left: () -> Void = {}
     var right: () -> Void = {}
     var middle: () -> Void = {}

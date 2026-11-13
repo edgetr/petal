@@ -11,7 +11,7 @@ import SwiftUI
 /// "ok" or "FAIL"; the number of failures is returned.
 @MainActor
 enum DockMagnifyCheck {
-    static func run(app: PetalApp, apps: [String], folder: String?) -> Int {
+    static func run(app: PetalApp, apps: [String], installed: [String] = [], folder: String?) -> Int {
         guard let screen = Screens.main else {
             print("magnification: no screen to lay the dock out for")
             return 1
@@ -26,6 +26,14 @@ enum DockMagnifyCheck {
                     failures += drive(app: app, apps: apps, screen: screen, layers: layers, position: position, late: late,
                                       folder: folder)
                 }
+            }
+        }
+        // One app, and so many (up to 60) that the icons shrink to fit along the screen's edge.
+        let many = Array((apps + installed.filter { !apps.contains($0) }).prefix(60))
+        for (list, label) in [(Array(apps.prefix(1)), "1 app"), (many, "\(many.count) apps")] where !list.isEmpty {
+            for layers in [true, false] {
+                failures += drive(app: app, apps: list, screen: screen, layers: layers, position: "bottom", late: false, folder: nil,
+                                  label: label)
             }
         }
         DockStrip.shared.layers = was.layers
@@ -45,8 +53,8 @@ enum DockMagnifyCheck {
     }
 
     private static func drive(app: PetalApp, apps: [String], screen: NSScreen, layers: Bool, position: String, late: Bool,
-                              folder: String?) -> Int {
-        let name = "\(layers ? "layers" : "SwiftUI"), \(position), \(late ? "switched on" : "on from the start")"
+                              folder: String?, label: String? = nil) -> Int {
+        let name = "\(layers ? "layers" : "SwiftUI"), \(position), \(late ? "switched on" : "on from the start")" + (label.map { ", \($0)" } ?? "")
         let amount: CGFloat = 0.5
         DockStrip.shared.layers = layers
         app.config.setDock("position", position)
@@ -130,35 +138,50 @@ enum DockMagnifyCheck {
             if over > 0.5 { problems.append(String(format: "%@ under the tooltips by %.0f", short(id), over)); break }
         }
         let stretch = magnifier.glassStretch.scale
-        if stretch < 1.05 { problems.append(String(format: "glass ×%.2f", stretch)) }
+        // (By how far its ends move: a long dock's glass stretches by the same points, so less in proportion.)
+        let glassLength = vertical ? magnifier.glass.height : magnifier.glass.width
+        if (stretch - 1) * glassLength < (vertical ? slot.height : slot.width) * amount * 0.5 {
+            problems.append(String(format: "glass ×%.2f", stretch))
+        }
         if layers, let folder { write(dock, panel, folder: folder, name: "magnified-\(position)\(late ? "-late" : "")") }
-        // Across three icons, near the grown icons' outer end: a click goes to the icon drawn under the pointer.
-        if layers, let strip = dock.strip, let base = strip.windowRect(of: middle) {
+        // Across three icons, near the grown icons' outer end and across their middle: a click goes to the icon
+        // drawn under the pointer, with either drawing path.
+        if let base = layers ? dock.strip?.windowRect(of: middle) : rest[middle] {
             let index = dock.items.firstIndex { $0.id == middle } ?? 0
             let from = (vertical ? base.minY : base.minX) - (vertical ? base.height : base.width)
             var wrong: [String] = []
-            for step in 0..<30 {
-                // (Off the exact edges between slots, where either side is right.)
-                let along = from + (CGFloat(step) + 0.37) * (vertical ? base.height : base.width) / 10
-                let across: CGFloat = switch position {
-                case "left": base.minX + base.width * (1 + amount * 0.8)
-                case "right": base.maxX - base.width * (1 + amount * 0.8)
-                default: base.maxY - base.height * (1 + amount * 0.8)
-                }
-                let point = vertical ? CGPoint(x: across, y: along) : CGPoint(x: along, y: across)
-                let screenPoint = CGPoint(x: panel.frame.minX + point.x, y: panel.frame.maxY - point.y)
-                for _ in 0..<40 {
-                    dock.magnifier.advance(mouse: screenPoint, dt: 1.0 / 120)
-                    draw(panel, screen)
-                }
-                let now = shown(dock, panel)
-                let under = dock.items[max(0, index - 2)...min(dock.items.count - 1, index + 2)].map(\.id)
-                    .first { now[$0]?.contains(point) ?? false }
-                if let under, strip.app(atWindow: point) != under {
-                    wrong.append("\(short(under)) → \(strip.app(atWindow: point).map(short) ?? "nothing")")
+            var taken = 0
+            // Near the outer end of the grown icon's picture (it grows from the slot's edge on the screen's side, the
+            // padding around it too), and across the middle of the slot.
+            let length = vertical ? base.width : base.height
+            let outer = (1 + amount) * (length + dock.icon) / 2 * 0.95 / length
+            for depth in [outer, 0.5] as [CGFloat] {
+                for step in 0..<30 {
+                    // (Off the exact edges between slots, where either side is right.)
+                    let along = from + (CGFloat(step) + 0.37) * (vertical ? base.height : base.width) / 10
+                    let across: CGFloat = switch position {
+                    case "left": base.minX + base.width * depth
+                    case "right": base.maxX - base.width * depth
+                    default: base.maxY - base.height * depth
+                    }
+                    let point = vertical ? CGPoint(x: across, y: along) : CGPoint(x: along, y: across)
+                    let screenPoint = CGPoint(x: panel.frame.minX + point.x, y: panel.frame.maxY - point.y)
+                    for _ in 0..<20 {   // (the pointer's easing settles in well under that)
+                        dock.magnifier.advance(mouse: screenPoint, dt: 1.0 / 120)
+                        draw(panel, screen)
+                    }
+                    let now = shown(dock, panel)
+                    let under = dock.items[max(0, index - 2)...min(dock.items.count - 1, index + 2)].map(\.id)
+                        .first { now[$0]?.contains(point) ?? false }
+                    let reached = layers ? dock.strip?.app(atWindow: point) : slotMouse(at: point, in: panel)
+                    if reached != nil { taken += 1 }
+                    if let under, reached != under {
+                        wrong.append("\(short(under)) → \(reached.map(short) ?? "nothing")")
+                    }
                 }
             }
-            if !wrong.isEmpty { problems.append("clicks: " + wrong.prefix(3).joined(separator: ", ")) }
+            if taken == 0 { problems.append("no click reached an app") }
+            if !wrong.isEmpty { problems.append("clicks: " + wrong.prefix(3).joined(separator: ", ") + " (\(wrong.count) of 60)") }
         }
         // The pointer leaves: everything goes back to where it was.
         let away = CGPoint(x: screen.frame.midX, y: screen.frame.midY)
@@ -177,7 +200,7 @@ enum DockMagnifyCheck {
         if !problems.isEmpty {
             print("    glass \(magnifier.glass), pointer \(point), panel \(panel.frame), \(magnifier.frames.count) frames")
         }
-        print(String(format: "  %@ %@: ×%.2f, glass ×%.2f%@", problems.isEmpty ? "ok  " : "FAIL", name, effect.scale, stretch,
+        print(String(format: "  %@ %@ (icons %.0f pt): ×%.2f, glass ×%.2f%@", problems.isEmpty ? "ok  " : "FAIL", name, dock.icon, effect.scale, stretch,
                      problems.isEmpty ? "" : "; " + problems.joined(separator: ", ")))
         return problems.isEmpty ? 0 : 1
     }
@@ -190,6 +213,17 @@ enum DockMagnifyCheck {
             for id in strip.shownOrder { rects[id] = strip.drawnRect(of: id) }
         }
         return rects
+    }
+
+    /// The app whose SwiftUI slot takes a click at `point` (panel coordinates, top-left origin).
+    private static func slotMouse(at point: CGPoint, in panel: DockPanel) -> String? {
+        guard let content = panel.contentView else { return nil }
+        var view = content.hitTest(NSPoint(x: point.x, y: content.bounds.height - point.y))
+        while let current = view {
+            if let mouse = current as? SlotMouse.MouseView { return mouse.handlers?.id }
+            view = current.superview
+        }
+        return nil
     }
 
     private static func short(_ id: String) -> String { id.split(separator: ".").last.map(String.init) ?? id }

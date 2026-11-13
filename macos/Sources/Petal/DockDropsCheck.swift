@@ -15,6 +15,13 @@ enum DockDropsCheck {
         let expected: [DockRules.Dropped] = [.folder(missing + "/Folder"), .app(missing + "/Slack.app"), .document(missing + "/Notes.pdf"),
                                              .site("https://example.com/page")]
         if said != expected { problems.append("weighed \(said)") }
+        // A mail link or another app's link dragged from a page or a message is no website shortcut; a web address is.
+        let links = ["mailto:someone@example.com", "mailto:someone@example.com?subject=Hi", "tel:+1.555.0100", "slack://open",
+                     "someone@example.com", "ftp://files.example.com/a"].compactMap { URL(string: $0) }
+        let taken = DockDrops.items(links)
+        if !taken.isEmpty { problems.append("links taken as sites: \(taken)") }
+        let sites = DockDrops.items([URL(string: "http://example.com")!, URL(string: "https://example.com/a?b=c")!])
+        if sites != [.site("http://example.com"), .site("https://example.com/a?b=c")] { problems.append("addresses \(sites)") }
         // A real folder whose URL doesn't say it's one: a document at first, a folder once it was looked at off the
         // main thread.
         let folder = SettingsBench.scratch.appending(path: "dropped-folder")

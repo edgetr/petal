@@ -42,8 +42,10 @@ final class Sites {
         let text = typed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !text.contains(" "), !text.hasPrefix("/"), !text.hasPrefix("~") else { return nil }
         if isWeb(text) { return domain(text) == nil ? nil : text }
-        // A bare word isn't an address; a name with a dot and a 2+ letter ending is.
+        // A bare word isn't an address; a name with a dot and a 2+ letter ending is. One with an @ or a colon before
+        // any slash is a mail address or another kind of link ("mailto:me@example.com"), never a website.
         let host = text.split(separator: "/").first.map(String.init) ?? text
+        guard !host.contains("@"), !host.contains(":") else { return nil }
         let parts = host.split(separator: ".")
         guard parts.count >= 2, let last = parts.last, last.count >= 2, last.allSatisfy(\.isLetter), domain(text) != nil else { return nil }
         return "https://" + text

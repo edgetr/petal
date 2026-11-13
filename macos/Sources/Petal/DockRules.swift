@@ -165,4 +165,177 @@ enum DockRules {
                 : CGRect(x: f.minX, y: max(screen.minY + 30, limit - f.height), width: f.width, height: f.height)
         }
     }
+
+    /// A screen's dock, as keeping windows clear of it needs it: the screen (top-left origin), how far the dock
+    /// reaches in from its edge, and whether a full-screen app shows there (nothing is kept clear then).
+    struct ClearDock: Equatable {
+        var screen: CGRect
+        var reach: CGFloat
+        var fullScreen = false
+    }
+
+    /// A window kept clear of the dock: its own frame from before, how it got into the dock's strip, what Petal last
+    /// asked of it and the frames it has had since through Petal (the ones Petal gave it, where it was moving from,
+    /// where the app let it go). Kept until the window closes or the person moves it, so a look at the windows from a
+    /// moment before a move never mistakes Petal's frame for theirs.
+    struct Cleared {
+        var before: CGRect
+        /// It got into the strip by being moved at its own size: it's moved back out, every look, not shortened.
+        var moved: Bool
+        /// The frame Petal last asked for, whether that was the way out for a window the app kept bigger, and where
+        /// the app let the window go when asked (nil while the move is on its way).
+        var asked: CGRect?
+        var askedFallback = false
+        var answer: CGRect?
+        /// The app kept the window bigger than Petal asked (a minimum size): what was asked and where it stayed.
+        var refusal: (asked: CGRect, answer: CGRect)?
+        /// The frames it has had through Petal (where it was moving from, the frames asked for, where the app let it
+        /// go) since a look last found it where the app put it with no move on its way: all a look a moment old can
+        /// show. Older ones are forgotten then, so the person moving it near a frame Petal gave it before is still
+        /// the person's.
+        private(set) var frames: [CGRect] = []
+        /// Moves asked for that haven't landed yet.
+        private(set) var inFlight = 0
+
+        init(before: CGRect, moved: Bool) {
+            self.before = before
+            self.moved = moved
+        }
+
+        func knows(_ frame: CGRect) -> Bool {
+            before.equalTo(frame, within: 4) || frames.contains { $0.equalTo(frame, within: 4) }
+        }
+
+        mutating func saw(_ frame: CGRect) {
+            guard !knows(frame) else { return }
+            frames.append(frame)
+        }
+
+        /// A new ask, from where it is now.
+        mutating func ask(_ target: CGRect, from now: CGRect, fallback: Bool) {
+            saw(now)
+            saw(target)
+            asked = target
+            askedFallback = fallback
+            answer = nil
+            inFlight += 1
+        }
+
+        /// A look found it at `now`: once every move landed and it's where the app put it, the frames before are
+        /// done with.
+        mutating func settled(at now: CGRect) {
+            guard inFlight == 0, let answer, answer.equalTo(now, within: 4) else { return }
+            frames = [answer]
+        }
+
+        /// A move landed at `actual` (nil: it didn't happen).
+        mutating func landed(_ to: CGRect, at actual: CGRect?) {
+            inFlight = max(0, inFlight - 1)
+            let latest = asked.map { $0.equalTo(to, within: 0.5) } ?? false
+            if let actual { saw(actual) }
+            guard latest else { return }   // an older ask, overtaken by this one
+            if let actual {
+                answer = actual
+                if !actual.equalTo(to, within: 2), !askedFallback { refusal = (to, actual) }
+            } else {
+                asked = nil
+            }
+        }
+    }
+
+    /// What keeping windows clear of the dock remembers between looks at the windows (Dock.swift's
+    /// `keepWindowsClear` does the moves through Accessibility).
+    ///
+    /// Each look decides every window from its frame before Petal touched it, so windows never shrink step by step
+    /// as the dock moves around, and asks for a frame once: a look from a moment before the move landed, or an app
+    /// that keeps its window bigger than asked, never makes Petal ask again and again. A window the app kept bigger
+    /// is moved out at the size it kept, where that fits. A window moved into the strip at its own size stays moved
+    /// out, look after look, never shortened later.
+    struct ClearLedger {
+        private(set) var cleared: [UInt32: Cleared] = [:]
+        /// Every window's frame at the last look: one that comes into the dock's strip at the same size was moved there.
+        private(set) var lastFrames: [UInt32: CGRect] = [:]
+
+        struct Move: Equatable {
+            var number: UInt32
+            var from: CGRect
+            var to: CGRect
+        }
+
+        /// Nothing to give back.
+        var isEmpty: Bool { cleared.isEmpty }
+
+        /// One look: the windows on screen now (top-left origin), the numbers of every window that still exists, each
+        /// screen's dock, whether keeping clear is on, and where the dock sits. Returns the moves to make.
+        mutating func look(_ windows: [(number: UInt32, frame: CGRect)], alive: Set<UInt32>, docks: [ClearDock], on: Bool,
+                           position: String) -> [Move] {
+            var moves: [Move] = []
+            for window in windows {
+                let number = window.number, now = window.frame
+                var before = now
+                // Where it was as last seen: at the last look (which may have been a moment old), or any frame it had
+                // through Petal lately.
+                var previous = [lastFrames[number]]
+                if let record = cleared[number] {
+                    previous += record.frames.map(Optional.some) + [record.answer, record.asked]
+                    // A frame Petal gave it, or one it had on the way (the look may be a moment old): still Petal's
+                    // doing. Any other frame is the person's.
+                    if record.knows(now) {
+                        before = record.before
+                        cleared[number]?.settled(at: now)
+                    } else {
+                        cleared[number] = nil
+                    }
+                }
+                var record = cleared[number]
+                // Moved there at its own size since it was last seen (dragged down past the dock), or remembered as moved.
+                let moved = record?.moved ?? previous.contains { frame in
+                    frame.map { !$0.equalTo(now, within: 1) && abs($0.width - now.width) < 2 && abs($0.height - now.height) < 2 } ?? false
+                }
+                var target = before
+                var fallback = false
+                let center = CGPoint(x: before.midX, y: before.midY)
+                if on, let dock = docks.first(where: { $0.screen.contains(center) }), !dock.fullScreen {
+                    target = DockRules.clear(before, screen: dock.screen, reach: dock.reach, position: position, moved: moved)
+                    // The app wouldn't take that size: out at the size it kept, where that fits.
+                    if let refusal = record?.refusal, refusal.asked.equalTo(target, within: 2) {
+                        target = DockRules.clear(refusal.answer, screen: dock.screen, reach: dock.reach, position: position, moved: true)
+                        fallback = true
+                    }
+                }
+                let moving = !target.equalTo(now, within: 2)
+                guard moving || record != nil || !target.equalTo(before, within: 1) else { continue }
+                if record == nil { record = Cleared(before: before, moved: moved) }
+                // Asked for already: while the move is on its way, or where the app let it go, it stands. (Elsewhere,
+                // back at its old frame say, it's asked again.)
+                let asked = record!.asked.map { $0.equalTo(target, within: 2) } ?? false
+                let standing = asked && (record!.answer.map { $0.equalTo(now, within: 2) } ?? true)
+                if moving, !standing {
+                    record!.ask(target, from: now, fallback: fallback)
+                    moves.append(Move(number: number, from: now, to: target))
+                }
+                cleared[number] = record
+            }
+            // Windows that closed: nothing to give back.
+            cleared = cleared.filter { alive.contains($0.key) }
+            lastFrames = Dictionary(windows.map { ($0.number, $0.frame) }, uniquingKeysWith: { a, _ in a })
+            return moves
+        }
+
+        /// Where the app let a window go after Petal asked for `asked` (it may keep a minimum size), which is now
+        /// Petal's frame for it. Nil: the move didn't happen (the window had moved meanwhile, or the app didn't
+        /// answer), so the next look weighs it again.
+        mutating func landed(_ number: UInt32, asked: CGRect, at actual: CGRect?) {
+            if let actual { lastFrames[number] = actual }
+            cleared[number]?.landed(asked, at: actual)
+        }
+    }
+}
+
+/// Two frames within `tolerance` points of each other on every side and size.
+extension CGRect {
+    func equalTo(_ other: CGRect, within tolerance: CGFloat) -> Bool {
+        abs(minX - other.minX) < tolerance && abs(minY - other.minY) < tolerance
+            && abs(width - other.width) < tolerance && abs(height - other.height) < tolerance
+    }
 }
