@@ -206,6 +206,17 @@ extension Snapshot {
         ]
         for (name, view) in shots2 { write(render(view, app: app, size: nil), name: name, folder: folder) }
 
+        // One window with three papers on it: one folded, one open with its answer, one the person moved over the
+        // window; placed as the desk places them (NoteRoom.stack), none over another.
+        var onPage = task
+        onPage.places = [page]
+        let movedHere = PaperNote(file: onPage, url: away.url, notebook: away.notebook)
+        write(render(scene(besideScene(app: app, papers: [
+            ("folded", AnyView(paper(watcher, .folded, color: "#e0567a"))),
+            ("open", AnyView(paper(planned, .open, color: "#f7821b"))),
+            ("moved", AnyView(paper(movedHere, .folded, color: "#8c8c8c"))),
+        ])), app: app, size: nil), name: "note-beside", folder: folder)
+
         // A quick question that used notes: a chip for each.
         let ask = ClaudePanel()
         ask.agent.preview([
@@ -272,6 +283,47 @@ extension Snapshot {
         .frame(width: width + 110, height: height + 10, alignment: .topLeading)
         .padding(40).background(desk).environment(\.colorScheme, .light)
         write(render(AnyView(screenScene), app: app, size: nil), name: "note-on-screen", folder: folder)
+    }
+
+    /// A made-up window with its notes' tabs on its right edge and three papers: the first two placed beside it the
+    /// one way (NoteRoom.stack, at their tabs' heights, the second under the first), the third where the person moved
+    /// it, over the window.
+    @MainActor private static func besideScene(app: PetalApp, papers: [(id: String, view: AnyView)]) -> AnyView {
+        let width: CGFloat = 600, height: CGFloat = 600
+        let window = CGRect(x: 0, y: 0, width: width, height: height)
+        let visible = CGRect(x: 0, y: -12, width: width + NoteRoom.gap * 2 + PaperLook.openWidth, height: height + 140)
+        let sizes = papers.map { NSHostingView(rootView: $0.view.environment(app).environment(\.snapshotting, true)).fittingSize }
+        let tabs = EdgeLayout.tabs(papers.map { EdgeNote(id: $0.id, line: nil, color: "#007aff", faded: false) }, height: height)
+        let moved = papers.count > 2 ? CGRect(x: width - 250, y: 330, width: sizes[2].width, height: sizes[2].height) : nil
+        let placed = NoteRoom.stack(window: window, visible: visible, papers: papers.enumerated().map { index, paper in
+            NoteRoom.Paper(id: paper.id, size: sizes[index], top: tabs.first { $0.ids.contains(paper.id) }?.y ?? EdgeLayout.top,
+                           moved: index == 2 ? moved : nil)
+        })
+        let colors = ["#e0567a", "#f7821b", "#8c8c8c"]
+        return AnyView(ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: Radius.card).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
+                .overlay { RoundedRectangle(cornerRadius: Radius.card).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+                .frame(width: width, height: height)
+            Rectangle().fill(Color(white: 0.95)).frame(width: width, height: 52)
+                .clipShape(UnevenRoundedRectangle(topLeadingRadius: Radius.card, topTrailingRadius: Radius.card))
+            Text("Garden talks").font(.system(size: TextSize.large, weight: .semibold)).foregroundStyle(Color(white: 0.07)).offset(x: 44, y: 88)
+            ForEach(0..<12, id: \.self) { row in
+                Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([460, 400, 430, 300, 450, 380, 420, 260, 440, 390, 410, 280][row]), height: 9)
+                    .offset(x: 44, y: 140 + CGFloat(row) * 24)
+            }
+            ForEach(Array(tabs.enumerated()), id: \.offset) { index, tab in
+                EdgeTabView(tab: EdgeTab(ids: tab.ids, y: tab.y, height: tab.height, color: colors[min(index, colors.count - 1)], faded: false),
+                            colors: [:], outside: false, hovering: false, label: "")
+                    .frame(width: 300, alignment: .trailing)
+                    .offset(x: width - 300, y: tab.y)
+            }
+            ForEach(Array(papers.enumerated()), id: \.offset) { index, paper in
+                if let spot = placed.first(where: { $0.id == paper.id }) {
+                    paper.view.offset(x: spot.frame.minX, y: spot.frame.minY)
+                }
+            }
+        }
+        .frame(width: visible.maxX, height: visible.maxY, alignment: .topLeading))
     }
 
     /// A made-up window with a sentence highlighted, its notes resting as tabs on its right edge (one with a count,
