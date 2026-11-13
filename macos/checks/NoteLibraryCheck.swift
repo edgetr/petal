@@ -369,6 +369,10 @@ struct NoteLibraryCheck {
         expect(NoteRoom.wanted([(.window(0), true, false)]), "a note open on the window by its placement wants room")
         expect(!NoteRoom.wanted([(.standalone, true, false), (.desktop, true, false), (.window(0), false, false), (.window(1), true, true)]),
                "never one opened on its own, on a Desktop, folded or moved off by the person")
+        expect(NoteRoom.keepsRoom(opening: true, showing: true, narrowed: false), "a note opening on a window makes room")
+        expect(NoteRoom.keepsRoom(opening: false, showing: true, narrowed: true), "folded again, the room is kept while a paper shows")
+        expect(!NoteRoom.keepsRoom(opening: false, showing: true, narrowed: false), "a folded paper alone never resizes a window")
+        expect(!NoteRoom.keepsRoom(opening: false, showing: false, narrowed: true), "none showing: the width comes back")
         expect(NoteShelf.standaloneKeyboard(escape: true, fromLibrary: true, libraryOpen: true) == .library, "Escape: back to the Petal Notes window it came from")
         expect(NoteShelf.standaloneKeyboard(escape: false, fromLibrary: true, libraryOpen: true) == .stay, "a click elsewhere: the keyboard stays there")
         expect(NoteShelf.standaloneKeyboard(escape: true, fromLibrary: false, libraryOpen: true) == .app, "opened from the dock: back to the app, not the window")

@@ -963,6 +963,9 @@ struct NotesCheck {
         expect(crowded.reduce(0) { $0 + $1.count } == 30 && crowded.last.map { $0.y + $0.height <= 300 } == true, "too many: the last tab holds the rest")
         expect(NoteShelf.faded(modified: when, now: when.addingTimeInterval(31 * 86400)) && !NoteShelf.faded(modified: when, now: when.addingTimeInterval(29 * 86400)),
                "untouched for 30 days, a note fades")
+        expect(!NoteShelf.faded(modified: when, opened: when.addingTimeInterval(20 * 86400), now: when.addingTimeInterval(31 * 86400))
+               && NoteShelf.faded(modified: when, opened: when.addingTimeInterval(-86400), now: when.addingTimeInterval(31 * 86400)),
+               "opened in the last 30 days, it doesn't")
 
         // MARK: Room
 

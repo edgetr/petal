@@ -124,11 +124,12 @@ final class Tooltips {
     /// Room around the glass, as the SwiftUI pills keep for its edge.
     private static let margin: CGFloat = 6
 
-    func show(_ text: String?, over id: String, in dock: ScreenDock?) {
+    /// `always`: shown whether or not names show on hover (what Petal Notes says).
+    func show(_ text: String?, over id: String, in dock: ScreenDock?, always: Bool = false) {
         let app = PetalApp.shared
         if text == nil && id != shownFor { return }   // leaving one icon after entering the next
         shownFor = id
-        guard let text, !text.isEmpty, app.config.bool("tooltips"), let dock, dock.dragging == nil, dock.openPopup == nil,
+        guard let text, !text.isEmpty, always || app.config.bool("tooltips"), let dock, dock.dragging == nil, dock.openPopup == nil,
               !app.popups.anyOpen, let panelRef = dock.panel, let slot = panelRef.screenFrame(of: id) else {
             hide()
             return

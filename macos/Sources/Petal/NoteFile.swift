@@ -183,7 +183,8 @@ struct NoteStick: Equatable, Sendable {
         case .passage:
             let quote = "“" + self.quote.prefix(60) + (self.quote.count > 60 ? "…”" : "”")
             return quote + " on " + (url.isEmpty ? (path as NSString).lastPathComponent : NoteText.shortAddress(url))
-        case .tab: return "The page " + (NoteText.shortAddress(url).isEmpty ? title : NoteText.shortAddress(url))
+        // Stuck to the tab itself, wherever it goes: where it shows now.
+        case .tab: return NoteText.shortAddress(url).isEmpty ? "This tab" + (title.isEmpty ? "" : ": “\(title)”") : "This tab, now on " + NoteText.shortAddress(url)
         case .file:
             let name = (path as NSString).lastPathComponent
             if !self.quote.isEmpty {
@@ -983,10 +984,10 @@ enum NoteShelf {
     /// A notebook's cover note's file name.
     static let coverName = "About this notebook.md"
 
-    /// Untouched this long, a note rests as a faint line.
+    /// Untouched this long (neither changed nor opened), a note rests as a faint line.
     static let fadeAfter: TimeInterval = 30 * 86400
 
-    static func faded(modified: Date, now: Date) -> Bool { now.timeIntervalSince(modified) > fadeAfter }
+    static func faded(modified: Date, opened: Date? = nil, now: Date) -> Bool { now.timeIntervalSince(max(modified, opened ?? .distantPast)) > fadeAfter }
 
     /// A notebook's name as a folder name: no slashes, no leading dots.
     static func folderName(_ name: String) -> String {
