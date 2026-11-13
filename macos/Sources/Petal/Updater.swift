@@ -31,8 +31,7 @@ final class Updater {
     }
 
     func check(manual: Bool, install wanted: Bool = false) {
-        let automatic = PetalApp.shared.config.bool("autoUpdate")
-        guard manual || automatic, !checking else { return }
+        guard manual || PetalApp.shared.config.bool("autoUpdate"), !checking else { return }
         guard !isDevelopmentBuild else {
             status = "This copy of Petal doesn't update itself."
             return
@@ -48,8 +47,9 @@ final class Updater {
             guard Self.newer(latest.version, than: current) else { available = nil; status = "You have the newest Petal, \(current)."; return }
             // Already downloaded and in place: asking again never downloads it a second time.
             guard ready != latest.version else { status = "Petal \(latest.version) is ready. Restart Petal to finish."; return }
-            // Updates off: the person decides, after seeing what's new in it.
-            guard automatic || wanted else {
+            // Updates off: the person decides, after seeing what's new in it. The setting as it is now, after the
+            // network's waits, not as it was when the check began; Install is the person's own say.
+            guard wanted || PetalApp.shared.config.bool("autoUpdate") else {
                 available = latest
                 status = "Petal \(latest.version) is available."
                 return
@@ -57,7 +57,13 @@ final class Updater {
             do {
                 status = "Downloading Petal \(latest.version)…"
                 // With the person's own changes to Petal's code, it's rebuilt with them instead (Personal.swift).
-                if try await !Personal.update(to: latest, manual: manual) { try await install(latest) }
+                if try await !Personal.update(to: latest, manual: manual),
+                   try await !install(latest, stillWanted: { wanted || PetalApp.shared.config.bool("autoUpdate") }) {
+                    // Turned off while it downloaded: it waits for the person's Install, as any update does then.
+                    available = latest
+                    status = "Petal \(latest.version) is available."
+                    return
+                }
                 status = "Petal \(latest.version) is ready. Restart Petal to finish."
                 available = nil
                 ready = latest.version
@@ -94,12 +100,19 @@ final class Updater {
 
     static func newer(_ a: String, than b: String) -> Bool { UpdateTrust.newer(a, than: b) }
 
-    private func install(_ release: Release) async throws {
+    /// Downloads the release and puts it in place, unless `stillWanted` (asked once the download is here, right before
+    /// anything is replaced) says the person turned updates off meanwhile: then nothing is replaced, and it's false.
+    private func install(_ release: Release, stillWanted: () -> Bool) async throws -> Bool {
         let (file, _) = try await URLSession.shared.download(from: release.url)
+        guard stillWanted() else {
+            try? FileManager.default.removeItem(at: file)
+            return false
+        }
         let bundle = Bundle.main.bundleURL
         let running = PetalApp.shared.version
         // Checking, unpacking and swapping take a moment; none of it on the dock's thread.
         try await Task.detached { try Self.swap(in: file, release: release, over: bundle, running: running) }.value
+        return true
     }
 
     /// The commit a release was built from, for an update rebuilt with the person's own changes (Personal.update):
