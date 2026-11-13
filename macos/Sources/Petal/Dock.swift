@@ -29,7 +29,8 @@ final class ScreenDock {
     var icon: CGFloat = 36
     var dragging: String?
     var dragOffset: CGFloat = 0
-    /// The dragged app is out of the dock (one of its own, past the glass by more than a slot): let go, it's removed.
+    /// The dragged app looks out of the dock (one of its own, past the glass by more than a slot: let go, it's
+    /// removed). Only how it looks: letting go goes by where the pointer is (`DockRules.dragEnd`).
     var dragOut = false
     var revealed = true
     var openPopup: String?          // the slot whose stack, preview or menu is open
@@ -1554,10 +1555,13 @@ struct AppSlot: View {
 
     private func drag(_ delta: CGFloat, ended: Bool) {
         let kept = app.config.apps.contains(item.id)
+        // How far past the glass the pointer is (out of the dock past a slot).
+        let inward = dock.panel?.inward(of: NSEvent.mouseLocation) ?? 0
         if ended {
             let from = dock.items.firstIndex { $0.id == item.id } ?? 0
+            // Where the pointer is as it's let go, not how the icon looks (only one of the dock's own fades out).
             let end = DockRules.dragEnd(began: dock.dragging == item.id, from: from, offset: dock.dragOffset, slot: slot,
-                                        count: dock.items.count, kept: kept, out: dock.dragOut)
+                                        count: dock.items.count, kept: kept, inward: inward)
             withAnimation(.easeOut(duration: 0.15)) { dock.dragging = nil; dock.dragOffset = 0; dock.dragOut = false }
             switch end {
             case .click:
@@ -1569,16 +1573,16 @@ struct AppSlot: View {
             }
             return
         }
-        let out = dock.panel.map { DockRules.isOut(inward: $0.inward(of: NSEvent.mouseLocation), slot: slot) } ?? false
         if dock.dragging == nil {
-            guard abs(delta) >= 6 || out else { return }
+            guard abs(delta) >= 6 || DockRules.isOut(inward: inward, slot: slot) else { return }
             app.popups.closeAll()
             app.previews.hover(nil, in: dock, id: item.id)
             app.tooltips.hide()
             dock.dragging = item.id
         }
         dock.dragOffset = delta
-        if dock.dragOut != (out && kept) { withAnimation(.easeOut(duration: 0.12)) { dock.dragOut = out && kept } }
+        let fades = DockRules.fades(inward: inward, slot: slot, kept: kept)
+        if dock.dragOut != fades { withAnimation(.easeOut(duration: 0.12)) { dock.dragOut = fades } }
     }
 
     private func bounce() {
@@ -2019,9 +2023,7 @@ struct SlotMouse: NSViewRepresentable {
             return handlers?.dropOperation ?? .copy
         }
 
-        private static func urls(_ sender: NSDraggingInfo) -> [URL] {
-            sender.draggingPasteboard.readObjects(forClasses: [NSURL.self]) as? [URL] ?? []
-        }
+        private static func urls(_ sender: NSDraggingInfo) -> [URL] { DockDrops.urls(sender) }
 
         override func draggingExited(_ sender: NSDraggingInfo?) { handlers?.fileOver(false) }
 
@@ -2059,11 +2061,16 @@ struct RightClickCatcher: NSViewRepresentable {
 
         override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
             PetalApp.shared.docks.revealAll()
-            return DockDrops.action(DockDrops.items(sender.draggingPasteboard), onApp: nil) == nil ? [] : .copy
+            return draggingUpdated(sender)
+        }
+
+        // (Weighed again as it moves: a folder Petal looked at off the main thread counts from then on.)
+        override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+            DockDrops.action(DockDrops.items(sender), onApp: nil) == nil ? [] : .copy
         }
 
         override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-            DockDrops.perform(DockDrops.items(sender.draggingPasteboard), onApp: nil)
+            DockDrops.perform(DockDrops.items(sender), onApp: nil)
         }
     }
 }

@@ -388,9 +388,10 @@ final class AppStripView: NSView {
         }
         guard dragging else { return }
         // Past the glass by more than a slot, one of the dock's own apps is out: let go, it's removed.
-        let out = (dock.panel.map { DockRules.isOut(inward: $0.inward(of: point), slot: Double(look?.slot ?? 44)) } ?? false)
+        let slot = Double(look?.slot ?? 44)
+        let inward = Double(dock.panel?.inward(of: point) ?? 0)
         if dock.dragging == nil {
-            guard abs(delta) >= 6 || out else { return }
+            guard abs(delta) >= 6 || DockRules.isOut(inward: inward, slot: slot) else { return }
             app.popups.closeAll()
             app.previews.hover(nil, in: dock, id: id)
             app.tooltips.hide()
@@ -398,8 +399,8 @@ final class AppStripView: NSView {
             dock.dragging = id
         }
         dock.dragOffset = delta
-        let gone = out && app.config.apps.contains(id)
-        if dock.dragOut != gone { dock.dragOut = gone }
+        let fades = DockRules.fades(inward: inward, slot: slot, kept: app.config.apps.contains(id))
+        if dock.dragOut != fades { dock.dragOut = fades }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -408,8 +409,10 @@ final class AppStripView: NSView {
         guard let dock, let id = downOn else { return }
         if dragging {
             let from = dock.items.firstIndex { $0.id == id } ?? 0
+            // Where the pointer is as it's let go, not how the icon looks (only one of the dock's own fades out).
+            let inward = Double(dock.panel?.inward(of: NSEvent.mouseLocation) ?? 0)
             let end = DockRules.dragEnd(began: dock.dragging == id, from: from, offset: dock.dragOffset, slot: Double(look?.slot ?? 44),
-                                        count: dock.items.count, kept: app.config.apps.contains(id), out: dock.dragOut)
+                                        count: dock.items.count, kept: app.config.apps.contains(id), inward: inward)
             dock.dragging = nil
             dock.dragOffset = 0
             dock.dragOut = false
@@ -480,14 +483,8 @@ final class AppStripView: NSView {
         return under == nil ? [] : .copy
     }
 
-    /// What the drag under way holds, read once per drag.
-    private func dropped(_ sender: NSDraggingInfo) -> [DockRules.Dropped] {
-        if let held, held.0 == sender.draggingSequenceNumber { return held.1 }
-        let items = DockDrops.items(sender.draggingPasteboard)
-        held = (sender.draggingSequenceNumber, items)
-        return items
-    }
-    private var held: (Int, [DockRules.Dropped])?
+    /// What the drag under way holds, from its URLs (no disk read: `DockDrops`).
+    private func dropped(_ sender: NSDraggingInfo) -> [DockRules.Dropped] { DockDrops.items(sender) }
 
     override func draggingExited(_ sender: NSDraggingInfo?) { setFileOver(nil) }
 
@@ -498,9 +495,7 @@ final class AppStripView: NSView {
             app.paper.use(id, in: target)
             return true
         }
-        let items = dropped(sender)
-        held = nil
-        return DockDrops.perform(items, onApp: target)
+        return DockDrops.perform(dropped(sender), onApp: target)
     }
 
     private func setFileOver(_ id: String?) {

@@ -1666,6 +1666,8 @@ final class AppSearch {
         query = ""
         selection = 0
         opens += 1
+        resolving = nil   // which folders the stacks show, looked at again off the main thread (a folder may have come)
+        resolveStacks()
         app.tooltips.hide()
         // The view is made once; opening again only shows it, reset to an empty query.
         let from = (dock ?? app.docks.focusedDock)?.panel?.screenFrame(of: "add")
@@ -1727,19 +1729,53 @@ final class AppSearch {
         return list
     }
 
-    /// A stack by the folder it really shows (a missing Screenshots folder shows where screenshots go).
+    /// The stacks as the dock shows them: each folder in `stackFolders` and the folder it really shows (a missing
+    /// Screenshots folder shows where screenshots go). Seeing that reads the disk, so it's worked out off the main
+    /// thread when the search opens and again whenever the setting changes; nil until it's in.
+    struct ShownStacks {
+        let setting: [String]
+        let shown: [String: String]   // a folder in the setting → the folder it shows
+    }
+    private(set) var stacks: ShownStacks?
+    @ObservationIgnored private var resolving: [String]?
+
+    private func resolveStacks() {
+        let setting = PetalApp.shared.config.strings("stackFolders")
+        guard setting != resolving else { return }
+        resolving = setting
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var shown: [String: String] = [:]
+            for folder in setting { if let real = Stacks.resolve([folder]).first { shown[folder] = real } }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self, self.resolving == setting else { return }   // a newer one is under way
+                    self.stacks = ShownStacks(setting: setting, shown: shown)
+                }
+            }
+        }
+    }
+
+    /// The stacks as last worked out for the setting as it is now; nil (and worked out again) when it changed.
+    private var currentStacks: ShownStacks? {
+        let setting = PetalApp.shared.config.strings("stackFolders")
+        guard let stacks, stacks.setting == setting else { resolveStacks(); return nil }
+        return stacks
+    }
+
+    /// A stack by the folder it really shows; until that's known, not yet ("+ Stack").
     func added(_ result: Result) -> Bool {
         let config = PetalApp.shared.config
-        return result.isFolder ? Stacks.resolve(config.strings("stackFolders")).contains(result.path) : config.apps.contains(result.id)
+        guard result.isFolder else { return config.apps.contains(result.id) }
+        return currentStacks?.shown.values.contains(result.path) ?? false
     }
 
     func toggle(_ result: Result) {
         let config = PetalApp.shared.config
         if result.isFolder {
             var folders = config.strings("stackFolders")
-            if added(result) {
-                folders.removeAll { $0 == result.path || Stacks.resolve([$0]).first == result.path }
-            } else {
+            if let stacks = currentStacks, stacks.shown.values.contains(result.path) {
+                folders.removeAll { $0 == result.path || stacks.shown[$0] == result.path }
+            } else if !folders.contains(result.path) {
                 folders.append(result.path)
             }
             config.set("stackFolders", folders)

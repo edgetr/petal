@@ -65,9 +65,12 @@ enum Stacks {
         return count.int32Value == 0
     }
 
+    /// Files dropped on the Trash, moved there off the dock's thread (a slow volume never holds the dock).
     static func moveToTrash(_ urls: [URL]) {
-        for url in urls { try? FileManager.default.trashItem(at: url, resultingItemURL: nil) }
-        Task { @MainActor in PetalApp.shared.signals.lookAtTrash() }
+        DispatchQueue.global(qos: .userInitiated).async {
+            for url in urls { try? FileManager.default.trashItem(at: url, resultingItemURL: nil) }
+            Task { @MainActor in PetalApp.shared.signals.lookAtTrash() }
+        }
     }
 
     static let imageTypes: Set<String> = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "heic", "tiff"]

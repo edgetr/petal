@@ -67,20 +67,28 @@ struct DockRulesCheck {
                "a window here or the app in front: a full dot")
         expect(DockRules.dot(running: false, here: false, active: false) == 0, "no dot for an app that isn't running")
 
-        // Letting go of a dragged app.
+        // Letting go of a dragged app, from what the callers have: how far along it moved, how far past the glass
+        // the pointer is (inward), and whether it's one of the dock's own.
         let slot = 44.0
-        expect(DockRules.dragEnd(began: false, from: 3, offset: 3, slot: slot, count: 8, kept: true, out: false) == .click,
+        let inDock = 10.0, outside = slot + 20
+        expect(DockRules.dragEnd(began: false, from: 3, offset: 3, slot: slot, count: 8, kept: true, inward: inDock) == .click,
                "a press that slipped before it became a drag is a click")
-        expect(DockRules.dragEnd(began: true, from: 3, offset: 10, slot: slot, count: 8, kept: false, out: false) == .click,
+        expect(DockRules.dragEnd(began: true, from: 3, offset: 10, slot: slot, count: 8, kept: false, inward: inDock) == .click,
                "a wobble in its own slot is a click, and never keeps a running app in the dock")
-        expect(DockRules.dragEnd(began: true, from: 3, offset: 2 * slot + 5, slot: slot, count: 8, kept: true, out: false) == .move(to: 5),
+        expect(DockRules.dragEnd(began: true, from: 3, offset: 2 * slot + 5, slot: slot, count: 8, kept: true, inward: inDock) == .move(to: 5),
                "dragged two slots on: moved there")
-        expect(DockRules.dragEnd(began: true, from: 1, offset: -10 * slot, slot: slot, count: 8, kept: true, out: false) == .move(to: 0),
+        expect(DockRules.dragEnd(began: true, from: 1, offset: -10 * slot, slot: slot, count: 8, kept: true, inward: inDock) == .move(to: 0),
                "dragged past the start: first")
-        expect(DockRules.dragEnd(began: true, from: 3, offset: 0, slot: slot, count: 8, kept: true, out: true) == .remove,
+        expect(DockRules.dragEnd(began: true, from: 3, offset: 0, slot: slot, count: 8, kept: true, inward: outside) == .remove,
                "one of the dock's own let go out of the dock: removed")
-        expect(DockRules.dragEnd(began: true, from: 3, offset: 0, slot: slot, count: 8, kept: false, out: true) == .nothing,
-               "a running app that isn't kept, let go out of the dock: nothing")
+        // A running app that isn't kept: out of the dock, letting go does nothing, whichever way it went; it never
+        // looks as if it's being removed.
+        for offset in [0, -2 * slot, 3 * slot] {
+            expect(DockRules.dragEnd(began: true, from: 3, offset: offset, slot: slot, count: 8, kept: false, inward: outside) == .nothing,
+                   "a running app that isn't kept, let go out of the dock (\(offset) along): nothing, not pinned or opened")
+        }
+        expect(!DockRules.fades(inward: outside, slot: slot, kept: false) && DockRules.fades(inward: outside, slot: slot, kept: true)
+               && !DockRules.fades(inward: inDock, slot: slot, kept: true), "only one of the dock's own fades out of the dock")
         expect(DockRules.isOut(inward: slot + 1, slot: slot) && !DockRules.isOut(inward: slot - 1, slot: slot), "out means past the glass by more than a slot")
 
         // Dropped on the dock: apps, folders and addresses are added; documents open with the app; an app is never

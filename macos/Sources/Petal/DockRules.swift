@@ -69,8 +69,13 @@ enum DockRules {
 
     // MARK: Dragging an app
 
-    /// Let go this far past the glass, inward, an app is out of the dock: more than a slot, as macOS's Dock.
+    /// The pointer this far past the glass, inward, is out of the dock: more than a slot, as macOS's Dock. Where
+    /// the pointer is, whatever the app.
     static func isOut(inward: Double, slot: Double) -> Bool { inward > slot }
+
+    /// Whether a dragged app looks out of the dock (faint, the others closing its gap): only one of the dock's own,
+    /// which letting go there removes. How it looks never decides what letting go does (`dragEnd`).
+    static func fades(inward: Double, slot: Double, kept: Bool) -> Bool { kept && isOut(inward: inward, slot: slot) }
 
     enum DragEnd: Equatable {
         case click             // it never really moved: the click it started as
@@ -80,11 +85,13 @@ enum DockRules {
     }
 
     /// What letting go of a dragged app does. `began`: the drag got as far as moving it along the dock (or out);
-    /// `offset` how far along, `slot` one slot's length, `out` whether it's out of the dock (`isOut`), `kept` whether
-    /// it's one of the dock's own. A wobble is still a click, and only moving an app to another place keeps it.
-    static func dragEnd(began: Bool, from: Int, offset: Double, slot: Double, count: Int, kept: Bool, out: Bool) -> DragEnd {
+    /// `offset` how far along, `slot` one slot's length, `inward` how far past the glass the pointer is as it's let go
+    /// (the dock's panel's `inward(of:)`), `kept` whether it's one of the dock's own. Out of the dock, one of its own
+    /// is removed and any other app is left as it was; in it, a wobble is still a click, and only moving an app to
+    /// another place keeps it.
+    static func dragEnd(began: Bool, from: Int, offset: Double, slot: Double, count: Int, kept: Bool, inward: Double) -> DragEnd {
         guard began else { return .click }
-        if out { return kept ? .remove : .nothing }
+        if isOut(inward: inward, slot: slot) { return kept ? .remove : .nothing }
         let to = min(max(0, from + Int((offset / max(1, slot)).rounded())), max(0, count - 1))
         return to != from ? .move(to: to) : .click   // let go in its own slot: the click it started as
     }
