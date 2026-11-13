@@ -141,7 +141,10 @@ extension NoteDesk {
                         Self.bringUp("com.apple.iCal")
                         self.tell("Added to Calendar: \(event.title)")
                     } else {
-                        self.tell(granted ? "Calendar didn't take the event." : "Petal may add events once you allow it in System Settings › Privacy & Security › Calendars.")
+                        if granted { return self.tell("Calendar didn't take the event.") }
+                        // Not allowed yet: the pane where it's allowed, opened, and what to do there.
+                        if let pane = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars") { NSWorkspace.shared.open(pane) }
+                        self.tell("Allow Petal in Calendars, then drop it again.")
                     }
                 }
             }
