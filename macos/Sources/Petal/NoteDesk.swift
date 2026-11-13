@@ -704,8 +704,14 @@ final class NoteDesk {
             stopWatchingPassages()
             // Notes that were open on the window left behind fold.
             for (key, face) in faces where face == .open && fits[key] == nil { faces[key] = .folded }
-            for key in left where self.fresh.contains(key) { letGoIfEmpty(key) }
             }
+        // Another window or tab in front: an empty new note whose place was left goes (open there, it folds first).
+        // Only one that was showing there: a note made for a window still coming forward (a drop on one behind) stays.
+        for key in left where self.fresh.contains(key) && placedOnce.contains(key) {
+            if faces[key] == .open || faces[key] == .back { faces[key] = .folded }
+            if keyboard == key { keyboard = nil }
+            letGoIfEmpty(key)
+        }
         layout()
         if scan || moved { findPassages(scene) }
         placeDesktop()
@@ -1151,6 +1157,9 @@ final class NoteDesk {
     @ObservationIgnored private var besides: [UInt32: [String: (was: NoteRoom.Was, open: Bool)]] = [:]
     /// The papers placed beside the window in front by the last layout.
     @ObservationIgnored private var placedBeside: Set<String> = []
+    /// New notes that have been placed beside their window at least once (an empty one is let go only once its place
+    /// is left after that).
+    @ObservationIgnored private var placedOnce: Set<String> = []
 
     /// The notes showing on the window in front, placed beside it the one way (NoteRoom.stack): where the person
     /// left one, it stays; the others at their lines, never over one another. Returns them, in order.
@@ -1189,6 +1198,7 @@ final class NoteDesk {
         if besides[number] == nil, besides.count >= 24 { besides = [:] }
         besides[number] = record
         placedBeside = Set(showing)
+        placedOnce.formUnion(showing.filter(fresh.contains))
         // Each placed first, then the keyboard for one that waited for it (taking it fits that paper again).
         for key in showing { if let panel = panels[key] { shown(key, panel) } }
         return showing
@@ -1781,6 +1791,7 @@ final class NoteDesk {
                                  importing: store.importing(key))
         else { return }
         fresh.remove(key)
+        placedOnce.remove(key)
         madeWith[key] = nil
         faces[key] = nil
         panels[key]?.conceal()
