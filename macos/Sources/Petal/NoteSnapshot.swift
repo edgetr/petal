@@ -221,6 +221,14 @@ extension Snapshot {
             ("moved", AnyView(paper(movedHere, .folded, color: "#8c8c8c"))),
         ])), app: app, size: nil), name: "note-beside", folder: folder)
 
+        // Three folded papers in two columns on a short screen, then the first one opened: the other two stay where
+        // they were, and the opened one goes around them (NoteRoom.stack, as the desk uses it, its panels' margin
+        // kept).
+        let three: [(id: String, note: PaperNote, color: String)] = [("a", watcher, "#e0567a"), ("b", movedHere, "#8c8c8c"), ("c", working, "#f7821b")]
+        write(render(scene(columnsScene(app: app, papers: three.map { item in
+            (item.id, AnyView(paper(item.note, .folded, color: item.color)), item.id == "a" ? AnyView(paper(item.note, .open, color: item.color)) : nil)
+        })), app: app, size: nil), name: "note-columns", folder: folder)
+
         // A quick question that used notes: a chip for each.
         let ask = ClaudePanel()
         ask.agent.preview([
@@ -287,6 +295,46 @@ extension Snapshot {
         .frame(width: width + 110, height: height + 10, alignment: .topLeading)
         .padding(40).background(desk).environment(\.colorScheme, .light)
         write(render(AnyView(screenScene), app: app, size: nil), name: "note-on-screen", folder: folder)
+    }
+
+    /// A made-up window on a short screen with papers beside it, twice: as they first go (two columns), and after the
+    /// one with an open face opened. Each half is laid out by NoteRoom.stack with the panels' margin, the second
+    /// from where the first left them.
+    @MainActor private static func columnsScene(app: PetalApp, papers: [(id: String, folded: AnyView, open: AnyView?)]) -> AnyView {
+        let width: CGFloat = 420, height: CGFloat = 440
+        let window = CGRect(x: 0, y: 30, width: width, height: height)
+        let visible = CGRect(x: 0, y: 0, width: width + 560, height: height + 60)
+        func size(_ view: AnyView) -> CGSize { NSHostingView(rootView: view.environment(app).environment(\.snapshotting, true)).fittingSize }
+        let before = NoteRoom.stack(window: window, visible: visible, papers: papers.map { NoteRoom.Paper(id: $0.id, size: size($0.folded), top: EdgeLayout.top) },
+                                    margin: PaperLook.margin)
+        let after = NoteRoom.stack(window: window, visible: visible, papers: papers.map { item in
+            let spot = before.first { $0.id == item.id }!
+            let was = NoteRoom.Was(top: spot.frame.minY - window.minY, column: spot.column, x: spot.frame.minX - window.maxX, size: spot.frame.size)
+            return NoteRoom.Paper(id: item.id, size: size(item.open ?? item.folded), top: EdgeLayout.top, was: was)
+        }, margin: PaperLook.margin)
+        func half(_ placed: [NoteRoom.Placed], opened: Bool) -> some View {
+            ZStack(alignment: .topLeading) {
+                RoundedRectangle(cornerRadius: Radius.card).fill(.white).shadow(color: .black.opacity(0.22), radius: 30, y: 22)
+                    .overlay { RoundedRectangle(cornerRadius: Radius.card).stroke(.black.opacity(0.25), lineWidth: 0.5) }
+                    .frame(width: width, height: height).offset(y: window.minY)
+                Rectangle().fill(Color(white: 0.95)).frame(width: width, height: 52)
+                    .clipShape(UnevenRoundedRectangle(topLeadingRadius: Radius.card, topTrailingRadius: Radius.card)).offset(y: window.minY)
+                ForEach(0..<8, id: \.self) { row in
+                    Capsule().fill(Color(white: 0.91)).frame(width: CGFloat([320, 280, 300, 220, 310, 260, 290, 200][row]), height: 9)
+                        .offset(x: 36, y: window.minY + 90 + CGFloat(row) * 24)
+                }
+                // The screen's edge: the panels' margin is kept inside it.
+                Rectangle().stroke(Color.black.opacity(0.25), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .frame(width: visible.width, height: visible.height).offset(x: visible.minX, y: visible.minY)
+                ForEach(Array(papers.enumerated()), id: \.offset) { _, item in
+                    if let spot = placed.first(where: { $0.id == item.id }) {
+                        (opened ? item.open ?? item.folded : item.folded).offset(x: spot.frame.minX, y: spot.frame.minY)
+                    }
+                }
+            }
+            .frame(width: visible.maxX, height: visible.maxY, alignment: .topLeading)
+        }
+        return AnyView(HStack(alignment: .top, spacing: 60) { half(before, opened: false); half(after, opened: true) })
     }
 
     /// A made-up window with its notes' tabs on its right edge and three papers: the first two placed beside it the
