@@ -1798,9 +1798,13 @@ final class NoteDesk {
     /// forward, until a fresh read of what's in front after it.
     func viewerFront() { concealWindowNotes() }
 
-    /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright).
+    /// A note made just now and put away with nothing written goes (to the Trash: never deleted outright). What's
+    /// typed and not saved yet (the editor saves half a second after the last key) is saved first, so a note written
+    /// in just before its window was left is kept; one whose typing still couldn't be saved stays too.
     func letGoIfEmpty(_ key: String) {
-        guard fresh.contains(key), let paper = store.paper(key), faces[key] != .open,
+        guard fresh.contains(key) else { return }
+        editors[key]?.flush()
+        guard fresh.contains(key), editors[key]?.busy() != true, let paper = store.paper(key), faces[key] != .open,
               NoteShelf.mayTrash(bodyEmpty: NoteShelf.untouched(paper.file.body, madeWith: madeWith[key]), picturesPending: store.picturesPending(key),
                                  importing: store.importing(key))
         else { return }
