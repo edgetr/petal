@@ -710,6 +710,8 @@ final class DockPanel: NSPanel {
         hidesOnDeactivate = false
         becomesKeyOnlyIfNeeded = true
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+        // A check's dock (`Petal --bench-dock`) is laid out and drawn without ever being shown or following the mouse.
+        guard !Headless.on else { return }
         orderFrontRegardless()
         mouseTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.followMouse() }
@@ -809,8 +811,11 @@ final class DockPanel: NSPanel {
     func place(on screen: NSScreen) {
         screenRef = screen
         // Measured again only when the dock's content says its size may have changed: once a second, nothing has.
-        // A new position (or icon size) lays the dock out the other way: the last measure doesn't hold.
-        let shape = "\(config.position)|\(config.number("iconSize"))|\(config.number("iconPadding"))|\(config.number("dockMargin"))|\(screen.frame)"
+        // A new position (or icon size) lays the dock out the other way: the last measure doesn't hold. Nor does it
+        // once magnification is switched on or grows: the room kept for grown icons changes at once (`outer`), and a
+        // setting's change places the dock before SwiftUI says its size changed.
+        let shape = "\(config.position)|\(config.number("iconSize"))|\(config.number("iconPadding"))|\(config.number("dockMargin"))|"
+            + "\(Magnifier.enabled)|\(Magnifier.amount)|\(screen.frame)"
         if shape != measuredShape { measured = nil; measuredShape = shape }
         let area = screen.frame
         let visible = screen.visibleFrame
@@ -911,8 +916,9 @@ final class DockPanel: NSPanel {
     }
 
     /// The slot `id` in screen coordinates.
+    /// (The strip's apps are asked where they are now: their view moves with the dock without being told.)
     func screenFrame(of id: String) -> CGRect? {
-        guard let rect = dock.frames[id] else { return nil }
+        guard let rect = dock.strip?.windowRect(of: id) ?? dock.frames[id] else { return nil }
         return CGRect(x: frame.minX + rect.minX, y: frame.maxY - rect.maxY, width: rect.width, height: rect.height)
     }
 

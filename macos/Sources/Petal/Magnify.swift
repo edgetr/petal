@@ -16,19 +16,23 @@ final class Magnifier {
     /// Where the pointer is along the dock (panel coordinates, top-left origin), and how far magnified (0–1).
     struct State: Equatable { var pointer: CGFloat = 0; var strength: CGFloat = 0 }
     private(set) var state = State()
+    /// Where the easing is, every frame: `state` follows it only by steps big enough to draw.
+    @ObservationIgnored private var live = State()
 
-    /// The slots' frames in the layout, before any transform: growing ones, and ones that only make room.
-    @ObservationIgnored var frames: [String: (rect: CGRect, scales: Bool)] = [:]
+    /// The slots' frames in the layout (panel coordinates, top-left origin), before any transform: growing ones,
+    /// and ones that only make room.
+    @ObservationIgnored private(set) var frames: [String: (rect: CGRect, scales: Bool)] = [:]
+    /// Each frame as every copy of its slot registered it (`owner`: a SwiftUI slot's own token, nil for the layer
+    /// strip), the latest first: when the setting changes the dock's row is made anew, and the copy going away
+    /// mustn't take the frame of the one replacing it, whichever of them registers or goes first.
+    @ObservationIgnored private var copies: [String: [(owner: UUID?, rect: CGRect, scales: Bool)]] = [:]
     @ObservationIgnored var glass: CGRect = .zero
-    @ObservationIgnored private var spread: [(low: CGFloat, high: CGFloat, extra: CGFloat)] = []
-    @ObservationIgnored private var anchorSpread: CGFloat = 0
+    @ObservationIgnored private var slots: [String: MagnifyRules.Slot] = [:]
+    @ObservationIgnored private var extra: [String: CGFloat] = [:]
     @ObservationIgnored private var link: CADisplayLink?
     @ObservationIgnored private var target: LinkTarget?
     @ObservationIgnored private var lastFrame: CFTimeInterval = 0
     @ObservationIgnored weak var dock: ScreenDock?
-
-    /// How far an icon's growth reaches, in slots either side of the pointer.
-    static let reach: CGFloat = 2.5
 
     var config: Config { PetalApp.shared.config }
     var on: Bool { Self.enabled }
@@ -44,7 +48,22 @@ final class Magnifier {
     var vertical: Bool { config.position != "bottom" }
 
     /// The most the dock can grow along its length, to one side: the room the panel keeps for it.
-    static func room(slot: CGFloat, amount: CGFloat) -> CGFloat { slot * amount * (reach + 0.1) }
+    static func room(slot: CGFloat, amount: CGFloat) -> CGFloat { MagnifyRules.room(slot: slot, amount: amount) }
+
+    func register(_ id: String, _ rect: CGRect, scales: Bool, owner: UUID?) {
+        var list = copies[id, default: []].filter { $0.owner != owner }
+        list.insert((owner, rect, scales), at: 0)
+        copies[id] = list
+        frames[id] = (rect, scales)
+    }
+
+    /// Takes the frame `owner` registered for a slot away; another copy's stays.
+    func unregister(_ id: String, owner: UUID?) {
+        guard let list = copies[id] else { return }
+        let rest = list.filter { $0.owner != owner }
+        copies[id] = rest.isEmpty ? nil : rest
+        frames[id] = rest.first.map { ($0.rect, $0.scales) }
+    }
 
     // MARK: Following the pointer
 
@@ -66,32 +85,37 @@ final class Magnifier {
     }
 
     private func step(_ link: CADisplayLink) {
+        let dt = lastFrame == 0 ? 1.0 / 120 : min(0.05, link.timestamp - lastFrame)
+        lastFrame = link.timestamp
+        advance(mouse: NSEvent.mouseLocation, dt: dt)
+    }
+
+    /// One frame: the pointer at `mouse` (screen coordinates), `dt` seconds after the last. The display link gives
+    /// it the real pointer; `Petal --bench-dock` a made-up one.
+    func advance(mouse: CGPoint, dt: Double) {
         guard let dock, let panel = dock.panel, on, glass != .zero else {
             settle()
             return
         }
-        let dt = lastFrame == 0 ? 1.0 / 120 : min(0.05, link.timestamp - lastFrame)
-        lastFrame = link.timestamp
-        let mouse = NSEvent.mouseLocation
+        // Coming from rest: where the strip's apps are now (its view may have moved with the dock since it last
+        // said), before anything grows.
+        if live.strength == 0 { dock.strip?.registerFrames() }
         let point = CGPoint(x: mouse.x - panel.frame.minX, y: panel.frame.maxY - mouse.y)
         let along = vertical ? point.y : point.x
         // In while over the glass; staying in while over the grown icons too.
-        let slot = vertical ? glass.width : glass.height
-        let grown = state.strength > 0.3 ? slot * amount * state.strength + 4 : 2
-        var zone = glass.insetBy(dx: -2, dy: -2)
-        switch config.position {
-        case "left": zone.size.width += grown
-        case "right": zone.origin.x -= grown; zone.size.width += grown
-        default: zone.origin.y -= grown; zone.size.height += grown
-        }
+        let zone = MagnifyRules.zone(glass: glass, position: config.position, slot: vertical ? glass.width : glass.height,
+                                     amount: amount, strength: live.strength)
         let inside = zone.contains(point) && dock.dragging == nil && !panel.tucked && panel.alphaValue > 0.5
         // Critically damped easing toward where things should be: quick on the pointer, a little softer in and out.
         let follow = 1 - exp(-dt / 0.03), fade = 1 - exp(-dt / (inside ? 0.07 : 0.09))
-        var next = state
+        var next = live
         next.strength += ((inside ? 1 : 0) - next.strength) * fade
         if inside {
-            next.pointer = state.strength < 0.02 ? along : next.pointer + (along - next.pointer) * follow
+            next.pointer = live.strength < 0.02 ? along : next.pointer + (along - next.pointer) * follow
         }
+        // (Eased from `live`, not from what was last drawn: the last steps out are too small to draw, and easing
+        // from `state` stopped there, never settling, with the display link running on.)
+        live = next
         if !inside && next.strength < 0.004 {
             settle()
             return
@@ -101,48 +125,35 @@ final class Magnifier {
 
     private func settle() {
         sleep()
+        live.strength = 0
         if state.strength != 0 { publish(State(pointer: state.pointer, strength: 0)) }
     }
 
     private func publish(_ next: State) {
-        let a = amount * next.strength
-        let slot = frames.values.first(where: \.scales).map { vertical ? $0.rect.height : $0.rect.width } ?? (vertical ? glass.width : glass.height)
-        let width = Self.reach * slot
-        spread = frames.values.filter(\.scales).map { frame in
-            let low = vertical ? frame.rect.minY : frame.rect.minX, high = vertical ? frame.rect.maxY : frame.rect.maxX
-            let distance = abs(next.pointer - (low + high) / 2)
-            let weight = distance < width ? pow(cos(.pi * distance / (2 * width)), 2) : 0
-            return (low, high, (high - low) * a * weight)
+        let vertical = self.vertical
+        slots = frames.mapValues { frame in
+            MagnifyRules.Slot(low: vertical ? frame.rect.minY : frame.rect.minX, high: vertical ? frame.rect.maxY : frame.rect.maxX,
+                              scales: frame.scales)
         }
-        anchorSpread = Self.spread(at: next.pointer, spread)
+        let slot = slots.values.first(where: \.scales)?.length ?? (vertical ? glass.width : glass.height)
+        extra = MagnifyRules.growth(slots, pointer: next.pointer, grow: amount * next.strength, slot: slot)
         state = next
+        live = next
         dock?.strip?.magnify()   // the layer strip moves its icons itself
-    }
-
-    /// How much growth lies before `position` along the dock.
-    private static func spread(at position: CGFloat, _ spread: [(low: CGFloat, high: CGFloat, extra: CGFloat)]) -> CGFloat {
-        spread.reduce(0) { total, slot in
-            total + slot.extra * min(1, max(0, (position - slot.low) / max(1, slot.high - slot.low)))
-        }
     }
 
     // MARK: What each slot does
 
     /// How much a slot grows, and how far it moves along the dock.
     func effect(_ id: String) -> (scale: CGFloat, shift: CGFloat) {
-        guard state.strength > 0, let frame = frames[id] else { return (1, 0) }
-        let low = vertical ? frame.rect.minY : frame.rect.minX, high = vertical ? frame.rect.maxY : frame.rect.maxX
-        let shift = Self.spread(at: (low + high) / 2, spread) - anchorSpread
-        guard frame.scales, let mine = spread.first(where: { $0.low == low && $0.high == high }) else { return (1, shift) }
-        return (1 + mine.extra / max(1, high - low), shift)
+        guard state.strength > 0 else { return (1, 0) }
+        return MagnifyRules.effect(id, slots, extra, pointer: state.pointer)
     }
 
     /// The glass grows to hold the spread icons: how much, and from where.
     var glassStretch: (scale: CGFloat, anchor: CGFloat) {
-        let total = spread.reduce(0) { $0 + $1.extra }
-        let length = vertical ? glass.height : glass.width
-        guard state.strength > 0, total > 0.01, length > 0 else { return (1, 0.5) }
-        return ((length + total) / length, anchorSpread / total)
+        guard state.strength > 0 else { return (1, 0.5) }
+        return MagnifyRules.stretch(slots, extra, pointer: state.pointer, length: vertical ? glass.height : glass.width)
     }
 
     /// Icons grow away from the screen's edge.
@@ -165,17 +176,32 @@ struct Magnified: ViewModifier {
     var scales = true
 
     func body(content: Content) -> some View {
-        let magnifier = dock.magnifier
-        if magnifier.on {
+        if dock.magnifier.on {
+            content.modifier(Growing(magnifier: dock.magnifier, id: id, scales: scales))
+        } else {
+            content   // with magnification off a slot costs nothing more
+        }
+    }
+
+    private struct Growing: ViewModifier {
+        let magnifier: Magnifier
+        let id: String
+        let scales: Bool
+        /// This copy of the slot, for registering its frame (see `Magnifier.register`).
+        @State private var token = UUID()
+
+        func body(content: Content) -> some View {
             let effect = magnifier.effect(id)
             let vertical = magnifier.vertical
             content
-                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { magnifier.frames[id] = ($0, scales) }
-                .onDisappear { if !Magnifier.forced { magnifier.frames[id] = nil } }   // a snapshot's views go as soon as drawn
                 .scaleEffect(effect.scale, anchor: magnifier.anchor)
                 .offset(x: vertical ? 0 : effect.shift, y: vertical ? effect.shift : 0)
-        } else {
-            content
+                // Measured outside its own transform: where the layout put the slot, not where it's drawn grown
+                // (measured inside, each frame's growth fed the next, and the slot never grew).
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { [token] in
+                    magnifier.register(id, $0, scales: scales, owner: token)
+                }
+                .onDisappear { [token] in if !Magnifier.forced { magnifier.unregister(id, owner: token) } }   // a snapshot's views go as soon as drawn
         }
     }
 }

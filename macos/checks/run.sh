@@ -37,6 +37,11 @@ swiftc -parse-as-library -O -o "$out/signals" Sources/Petal/SignalRules.swift ch
 # the app lists them in as they come forward (DockRules).
 swiftc -parse-as-library -O -o "$out/dockrules" Sources/Petal/DockRules.swift checks/DockRulesCheck.swift
 "$out/dockrules"
+# Magnification: the icon under the pointer grows by the amount set and stays under it, its neighbours ease aside
+# without overlapping, the glass stretches with them, nothing grows past the room the panel keeps, and the zone the
+# pointer counts as at the dock (MagnifyRules). `Petal --bench-dock` drives the real dock the same way.
+swiftc -parse-as-library -O -o "$out/magnify" Sources/Petal/MagnifyRules.swift checks/MagnifyRulesCheck.swift
+"$out/magnify"
 # Petal's own files: an entry in dock.json's apps that isn't text never empties the dock, a file someone is
 # editing that doesn't read as JSON yet keeps what was read before, and a change in settings.json that would let Petal
 # AI do more (Full access, using apps, more allowed without asking, an app off the private list) isn't taken while

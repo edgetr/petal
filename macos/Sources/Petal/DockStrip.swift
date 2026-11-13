@@ -232,6 +232,13 @@ final class AppStripView: NSView {
         return CGRect(x: rect.minX, y: content.bounds.height - rect.maxY, width: rect.width, height: rect.height)
     }
 
+    /// A tile's slot as it's drawn now (grown and moved by magnification), in the same coordinates as `windowRect`.
+    func drawnRect(of id: String) -> CGRect? {
+        guard let tile = row?.tiles[id], let content = window?.contentView else { return nil }
+        let rect = convert(tile.slot.frame, to: nil)
+        return CGRect(x: rect.minX, y: content.bounds.height - rect.maxY, width: rect.width, height: rect.height)
+    }
+
     private var registered: Set<String> = []
 
     func registerFrames() {
@@ -240,10 +247,10 @@ final class AppStripView: NSView {
         for id in row.order {
             guard let rect = windowRect(of: id) else { continue }
             dock.frames[id] = rect
-            if Magnifier.enabled { dock.magnifier.frames[id] = (rect, true) }
+            if Magnifier.enabled { dock.magnifier.register(id, rect, scales: true, owner: nil) }
             now.insert(id)
         }
-        for id in registered.subtracting(now) { dock.magnifier.frames[id] = nil }
+        for id in registered.subtracting(now) { dock.magnifier.unregister(id, owner: nil) }
         registered = now
     }
 
@@ -276,6 +283,12 @@ final class AppStripView: NSView {
             if area.contains(point) { return tile }
         }
         return nil
+    }
+
+    /// The app a click at `point` (window coordinates, top-left origin, as `windowRect`) goes to (`--bench-dock`).
+    func app(atWindow point: CGPoint) -> String? {
+        guard let content = window?.contentView else { return nil }
+        return tile(at: convert(CGPoint(x: point.x, y: content.bounds.height - point.y), from: nil))?.id
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
