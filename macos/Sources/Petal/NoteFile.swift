@@ -2336,6 +2336,14 @@ enum NoteRoom {
     /// The room right of the window, within the screen's visible area.
     static func room(window: CGRect, visible: CGRect) -> CGFloat { visible.maxX - window.maxX }
 
+    /// Whether a paper the person moved (its frame where its spot puts it, not kept on any screen) was left right
+    /// beside its window: mostly right of the window's right edge and starting near it, beside it. Such a paper keeps
+    /// the room made for it (its spot is by the window's right corner: given the width back, it would land over the
+    /// window).
+    static func leftBeside(_ paper: CGRect, window: CGRect) -> Bool {
+        paper.midX >= window.maxX && paper.minX <= window.maxX + 40 && paper.maxY > window.minY && paper.minY < window.maxY
+    }
+
     /// A screen's visible area (`visible`, AppKit's coordinates, y up) less the strip Petal's own dock takes along
     /// `position`'s edge of the screen (`screen`), reaching `reach` in from it: macOS leaves room only for its own
     /// Dock, and Petal's draws over papers. `reach` nil: no dock there, or it hides.

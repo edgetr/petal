@@ -1922,7 +1922,7 @@ final class NoteDesk {
         // Only notes there by their window placement (never one opened on its own, or moved off by the person): one
         // open makes room; once made, any paper of it showing, folded too, keeps it (NoteRoom.keepsRoom).
         if on, !quitting, let frame, let scene, let number = scene.window {
-            let notes = here.keys.map { (placement: placementNow($0), face: faces[$0], moved: local.spots[store.paper($0)?.noteID ?? ""] != nil) }
+            let notes = here.keys.map { (placement: placementNow($0), face: faces[$0], moved: movedAway($0, window: frame)) }
             let opening = NoteRoom.wanted(notes.map { ($0.placement, $0.face == .open, $0.moved) })
             let showing = NoteRoom.wanted(notes.map { ($0.placement, $0.face != nil, $0.moved) })
             if opening || showing {
@@ -1940,6 +1940,17 @@ final class NoteDesk {
             guard let wanted, plan.narrow == wanted.number, let target = wanted.target, Self.roomTurn.current(turn) else { return }
             Self.narrow(wanted.number, pid: wanted.pid, from: wanted.frame, to: target, turn: turn)
         }
+    }
+
+    /// Whether the person moved a paper away from its window's side (it has a spot that isn't right beside the
+    /// window): it no longer asks for room there. One they only moved within the room beside it still does.
+    private func movedAway(_ key: String, window: CGRect) -> Bool {
+        guard let id = store.paper(key)?.noteID, let spot = local.spots[id] else { return false }
+        let size = panels[key]?.paperSize ?? CGSize(width: PaperLook.folded, height: PaperLook.folded)
+        let appKitWindow = NoteRules.appKitFrame(window, primaryHeight: primaryHeight)
+        // Where its spot puts it, kept on no screen: as it was left, whatever width the window has now.
+        let left = spot.frame(size: size, window: appKitWindow, screen: CGRect(x: -1e7, y: -1e7, width: 2e7, height: 2e7))
+        return !NoteRoom.leftBeside(left, window: appKitWindow)
     }
 
     /// Narrows one window, on `queue`: only while it's still where it was when this was decided, recorded before it
