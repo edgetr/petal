@@ -49,6 +49,7 @@ A change that touches several rows reads every file they name.
   - While that PR is open, stack further changes onto the same branch and PR instead of opening new ones.
   - The owner merges. After a merge, the next change starts a new branch from `main`.
   - If asked to merge, merge, switch back to `main`, pull, and delete the branch.
+- **Merge method:** every PR, including collaborators', lands with **Squash and merge** (`gh pr merge <n> --squash`), never a merge commit or rebase.
 - **"Push to main":** when the owner says this, commit and push straight to `main` with no PR.
 - **`main` is live:** it deploys the website, and `/install.sh` on the site serves `get.sh` from `main`, so a broken `get.sh` on `main` breaks every new install. Test installer changes before they reach `main`. `get.sh` installs nothing older than its `OLDEST` (a Petal that installs only signed updates, as the version they say): raise it when a release changes how Petal checks its updates.
 - **Before every commit:** check the staged files for secrets, tokens, personal data (the repository is public), whitespace errors (`git diff --cached --check`) and unrelated changes. Stage files by name.
