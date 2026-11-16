@@ -1,6 +1,6 @@
 # Contributing
 
-This guide is for people and for the coding agents working for them. [`AGENTS.md`](AGENTS.md) is the source of truth for how Petal works and how it's built; read it before changing anything.
+This guide is for people and for the coding agents working for them. [`AGENTS.md`](AGENTS.md), with the files it maps in [`docs/agents/`](docs/agents/), is the source of truth for how Petal works and how it's built; read it, and the files it names for what you're changing, before changing anything.
 
 ## Setup
 
@@ -23,7 +23,7 @@ To run it for real, `PETAL_KEEP_DOCK=1 macos/build/Petal.app/Contents/MacOS/Peta
 
 The site is static: `python3 -m http.server 8104` from `site/`.
 
-`AGENTS.md`, under Verification, lists every check and what each one proves.
+[`docs/agents/verification.md`](docs/agents/verification.md) lists every check and what each one proves.
 
 ## Read this first
 
@@ -41,11 +41,11 @@ A feature, or any intended change to how Petal behaves or looks, needs an issue 
 
 A small, focused fix for an obvious bug needs no issue. Say what was wrong and why it's plainly a bug.
 
-Petal's design language is in `AGENTS.md` (Design language). A change that goes against it needs that conversation first, however good it looks.
+Petal's design language is in [`docs/agents/design.md`](docs/agents/design.md). A change that goes against it needs that conversation first, however good it looks.
 
 ## One problem per pull request
 
-Count the underlying problems, not the files. Include everything that one problem needs: the code, its check, and the documents it makes untrue (`AGENTS.md`, `docs/petal-notes.md`, Petal's skill in `macos/Resources/skill/`). A second fix, a refactor on the way past, or tidying goes in its own pull request.
+Count the underlying problems, not the files. Include everything that one problem needs: the code, its check, and the documents it makes untrue (`AGENTS.md` and `docs/agents/`, `docs/petal-notes.md`, Petal's skill in `macos/Resources/skill/`). A second fix, a refactor on the way past, or tidying goes in its own pull request.
 
 ## Show that it works
 

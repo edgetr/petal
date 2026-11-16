@@ -110,7 +110,7 @@ macos/build.sh        # makes macos/build/Petal.app
 macos/checks/run.sh   # the checks
 ```
 
-Swift Package Manager, no dependencies. `AGENTS.md` describes how Petal is built and its rules.
+Swift Package Manager, no dependencies. `AGENTS.md` and `docs/agents/` describe how Petal is built and its rules.
 
 ### Releasing (maintainers)
 

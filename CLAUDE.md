@@ -6,8 +6,8 @@
 
 ## Instruction files
 
-- Claude Code loads `AGENTS.md` only through the import above, because this project has a `CLAUDE.md`. Keep every rule that all agents need in `AGENTS.md`.
-- Claude's auto-memory is only for facts about this machine and session history. A rule every agent should follow goes in `AGENTS.md`, or Codex and Gemini threads in T3 will never see it.
+- Claude Code loads `AGENTS.md` only through the import above, because this project has a `CLAUDE.md`. Keep every rule that all agents need in `AGENTS.md`, or, when it's detail for one kind of change, in the `docs/agents/` file its map names for that change.
+- Claude's auto-memory is only for facts about this machine and session history. A rule every agent should follow goes in `AGENTS.md` (or its `docs/agents/` file), or Codex and Gemini threads in T3 will never see it.
 - **No Codex from 2026-11-14:** the owner's Codex subscription has ended. Don't hand anything to Codex or GPT models (`delegate_task` with the `codex` provider, or the `codex` CLI): reviews, implementation, research, device walks and computer use go to Claude subagents, Claude delegates or your own tools. Older memories and docs that send work to Codex or Sol are history.
 
 ## Petal's own Claude
@@ -20,12 +20,12 @@
 
 - `/code-review` and `/security-review`: the independent review must come from a reviewer that didn't write the code. Use a fresh subagent, or in T3 a `delegate_task` to another provider for a second model's view.
 - `/simplify`: cleanup pass after a feature lands.
-- `frontend-design` and other generic design skills are subordinate to the design language in `AGENTS.md`. The app and the marketing site are different systems; `site/` has its own (`AGENTS.md`, Marketing site). When a skill disagrees (gradients, grain, busy copy, real screenshots, fake product demos), follow `AGENTS.md`.
+- `frontend-design` and other generic design skills are subordinate to the design language in `docs/agents/design.md`. The app and the marketing site are different systems; `site/` has its own (`docs/agents/design.md`, Marketing site). When a skill disagrees (gradients, grain, busy copy, real screenshots, fake product demos), follow `docs/agents/design.md`.
 
 ## T3 Code
 
 - T3 tools (`delegate_task`, `link_pull_request`, `t3_thread_launch`, previews) exist only when this runs inside T3, not in the Claude app or Petal's panel. Don't assume them.
 - Call `link_pull_request` for every PR you open or work on.
 - T3 creates its own worktrees under `~/.t3/worktrees/`, separate from Claude Code's `.claude/worktrees/`. Remove a worktree and its local branch once its branch has merged or been pushed to `main`.
-- A worktree is not the installed app: only the Petal.app in `/Applications` runs as the owner's dock. A worktree's build can be checked without running as the dock (`AGENTS.md`, Verification); say when a change wasn't run as the dock.
+- A worktree is not the installed app: only the Petal.app in `/Applications` runs as the owner's dock. A worktree's build can be checked without running as the dock (`docs/agents/verification.md`); say when a change wasn't run as the dock.
 - For parallel work, give each delegated agent its own worktree (`isolation: "worktree"`). It starts from the last local commit, so commit what it needs first.
