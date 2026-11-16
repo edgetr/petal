@@ -12,13 +12,17 @@
 set -euo pipefail
 
 REPO="edgetr/petal"
+# The oldest Petal this installs: one that installs only updates Petal's maker signed, as the version they say.
+# Raised when a release changes how Petal checks its updates.
+OLDEST="2.1.4"
 MAKER='identifier "tech.edgetr.petal" and certificate root = H"29feb33bdddb5686cbc597ca9706b0b8a6f3b36d"'
 
 fail() { echo "Petal: $1" >&2; exit 1; }
 
 [[ $(uname) == Darwin ]] || fail "Petal is for the Mac (macOS 26 or later)."
 
-json() { osascript -l JavaScript -e "function run(argv) { var d = JSON.parse(argv[0]); return ($1); }" "$2"; }
+# What's read is only ever data: after "--" osascript takes it as the script's argument, whatever it starts with.
+json() { osascript -l JavaScript -e "function run(argv) { var d = JSON.parse(argv[0]); return ($1); }" -- "$2"; }
 
 # Petal's releases are the tags macos-v<version>; each carries latest-macos.json: its version, zip and checksum.
 manifest="${PETAL_MACOS_MANIFEST:-}"
@@ -33,6 +37,18 @@ url="$(json 'd.url' "$latest")"
 sha="$(json 'd.sha256' "$latest")"
 # Numbers with dots only (as UpdateTrust.plainVersion in the app): the version is shown, and checked against the app.
 [[ $version =~ ^[0-9]{1,6}(\.[0-9]{1,6}){0,3}$ ]] || fail "the newest release's version isn't one this installer can read"
+# Never an older Petal than OLDEST, whatever the release said (number by number: 2.1.10 is newer than 2.1.4).
+IFS=. read -r -a got <<< "$version"
+IFS=. read -r -a least <<< "$OLDEST"
+for i in 0 1 2 3; do
+  if (( 10#${got[i]:-0} > 10#${least[i]:-0} )); then break; fi
+  if (( 10#${got[i]:-0} < 10#${least[i]:-0} )); then fail "the newest release it found ($version) is older than Petal $OLDEST"; fi
+done
+# Petal's releases are on GitHub, under its own repository, and nowhere else: the whole address, as a release writes it.
+if [[ -z ${PETAL_MACOS_MANIFEST:-} ]]; then
+  ours="^https://github\.com/$REPO/releases/download/macos-v[0-9.]+/Petal-[0-9.]+-macos\.zip$"
+  [[ $url =~ $ours ]] || fail "the newest release doesn't point at Petal's own download"
+fi
 
 dest="${PETAL_APPS:-/Applications}"
 if [[ ! -w $dest ]]; then dest="$HOME/Applications"; mkdir -p "$dest"; fi
@@ -40,7 +56,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 echo "Downloading Petal ${version}…"
-curl -fsSL "$url" -o "$tmp/Petal.zip" || fail "couldn't download Petal $version"
+curl -fsSL --url "$url" -o "$tmp/Petal.zip" || fail "couldn't download Petal $version"
 [[ $(shasum -a 256 "$tmp/Petal.zip" | cut -d' ' -f1) == "$sha" ]] || fail "the download didn't match its checksum"
 ditto -x -k "$tmp/Petal.zip" "$tmp/unpacked" || fail "couldn't unpack Petal $version"
 [[ -d $tmp/unpacked/Petal.app ]] || fail "the download had no Petal.app"
