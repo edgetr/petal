@@ -70,6 +70,11 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         var api = false            // on an API key (APIKeys.swift)
         var note: String?          // a sticky note's id: Petal's tools answer about its window
         var folder: String?        // where it works (a note's coding helper: its worktree); the home folder otherwise
+        /// Its folder holds code from elsewhere (a pull request from a fork), or it only reads there (a second
+        /// opinion): what the folder itself brings along for an AI isn't loaded. Claude Code: only the person's own
+        /// settings (no project settings and their hooks, no project tool servers, no project instructions). Codex:
+        /// the folder's own instructions file isn't read.
+        var foreign = false
     }
 
     /// One turn of the chat; the prompt goes on stdin.
@@ -84,7 +89,8 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
                              "--output-format", "stream-json", "--verbose",
                              "--permission-mode", chat.fullAccess ? "bypassPermissions" : "auto",
                              "--append-system-prompt", chat.instructions, "--mcp-config", config]
-            if let session = chat.session { arguments += ["--resume", session] }
+            if let session = chat.session, Self.sessionShaped(session) { arguments += ["--resume", session] }
+            if chat.foreign { arguments += ["--setting-sources", "user", "--strict-mcp-config"] }
             // Petal's tools, and looking into Petal itself (its health check and log), need no asking.
             let petal = chat.tools
             return arguments + ["--allowedTools", "mcp__petal", "Bash(petal doctor:*)", "Bash(petal logs:*)",
@@ -92,6 +98,7 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
         case .codex:
             var arguments = ["exec", "--json", "--skip-git-repo-check", "-C", chat.folder ?? NSHomeDirectory()]
             arguments += chat.fullAccess ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", "workspace-write"]
+            if chat.foreign { arguments += ["-c", "project_doc_max_bytes=0"] }
             if !chat.model.isEmpty { arguments += ["-m", chat.model] }
             arguments += ["-c", "model_reasoning_effort=\(Self.toml(chat.effort))",
                           "-c", "developer_instructions=\(Self.toml(chat.instructions))",
@@ -103,9 +110,16 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
             if let note = chat.note { arguments += ["-c", "mcp_servers.petal.env={PETAL_NOTE=\(Self.toml(note))}"] }
             // On an API key: the commands Codex runs never see it (names with KEY in them stay out).
             if chat.api { arguments += ["-c", "shell_environment_policy.ignore_default_excludes=false"] }
-            if let session = chat.session { arguments += ["resume", session] }
+            if let session = chat.session, Self.sessionShaped(session) { arguments += ["resume", session] }
             return arguments + ["-"]
         }
+    }
+
+    /// A session's id as either AI names one (letters, digits and hyphens): what's kept with a chat is in a plain
+    /// file, and goes to the AI app as an argument, so anything else is never passed on.
+    static func sessionShaped(_ id: String) -> Bool {
+        (1...80).contains(id.utf8.count) && id.first != "-"
+            && id.unicodeScalars.allSatisfy { $0.isASCII && (CharacterSet.alphanumerics.contains($0) || $0 == "-" || $0 == "_") }
     }
 
     /// What one line of the chat's output means.

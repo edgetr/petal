@@ -754,7 +754,7 @@ extension Assist {
         // A new Buy card for this window ends the Buy already in it (another card on the same checkout), before the
         // person answers: a Don't, a closed card or no answer never leaves the earlier one usable.
         let asked = computer.endBuys(in: window)
-        ask("vault-buy", "Buy on \(shop)?", detail: detail, always: true, warn: true, allow: "Buy", owner: caller) { allowed in
+        ask("vault-buy", "Buy on \(VaultSite.shown(shop))?", detail: detail, always: true, warn: true, allow: "Buy", owner: caller) { allowed in
             guard allowed else { return send(["declined": "The person said Don't: nothing was filled. Don't buy it, and don't find another way."]) }
             // The card as the Buy card showed it: edited in Settings while the card was open, the Buy counts for
             // nothing (read off the main thread; the Keychain may wait).
@@ -849,6 +849,8 @@ extension Assist {
         VaultIndex.remember(Vault.secrets(item))
         if kind == .login, let place { Vault.bind(&item, to: place) }
         if kind == .apiKey, let site = VaultSite.host(answer.site) { item.sites = [site] }
+        // A key typed for an app's field is that app's from now on (by its maker): there it fills without asking.
+        if kind == .apiKey, let place, !place.web { Vault.bind(&item, to: place) }
         if item.title.isEmpty {
             switch kind {
             case .login: item.title = place.map { $0.web ? $0.host.map(VaultSite.registrable) ?? "Login" : $0.appName } ?? "Login"

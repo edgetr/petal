@@ -31,7 +31,7 @@ enum AgentSetup {
     }
 
     /// The SHA-256 of each SKILL.md an earlier release copied into the agents' skills folders (1.0.0, 2.0.1, 2.1.0,
-    /// and 2.1.2 and 2.1.3's, the same): a copy left by an older Petal is Petal's own too, so turning other agents
+    /// 2.1.2 and 2.1.3's, the same, and 2.1.4's): a copy left by an older Petal is Petal's own too, so turning other agents
     /// off takes it back. `macos/checks/run.sh` checks every released tag's skill is here; a release that changes
     /// the skill adds the one it replaced.
     static let earlierSkills: Set<String> = [
@@ -39,6 +39,7 @@ enum AgentSetup {
         "5d87b4bbcdbc89f2617be9d9dc5ea60d67333eca5266147b48df42b819642ad1",
         "3c2ff5608f23e1b184cbb5020c41b6bd1d5846554c9f557ae9f1df9fd80cbc59",
         "99c90f0eee89b6f1e0fd511ae2e991aa130a004823ce1b39ab311e5ad28d9eba",
+        "8dd9cba3558a0270f8bd67be3d72fcc1cd27c421fe3557314b81cf20cded91ee",
     ]
 
     /// SKILL.md's bytes as `earlierSkills` names them.

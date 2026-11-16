@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import Observation
 import SwiftUI
 
@@ -111,13 +112,13 @@ final class Sites {
         Task.detached(priority: .utility) {
             let data = await Self.download(base)
             // Kept in Petal's cache (written here, off the main thread).
-            if let data, let image = NSImage(data: data), image.isValid, let png = Self.png(image) {
+            if let data, Self.bitmap(data), let image = NSImage(data: data), image.isValid, let png = Self.png(image) {
                 try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
                 try? png.write(to: file, options: .atomic)
             }
             await MainActor.run {
                 self.fetching.remove(host)
-                guard let data, let image = NSImage(data: data), image.isValid else { self.failed[host] = Date(); return }
+                guard let data, Self.bitmap(data), let image = NSImage(data: data), image.isValid else { self.failed[host] = Date(); return }
                 self.images[host] = image
                 self.arrived += 1
             }
@@ -165,13 +166,32 @@ final class Sites {
     }
 
     nonisolated private static func isImage(_ data: Data) -> Bool {
-        guard data.count > 64, let image = NSImage(data: data) else { return false }
+        guard data.count > 64, bitmap(data), let image = NSImage(data: data) else { return false }
         return image.isValid && image.size.width >= 8
+    }
+
+    /// An icon's bytes are a site's own: only a bitmap of a kind and a size an icon comes in is ever drawn. Its kind
+    /// and size are read from its header (nothing is decoded for that): never a PDF or a drawing, and never a small
+    /// file that says it's a picture of a hundred thousand points a side.
+    nonisolated static func bitmap(_ data: Data) -> Bool {
+        let kinds = ["public.png", "public.jpeg", "com.compuserve.gif", "com.microsoft.ico", "org.webmproject.webp", "public.webp", "com.microsoft.bmp"]
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), let kind = CGImageSourceGetType(source) as String?, kinds.contains(kind) else { return false }
+        let count = CGImageSourceGetCount(source)
+        guard (1...64).contains(count) else { return false }
+        for index in 0..<count {
+            guard let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+                  let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+                  let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+                  (1...2048).contains(width), (1...2048).contains(height) else { return false }
+        }
+        return true
     }
 
     /// The icons a page links to, best first: apple-touch-icon, then the largest declared size.
     nonisolated static func iconLinks(_ html: String) -> [String] {
-        guard let tag = try? NSRegularExpression(pattern: "<link\\b[^>]*>", options: .caseInsensitive) else { return [] }
+        // A tag of a tag's length, in the page's start: a page written to make this slow costs no more than any other.
+        let html = String(html.prefix(120_000))
+        guard let tag = try? NSRegularExpression(pattern: "<link\\b[^>]{0,2000}>", options: .caseInsensitive) else { return [] }
         func attribute(_ name: String, in text: String) -> String? {
             let pattern = "\\b\(name)\\s*=\\s*(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))"
             guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),

@@ -205,7 +205,7 @@ When the user says "get the Anthropic key from Petal to test this" or "use the l
   instead. Petal asks the user each time, from Petal's own chat too (in a project, not the home folder, they
   can say Always for it), and its card shows the command. Removing a grant stops a use still waiting on it, and an Allow once covers that one run or fill.
 - A server you start to test (a bring-your-own-key app): start it with `petal run` so it has the key, or fill the
-  key into its settings page with `petal_vault` `fill` (an API key fills by itself on `http://localhost` and in apps).
+  key into its settings page with `petal_vault` `fill` (an API key fills by itself on `http://localhost`; in an app the user is asked first, unless they typed the key for that app on Petal's card).
 - Never ask for the key, print it, write it to a file, or put it on a command line, and don't try to get it out of
   `petal run` (echo, base64, a file you read later): keeping it out of your transcript is why the user doesn't have to
   rotate it. If a test truly needs to see it, ask the user.

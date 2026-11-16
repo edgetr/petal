@@ -288,6 +288,45 @@ enum RunBrowserRules {
         }
     }
 
+    /// Whether the address a tab is at now is one a run's browser reads and works in. A tab gets somewhere by
+    /// itself too (a link, a redirect, a page's own script), so where it is is asked again before a page is told or
+    /// a key goes to it: an address `open` would take (https, or http on this Mac), a new tab's empty page, or a
+    /// page such a page made itself (a blob of its own). Never the browser's own pages (its error and warning pages
+    /// among them: a certificate warning is never read with ids, so it can't be pressed through), a file, or a page
+    /// that isn't https anywhere but on this Mac.
+    static func landed(_ url: String) -> Bool {
+        if url.isEmpty || url == "about:blank" { return true }
+        let inner = url.lowercased().hasPrefix("blob:") ? String(url.dropFirst(5)) : url
+        if case .go = address(inner) { return true }
+        return false
+    }
+
+    /// A tab's address and title as they're told: whole where a run's browser reads the page, and where it doesn't,
+    /// the address's kind and name only and no title (a page's title is the page's own words).
+    static func told(address url: String, title: String) -> (address: String, title: String) {
+        if landed(url) { return (url, title) }
+        let parts = URLComponents(string: url)
+        let scheme = parts?.scheme?.lowercased() ?? ""
+        let host = parts?.host ?? ""
+        return (scheme.isEmpty ? "" : host.isEmpty ? scheme + ":" : "\(scheme)://\(host)", "")
+    }
+
+    /// What's said of a tab that is somewhere else: its kind of address and name only, never the rest of it.
+    static func notLanded(_ url: String) -> String {
+        let parts = URLComponents(string: url)
+        let scheme = parts?.scheme?.lowercased() ?? ""
+        if scheme == "chrome-error" || scheme == "chrome" || scheme == "devtools" || scheme == "view-source" {
+            return "The browser is showing a page of its own here (an error or a warning, when the page asked for didn't load), and a run's browser doesn't read or work in those. back returns to the page before, or open another address."
+        }
+        let host = parts?.host ?? ""
+        let shown = scheme.isEmpty ? "another kind of address" : host.isEmpty ? "a \(scheme): address" : "\(scheme)://\(host)"
+        return "This tab went to \(shown), which a run's browser doesn't read or work in. \(addressRule) back returns to the page before, or open another address."
+    }
+
+    /// What petal_ui and petal_act say of a run's own browser: it's worked through its own tool, never by its
+    /// window's controls (its address bar and menus aren't the run's to use).
+    static let ownBrowser = "That's the browser Petal started for this run. Work in it with petal_browser (open, read, click, type), which needs no petal_ui: its window's own controls aren't used."
+
     // MARK: Where a field is, for the vault
 
     /// A document as the browser reports it: its address, and its origin (whose it is). The two are different things:

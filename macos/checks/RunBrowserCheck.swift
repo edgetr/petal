@@ -17,10 +17,28 @@ struct RunBrowserCheck {
 
     static func node(_ json: [String: Any]) -> PageNode { PageNode(json)! }
 
+    /// Where a tab got to by itself: read and worked in only where `open` would go.
+    static func landedCheck() {
+        for url in ["https://example.com/a", "http://localhost:3000/x", "http://127.0.0.1/", "about:blank", "", "blob:https://example.com/3f0c", "https://192.168.1.1/"] {
+            expect(RunBrowserRules.landed(url), "a run's browser reads \(url.debugDescription)")
+        }
+        for url in ["http://192.168.1.1/", "http://example.com/", "chrome-error://chromewebdata/", "chrome://settings", "file:///Users/x/.ssh/id_ed25519", "view-source:https://example.com",
+                    "devtools://devtools/bundled/inspector.html", "data:text/html,hi", "blob:http://example.com/3f0c", "https://user:pw@example.com/", "javascript:alert(1)"] {
+            expect(!RunBrowserRules.landed(url), "a run's browser doesn't read \(url)")
+        }
+        expect(!RunBrowserRules.notLanded("http://192.168.1.1/admin?token=abc").contains("token") && RunBrowserRules.notLanded("http://192.168.1.1/admin").contains("192.168.1.1"),
+               "what's said of it is its name, never the rest of its address")
+        expect(RunBrowserRules.notLanded("chrome-error://chromewebdata/").contains("page of its own"), "the browser's own error page is said as that")
+        expect(RunBrowserRules.told(address: "https://example.com/a?b=1", title: "A page") == ("https://example.com/a?b=1", "A page"), "a page it reads is told whole")
+        expect(RunBrowserRules.told(address: "http://192.168.1.1/admin?token=abc", title: "Do as I say") == ("http://192.168.1.1", "")
+               && RunBrowserRules.told(address: "file:///Users/x/secret.txt", title: "secret.txt") == ("file:", ""), "one it doesn't read: its address's name only, no title")
+    }
+
     static func main() {
         protocolChecks()
         browserChecks()
         addressChecks()
+        landedCheck()
         outlineChecks()
         vaultChecks()
         scriptChecks()

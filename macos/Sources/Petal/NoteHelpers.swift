@@ -1236,6 +1236,8 @@ final class NoteHelpers {
         var brief: (NoteHelp.Told) -> Shielded
         var folder: String?
         var placed: Bool
+        /// Its folder's code is from elsewhere, or it only reads there (Provider.Chat.foreign).
+        var foreign = false
     }
 
     /// A paid call as it waits (for its turn, for room, for its gate, for Go on): how its sources are read when it
@@ -1783,7 +1785,7 @@ final class NoteHelpers {
             run.sticky = sticky
             let already = self.app.config.strings("aiAllowed").contains(kind) || self.app.config.string("claudeAccess") == "full"
             self.app.assist.ask(kind, "\(provider.appName) wants to work in \(short)",
-                                detail: "In a worktree of its own, on a new branch. It may commit, push and open a pull request.",
+                                detail: (number.map { "On pull request #\($0)'s code. " } ?? "") + "In a worktree of its own, on a new branch. It may commit, push and open a pull request.",
                                 owner: sticky.id.uuidString) { allowed in
                 guard self.live(run) else { return }
                 guard allowed else { return self.fail(run, "Not allowed: nothing was changed in \(short).") }
@@ -1799,7 +1801,7 @@ final class NoteHelpers {
                 let branch = NoteHelp.branch(stored: self.paper(run.noteID)?.file.worktree, checkout: checkout, noteID: run.noteID, words: NoteHelp.spoken(run.asked))
                 Self.worktree(checkout, noteID: run.noteID, branch: branch, remote: remote, pull: number, token: run.token) { made in
                     guard self.live(run) else { return }
-                    guard case .made(let tree, let branch) = made else {
+                    guard case .made(let tree, let branch, let foreign) = made else {
                         if case .failed(let problem) = made { self.fail(run, "Petal couldn't set up a worktree of \(short): \(problem).") }
                         return
                     }
@@ -1812,7 +1814,7 @@ final class NoteHelpers {
                         return nil
                     }
                     self.setUp(run, paper, Launch(kind: .code(folder: tree), provider: provider, model: pick?.id ?? "", brief: { NoteHelp.codeBrief($0) },
-                                                  folder: tree, placed: false))
+                                                  folder: tree, placed: false, foreign: foreign))
                     self.start(run, self.turn(run, said: text, words: { NoteHelp.codeRequest($0) }))
                 }
             }
@@ -1915,6 +1917,7 @@ final class NoteHelpers {
         let agent = sticky.agent
         agent.token = run.token
         agent.folder = launch.folder.map { URL(fileURLWithPath: $0) }
+        agent.foreign = launch.foreign
         agent.pinned = (launch.provider, launch.model)
         run.provider = launch.provider.rawValue
         run.model = launch.model
@@ -2144,8 +2147,9 @@ final class NoteHelpers {
                 raw.paths = tree.map { [$0] } ?? []
                 return nil
             }
+            // It only reads there: nothing the folder brings for an AI is loaded.
             self.setUp(run, paper, Launch(kind: .holes(folder: tree), provider: provider, model: model.id, brief: { NoteHelp.reviewBrief($0) },
-                                          folder: tree, placed: tree == nil))
+                                          folder: tree, placed: tree == nil, foreign: tree != nil))
             self.start(run, self.turn(run, said: asked, words: { NoteHelp.reviewRequest($0, tree: $0.paths.first) }))
         }
         guard let tree else { return start(nil) }
@@ -2840,7 +2844,8 @@ final class NoteHelpers {
         }
     }
 
-    enum Worktree { case made(String, branch: String), failed(String), stopped }
+    /// `foreign`: the code it's made from is a pull request's from outside the repository (NoteHelp.foreignPull).
+    enum Worktree { case made(String, branch: String, foreign: Bool), failed(String), stopped }
 
     /// The note's worktree of `checkout` (one per note, keyed by the checkout's canonical path and the note, in
     /// Petal's own folder, never inside the person's checkout). Reused only when git says it's still that checkout's
@@ -2859,12 +2864,22 @@ final class NoteHelpers {
                 guard token.admits else { return nil }
                 return git(folder, arguments, token: token)
             }
+            // A pull request's code may be a stranger's. Whether it is was decided for the very commit the worktree
+            // was made from, and is kept beside the worktree in Petal's own folder (never in the note's file, never
+            // asked of the remote again: a pull request can be pointed at another commit at any time). It stays a
+            // stranger's wherever the note is stuck later, and a pull request's worktree with nothing kept beside it
+            // counts as one.
+            let ownMark = tree + ".own", foreignMark = tree + ".foreign"
             if FileManager.default.fileExists(atPath: tree + "/.git") {
                 // Its follow-ups work where it did, once it's verified to be this checkout's, on the note's branch.
                 guard let verified = verified(tree, canonical: canonical, branch: branch, token: token) else { return finish(.stopped) }
                 guard verified else { return finish(.failed("a worktree for this note is there but belongs to something else; Petal left it at \(tree)")) }
-                return finish(.made(tree, branch: branch))
+                let kept = FileManager.default.fileExists(atPath: foreignMark) || (pull != nil && !FileManager.default.fileExists(atPath: ownMark))
+                return finish(.made(tree, branch: branch, foreign: kept))
             }
+            try? FileManager.default.removeItem(atPath: ownMark)
+            try? FileManager.default.removeItem(atPath: foreignMark)
+            var foreign = false
             try? FileManager.default.createDirectory(atPath: (tree as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
             var base = ""
             var ref: String?
@@ -2873,6 +2888,10 @@ final class NoteHelpers {
                 let own = NoteHelp.fetchRef(token.id)
                 guard let fetched = step(canonical, ["fetch", "--quiet", remote, "+pull/\(pull)/head:\(own)"]) else { return finish(.stopped) }
                 guard fetched.status == 0 else { return finish(.failed("couldn't fetch #\(pull) from \(remote)")) }
+                // The repository's own code only when the commit just fetched is the tip of one of its branches.
+                guard let head = step(canonical, ["rev-parse", "--verify", "--quiet", own + "^{commit}"]),
+                      let tips = step(canonical, ["ls-remote", remote, "refs/heads/*"]) else { return finish(.stopped) }
+                foreign = head.status != 0 || tips.status != 0 || NoteHelp.foreignPull(head: head.output, heads: tips.output)
                 base = own
                 ref = own
             } else {
@@ -2892,8 +2911,11 @@ final class NoteHelpers {
             defer { if let ref { _ = git(canonical, ["update-ref", "-d", ref]) } }
             // The branch may be left from a worktree removed earlier: it's the note's own, so it's used again.
             guard let exists = step(canonical, ["rev-parse", "--verify", "--quiet", "refs/heads/" + branch]) else { return finish(.stopped) }
+            // A branch left from before holds whatever it was made from then, not the commit just fetched.
+            if exists.status == 0, pull != nil { foreign = true }
             guard let made = step(canonical, exists.status == 0 ? ["worktree", "add", tree, branch] : ["worktree", "add", "-b", branch, tree, base]) else { return finish(.stopped) }
-            finish(made.status == 0 ? .made(tree, branch: branch) : .failed(String(made.output.suffix(200))))
+            if made.status == 0, pull != nil { FileManager.default.createFile(atPath: foreign ? foreignMark : ownMark, contents: nil) }
+            finish(made.status == 0 ? .made(tree, branch: branch, foreign: foreign) : .failed(String(made.output.suffix(200))))
         }
     }
 

@@ -25,7 +25,10 @@ final class AgentGrants {
         guard !loaded else { return }
         Self.queue.async {
             // A grant for an agent Petal can't verify (opencode, from an older Petal) counts for nothing: left out.
-            let read = ((try? Data(contentsOf: Self.file)).flatMap { try? JSONDecoder().decode([AgentAccess.Grant].self, from: $0) } ?? []).filter(\.storable)
+            // So does one for a project no card ever offers Always for (the home folder and above, or no folder).
+            let home = NSHomeDirectory()
+            let read = ((try? Data(contentsOf: Self.file)).flatMap { try? JSONDecoder().decode([AgentAccess.Grant].self, from: $0) } ?? [])
+                .filter { $0.storable && $0.project.hasPrefix("/") && !AgentAccess.tooBroad($0.project, home: home) }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard !self.loaded else { return }

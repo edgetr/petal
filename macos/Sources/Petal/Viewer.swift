@@ -2063,6 +2063,8 @@ final class ViewerExport: @unchecked Sendable {
     /// (another Petal process's export under way is left alone).
     static func sweep(now: Date = Date()) {
         let fm = FileManager.default
+        // Only Petal's own folder, a real one: never a link standing where it would be.
+        guard (try? fm.attributesOfItem(atPath: root.path))?[.type] as? FileAttributeType == .typeDirectory else { return }
         for folder in (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
             let made = (try? folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             if now.timeIntervalSince(made) > 600 { try? fm.removeItem(at: folder) }
@@ -2181,6 +2183,10 @@ final class ViewerWeb: NSObject, WKNavigationDelegate {
          {"trigger":{"url-filter":"^data:"},"action":{"type":"ignore-previous-rules"}}]
         """
     private static var compiled: WKContentRuleList?
+
+    /// The compiled rule list, for another of Petal's web views that shows what it didn't write (a page Petal AI
+    /// made: `PageWindow`). Nil: it couldn't be made, and nothing may be loaded.
+    static func localOnly(_ done: @escaping @MainActor (WKContentRuleList?) -> Void) { rules(done) }
 
     private static func rules(_ done: @escaping @MainActor (WKContentRuleList?) -> Void) {
         if let compiled { return done(compiled) }

@@ -350,14 +350,21 @@ struct ViewerPDF: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     @MainActor
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, PDFViewDelegate {
         weak var view: PDFView?
         weak var model: ViewerModel?
         private var soon = false
 
+        /// A link in the document, clicked: the document is anyone's, so it opens only what a link in a note may
+        /// (NoteTasks.link: a web or mail address, or a document on this Mac), never PDFKit's own open of any address.
+        nonisolated func pdfViewWillClick(onLink sender: PDFView, with url: URL) {
+            DispatchQueue.main.async { MainActor.assumeIsolated { NoteTasks.openLink(url) } }
+        }
+
         func attach(_ view: PDFView, model: ViewerModel) {
             self.view = view
             self.model = model
+            view.delegate = self
             let center = NotificationCenter.default
             center.addObserver(self, selector: #selector(pageChanged), name: .PDFViewPageChanged, object: view)
             center.addObserver(self, selector: #selector(selectionChanged), name: .PDFViewSelectionChanged, object: view)

@@ -39,7 +39,7 @@ struct VaultForm: Equatable {
         }
     }
 
-    static func placeName(_ place: Vault.Place) -> String { place.web ? place.host ?? place.appName : place.appName }
+    static func placeName(_ place: Vault.Place) -> String { place.where_ }
 
     struct Answer: Equatable {
         var values: [VaultField: String] = [:]

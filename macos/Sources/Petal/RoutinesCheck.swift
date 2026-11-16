@@ -346,7 +346,7 @@ enum RoutinesCheck {
         wait(5) { boundsStarted }
         let listedBounds = (tool("petal_routines", [:], bounds)["routines"] as? [[String: Any]]) ?? []
         let skips = Dictionary(uniqueKeysWithValues: listedBounds.map { ($0["id"] as? String ?? "", $0["skipped"] as? String ?? "") })
-        check(listedBounds.count == 3 && skips["o1"]?.contains("doesn't run") == true && skips["o2"]?.contains("doesn't run") == true && skips["o3"] == "",
+        check(listedBounds.count == 3 && skips["o1"]?.contains("doesn’t run") == true && skips["o2"]?.contains("doesn’t run") == true && skips["o3"] == "",
               "routines with a folder outside the home folder are listed, each saying it doesn't run: \(skips)")
         check(Routines.outOfBounds(bounds.list[0]) && Routines.outOfBounds(bounds.list[1]) && !Routines.outOfBounds(bounds.list[2]),
               "by the same rule a saved routine's folders go by")

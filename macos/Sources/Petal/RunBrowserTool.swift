@@ -462,7 +462,9 @@ enum BrowserActs {
 
     private static func tabs(_ browser: RunBrowser) -> [[String: Any]] {
         browser.tabList().map { item in
-            var tab: [String: Any] = ["tab": "t\(item.tab.number)", "address": item.tab.url, "title": item.tab.title]
+            // A tab somewhere a run's browser doesn't read is listed by its address's name only, with no title.
+            let told = RunBrowserRules.told(address: item.tab.url, title: item.tab.title)
+            var tab: [String: Any] = ["tab": "t\(item.tab.number)", "address": told.address, "title": told.title]
             if item.current { tab["current"] = true }
             return tab
         }

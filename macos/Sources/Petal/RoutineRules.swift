@@ -110,6 +110,27 @@ enum RoutineRules {
         return .web(url)
     }
 
+    /// What Petal AI's own open (petal_apps) takes besides an app's name: a web address or a file by its full path,
+    /// by the rule above. Any other kind of address (another app's own links, a Shortcut's, a server's) is refused
+    /// in words: opening one starts or runs something the person never saw named.
+    enum Asked: Equatable {
+        case web(URL)
+        case file(String)
+        case refused(String)
+    }
+
+    static let askedRule = "Petal AI opens web addresses (https://…), documents and folders by their full path, and apps by their name (app)."
+
+    static func asked(_ target: String) -> Asked {
+        switch opens(target) {
+        case .web(let url): return .web(url)
+        case .file(let path): return .file(path)
+        case .app, .nothing:
+            let named = target.trimmingCharacters(in: .whitespacesAndNewlines)
+            return .refused((named.contains(":") ? "That kind of address isn't one Petal AI opens. " : "That isn't a whole address or a file's full path. ") + askedRule)
+        }
+    }
+
     /// A routine with one of these actions goes on opening things or running a Shortcut by itself, so the person is
     /// asked before Petal AI saves it, changes it or runs it (Petal AI's card, kind `routine`).
     static func asksFirst(actions kinds: [String]) -> Bool {

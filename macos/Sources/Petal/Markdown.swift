@@ -106,9 +106,21 @@ enum Markdown {
         return t.components(separatedBy: "|").map { $0.trimmingCharacters(in: .whitespaces) }
     }
 
-    /// Inline markdown (bold, italic, code, links) for SwiftUI text.
+    /// Inline markdown (bold, italic, code, links) for SwiftUI text. The words are an AI's, or a release's: a link
+    /// in them opens only a web or mail address, and any other kind (a file, another app's own links) stays words.
     static func inline(_ text: String) -> AttributedString {
-        (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        var out = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        for run in out.runs {
+            guard let link = run.link, !opens(link) else { continue }
+            out[run.range].link = nil
+        }
+        return out
+    }
+
+    /// The kinds of address a link in a reply may open.
+    static func opens(_ link: URL) -> Bool {
+        guard let scheme = link.scheme?.lowercased() else { return false }
+        return scheme == "mailto" || ((scheme == "http" || scheme == "https") && link.host != nil)
     }
 
     // MARK: HTML
@@ -242,7 +254,8 @@ struct MarkdownView: View {
 
 /// Pages Petal AI makes: a summary of the month, a report, a table, a chart. Each opens in Petal's own glass
 /// window (never another app), drawn from markdown or HTML (with inline SVG for charts), and is kept in
-/// ~/Library/Application Support/Petal/pages so it can be opened again.
+/// ~/Library/Application Support/Petal/pages so it can be opened again. A page is for reading: nothing in it runs,
+/// and nothing is loaded but the page itself (`PageWindow`).
 @MainActor
 enum Pages {
     private static var windows: [String: PageWindow] = [:]
@@ -255,11 +268,18 @@ enum Pages {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let file: URL
         if let path, !path.isEmpty {
-            let source = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-            guard FileManager.default.fileExists(atPath: source.path) else { throw MCP.Failure("No file at \(path).") }
-            let text = (try? String(contentsOf: source, encoding: .utf8)) ?? ""
-            let isHTML = ["html", "htm"].contains(source.pathExtension.lowercased())
-            return try show(title: title, markdown: isHTML ? nil : text, html: isHTML ? text : nil, path: nil, update: update)
+            // A page written as a file: an .html file as it really is (its links followed), of a page's size. Never
+            // another kind of file: what's shown is copied into Petal's pages.
+            let source = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).resolvingSymlinksInPath()
+            let values = try? source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard values?.isRegularFile == true else { throw MCP.Failure("No file at \(path).") }
+            guard ["html", "htm"].contains(source.pathExtension.lowercased()) else {
+                throw MCP.Failure("path takes an .html file you wrote. For anything else, give its words as markdown.")
+            }
+            guard (values?.fileSize ?? 0) <= maxFile, let text = try? String(contentsOf: source, encoding: .utf8) else {
+                throw MCP.Failure("That file is too large for a page, or isn't text.")
+            }
+            return try show(title: title, markdown: nil, html: text, path: nil, update: update)
         }
         let body = html ?? Markdown.html(markdown ?? "")
         // A whole page keeps its own look, inside Petal's window; a body gets Petal's.
@@ -279,7 +299,13 @@ enum Pages {
         return file
     }
 
+    /// The most a page's file may hold.
+    static let maxFile = 4_000_000
+
+    /// Only a page kept in Petal's own folder (what Petal AI did keeps a page's path, in a plain file).
     static func open(_ file: URL, title: String) {
+        let file = file.standardizedFileURL
+        guard file.deletingLastPathComponent().path == folder.standardizedFileURL.path, file.pathExtension == "html" else { return }
         let window = windows[file.path] ?? PageWindow()
         windows[file.path] = window
         window.load(file, title: title)
@@ -313,15 +339,26 @@ enum Pages {
 }
 
 /// A page in Petal's look: macOS's own glass, a calm header with the title, Open in Browser and close, and the
-/// page drawn over the glass.
+/// page drawn over the glass. The page is words Petal AI wrote, often from what it read elsewhere, so it is only
+/// ever shown: its scripts are off, nothing it names is fetched (the viewer's rule list, added before the page is
+/// loaded: an image, a style, a frame or a form's address on the network loads nothing), nothing is kept, and the
+/// window never goes to another page. A web link the person clicks opens in their browser.
 @MainActor
 final class PageWindow: NSWindow, WKNavigationDelegate {
     let web: WKWebView
     private let titleLabel = NSTextField(labelWithString: "")
     private var file: URL?
+    /// The rule list is in the web view: nothing is loaded before it is.
+    private var ruled = false
+    private var waiting = false
+    private var reloaded = false
+    /// Still loading its page (or waiting for the rule list it's loaded under).
+    var isLoading: Bool { waiting || web.isLoading }
 
     init() {
         let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         web = WKWebView(frame: .zero, configuration: configuration)
         super.init(contentRect: NSRect(x: 0, y: 0, width: 820, height: 680),
                    styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
@@ -366,9 +403,43 @@ final class PageWindow: NSWindow, WKNavigationDelegate {
         self.file = file
         self.title = title
         titleLabel.stringValue = title
-        web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
+        reloaded = false
         // In front, without taking the keyboard from the chat (which closes when it loses it).
         if show { orderFrontRegardless() }
+        if ruled { return start() }
+        waiting = true
+        ViewerWeb.localOnly { [weak self] rules in
+            guard let self else { return }
+            self.waiting = false
+            // No rule list, no page: nothing is loaded without it.
+            guard let rules else { return NSLog("Petal page: no rule list, so the page wasn't loaded") }
+            if !self.ruled {
+                self.web.configuration.userContentController.add(rules)
+                self.ruled = true
+            }
+            self.start()
+        }
+    }
+
+    /// A file's path to tell two addresses of one file apart from two files (the temporary folder has two names).
+    private static func plain(_ url: URL) -> String {
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix("/private/") ? String(path.dropFirst("/private".count)) : path
+    }
+
+    private func start() {
+        guard let file else { return }
+        web.loadFileURL(file, allowingReadAccessTo: file.deletingLastPathComponent())
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
+        let url = navigationAction.request.url
+        // The page's own file (a link to a part of it too) and nothing else is shown here.
+        if let url, url.isFileURL, let file, navigationAction.targetFrame?.isMainFrame != false, Self.plain(url) == Self.plain(file) {
+            return decisionHandler(.allow)
+        }
+        if navigationAction.navigationType == .linkActivated, let url { NoteTasks.openWeb(url.absoluteString) }
+        decisionHandler(.cancel)
     }
 
     @objc private func openInBrowser() {
@@ -385,8 +456,11 @@ final class PageWindow: NSWindow, WKNavigationDelegate {
         NSLog("Petal page failed to load: %@", error.localizedDescription)
     }
 
-    nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        // Once: a page that ends its process every time isn't loaded over and over.
+        guard !reloaded else { return NSLog("Petal page: the web content process ended again") }
+        reloaded = true
         NSLog("Petal page: the web content process ended; reloading")
-        DispatchQueue.main.async { webView.reload() }
+        webView.reload()
     }
 }

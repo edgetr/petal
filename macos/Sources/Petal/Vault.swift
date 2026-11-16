@@ -620,7 +620,7 @@ enum Vault {
         var site: String? { frameURL.flatMap { Vault.siteHost($0) == nil ? nil : VaultSite.site($0, page: true) } }
         /// Where a purchase is made: the tab's whole page (a card form often sits in a payment company's frame).
         var shop: String? { (topURL ?? frameURL).flatMap(Vault.siteHost) }
-        var where_: String { web ? host ?? appName : appName }
+        var where_: String { web ? host.map(VaultSite.shown) ?? appName : appName }
     }
 
     /// The site an address names: its host, only for a web address (http or https). An app's own page
@@ -666,7 +666,7 @@ enum Vault {
 
     /// Why a page Petal can't verify gets nothing by itself, naming the address it gives as unverified.
     static func unverifiedWhy(_ place: Place) -> String {
-        let said = place.claimedURL.flatMap(VaultSite.host).map { " The page says it's \($0), but Petal can't check that." } ?? ""
+        let said = place.claimedURL.flatMap(VaultSite.host).map { " The page says it's \(VaultSite.shown($0)), but Petal can't check that." } ?? ""
         return "\(place.appName) isn't a browser Petal can verify pages in, so it can't tell which site this is.\(said) Fill only if you're sure of the address."
     }
 
@@ -751,7 +751,7 @@ enum Vault {
 
     /// Why a page isolated from its site gets nothing by itself, in plain words.
     static func isolatedWhy(_ place: Place) -> String {
-        let site = place.host ?? "the site its address names"
+        let site = place.host.map(VaultSite.shown) ?? "the site its address names"
         return "This page is isolated from its site: the browser keeps it apart from the rest of \(site) (it's sandboxed), so it isn't \(site)'s own page, and what's typed there can be sent anywhere. Fill only if you're sure."
     }
 
@@ -760,11 +760,11 @@ enum Vault {
     private static func pageProblem(_ place: Place) -> String? {
         if place.isolated { return isolatedWhy(place) }
         guard let frame = place.frameURL, let host = VaultSite.host(frame) else { return "Petal couldn't read which page this field is on." }
-        guard secure(frame) else { return "\(host) isn't a secure page (it's not https): what's typed there can be read on the way." }
+        guard secure(frame) else { return "\(VaultSite.shown(host)) isn't a secure page (it's not https): what's typed there can be read on the way." }
         if let top = place.topURL {
             guard secure(top) else { return "The page around this field isn't secure (it's not https)." }
             if let tab = place.tabURL, let tabHost = VaultSite.host(tab), let topHost = VaultSite.host(top), tabHost != topHost {
-                return "Petal couldn't confirm the page: the tab says \(tabHost), the page says \(topHost)."
+                return "Petal couldn't confirm the page: the tab says \(VaultSite.shown(tabHost)), the page says \(VaultSite.shown(topHost))."
             }
         }
         return nil
@@ -785,7 +785,7 @@ enum Vault {
             if page != host, item.sites.contains(where: { VaultSite.host($0) == host }) {
                 return "This login is saved for \(saved). This page is \(page): another port of this Mac, so it may be another program's page."
             }
-            return "This login is saved for \(saved). This page is \(page): if it only looks like \(item.sites.first.map(VaultSite.registrable) ?? item.title), it may be trying to take your password."
+            return "This login is saved for \(saved). This page is \(VaultSite.shown(page)): if it only looks like \(item.sites.first.map(VaultSite.registrable) ?? item.title), it may be trying to take your password."
         }
         guard item.apps.contains(place.bundle) else {
             return "This login is saved for \((item.sites + item.apps).joined(separator: ", ")), not \(place.appName)."
@@ -798,10 +798,15 @@ enum Vault {
         return nil
     }
 
-    /// Why an API key doesn't belong where the field is, or nil: it goes into any app, onto this Mac's own pages, and
-    /// onto its service's site.
+    /// Why an API key doesn't belong where the field is, or nil: it goes onto its service's site, onto this Mac's own
+    /// pages, and into the app it was typed for on Petal's card (that app, by the same maker). Any other app is
+    /// asked about: an app keeps or sends on whatever is typed into it (a message box sends it).
     static func keyMismatch(_ item: VaultItem, _ place: Place) -> String? {
-        guard place.web else { return place.unverified ? unverifiedWhy(place) : nil }
+        guard place.web else {
+            if place.unverified { return unverifiedWhy(place) }
+            if item.apps.contains(place.bundle), place.signed, let team = place.team, item.appSigners[place.bundle] == team { return nil }
+            return "This key isn't saved for \(place.appName). Whatever is typed into an app, the app can keep or send on."
+        }
         // Not even on this Mac's own pages: an isolated page is nobody's.
         if place.isolated { return isolatedWhy(place) }
         // Only a web page on this Mac (http or https), never a file:// or other address naming localhost.
@@ -812,8 +817,8 @@ enum Vault {
         if let problem = pageProblem(place) { return problem }
         let host = place.host ?? ""
         if item.sites.contains(where: { VaultSite.matches(host: host, saved: $0) }) { return nil }
-        if item.sites.isEmpty { return "This key isn't saved for a service, and \(host) isn't a page on this Mac." }
-        return "This key is for \(item.sites.joined(separator: ", ")). This page is \(host): a page that only looks like \(VaultSite.registrable(item.sites[0])) may be trying to take it."
+        if item.sites.isEmpty { return "This key isn't saved for a service, and \(VaultSite.shown(host)) isn't a page on this Mac." }
+        return "This key is for \(item.sites.joined(separator: ", ")). This page is \(VaultSite.shown(host)): a page that only looks like \(VaultSite.registrable(item.sites[0])) may be trying to take it."
     }
 
     /// "04/27", "4/2027", "04-27", "2027-04" as ("04", "27", "2027").
@@ -1117,8 +1122,9 @@ enum Vault {
         return nil
     }
 
-    /// What a login typed into Petal's card is saved for: the page Petal read, or the app once Petal confirmed who
-    /// signed it. Never a browser (or a page it can't verify): a login there is for no app at all.
+    /// What a login typed into Petal's card is saved for (and a key typed for an app's field): the page Petal read,
+    /// or the app once Petal confirmed who signed it. Never a browser (or a page it can't verify): a login there is
+    /// for no app at all.
     static func bind(_ item: inout VaultItem, to place: Place) {
         if place.web {
             // A page isolated from its site isn't the site's: nothing is saved for the site from it.
@@ -2069,6 +2075,10 @@ enum VaultSite {
     /// its scheme's when none is written; for an address in a file or typed in Settings, only a port it writes, so
     /// "https://localhost/" and a bare "localhost" stay the person's word for every port.
     static func site(_ text: String, page: Bool = false) -> String? {
+        // What something is saved for is a web address or a bare host. Another kind of address names no site: a
+        // browser's export writes a phone app's login as "android://…@com.example.app/", whose last part reads as a
+        // host, and under some endings (.app, .cash) as a name anyone can register.
+        if !page, let (written, bare) = parts(text), !bare, !["http", "https"].contains(written.scheme?.lowercased() ?? "") { return nil }
         guard let host = host(text) else { return nil }
         guard isLocal(host), let port = page ? port(text) : parts(text)?.parts.port else { return host }
         return (host.contains(":") ? "[\(host)]" : host) + ":\(port)"
@@ -2080,6 +2090,18 @@ enum VaultSite {
         var out: [String] = []
         for host in list.split(separator: ",").compactMap({ site(String($0)) }) where !out.contains(host) { out.append(host) }
         return out
+    }
+
+    /// A host as a card shows it. A name with letters outside ASCII is shown with the form it's sent as beside it
+    /// ("bücher.de (xn--bcher-kva.de)"): another alphabet's letters can look exactly like a known name's
+    /// ("аррӏе.com"), and that form never does. Only for showing: sites are matched by the name itself.
+    static func shown(_ host: String) -> String {
+        guard !host.unicodeScalars.allSatisfy(\.isASCII) else { return host }
+        var address = URLComponents()
+        address.scheme = "https"
+        address.host = host
+        guard let sent = address.encodedHost, !sent.isEmpty, sent != host else { return host }
+        return "\(host) (\(sent))"
     }
 
     static func scheme(_ text: String) -> String? {

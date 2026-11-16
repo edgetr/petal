@@ -59,16 +59,31 @@ final class LinkPreviews {
 
     /// A page's title: its og:title, else its <title>.
     nonisolated static func title(in html: String) -> String? {
-        let patterns = [#"<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']"#, #"<title[^>]*>([^<]+)</title>"#]
-        for pattern in patterns {
+        func first(_ pattern: String, in text: String) -> String? {
             guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
-                  let match = regex.firstMatch(in: html, range: NSRange(html.startIndex..., in: html)),
-                  let range = Range(match.range(at: 1), in: html) else { continue }
-            let title = String(html[range]).replacingOccurrences(of: "&amp;", with: "&").replacingOccurrences(of: "&#39;", with: "'")
-                .replacingOccurrences(of: "&quot;", with: "\"").trimmingCharacters(in: .whitespacesAndNewlines)
-            if !title.isEmpty { return String(title.prefix(120)) }
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+                  let range = Range(match.range(at: 1), in: text) else { return nil }
+            return String(text[range])
         }
-        return nil
+        func tidy(_ found: String?) -> String? {
+            guard let found else { return nil }
+            let title = found.replacingOccurrences(of: "&amp;", with: "&").replacingOccurrences(of: "&#39;", with: "'")
+                .replacingOccurrences(of: "&quot;", with: "\"").trimmingCharacters(in: .whitespacesAndNewlines)
+            return title.isEmpty ? nil : String(title.prefix(120))
+        }
+        // One tag at a time, each no longer than a tag is: a page written to make this slow costs no more than any
+        // other (the page is anyone's: an address the person pasted).
+        var og: String?
+        if let meta = try? NSRegularExpression(pattern: #"<meta\b[^>]{0,2000}>"#, options: .caseInsensitive) {
+            for match in meta.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
+                guard let range = Range(match.range, in: html) else { continue }
+                let tag = String(html[range])
+                guard first(#"property=["'](og:title)["']"#, in: tag) != nil, let content = tidy(first(#"content=["']([^"']+)["']"#, in: tag)) else { continue }
+                og = content
+                break
+            }
+        }
+        return og ?? tidy(first(#"<title\b[^>]{0,500}>([^<]{1,2000})</title>"#, in: html))
     }
 
     func preview(_ url: String, title: String) { titles[url] = title }

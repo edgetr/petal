@@ -133,6 +133,14 @@ struct RoutineRulesCheck {
                && RoutineRules.opens("~/Plan.pdf") == .file(NSHomeDirectory() + "/Plan.pdf")
                && RoutineRules.opens("file:///Users/someone/Plan.pdf") == .file("/Users/someone/Plan.pdf"), "a file by its full path")
         expect(RoutineRules.opens("/Users/someone/shortcuts:run.txt") == .file("/Users/someone/shortcuts:run.txt"), "a path stays a path whatever is in it")
+        // Petal AI's own open (petal_apps): a web address or a full path, and nothing else.
+        expect(RoutineRules.asked("https://example.com/a") == .web(URL(string: "https://example.com/a")!), "Petal AI opens a web address")
+        expect(RoutineRules.asked("~/Plan.pdf") == .file(NSHomeDirectory() + "/Plan.pdf") && RoutineRules.asked("file:///Users/someone/Plan.pdf") == .file("/Users/someone/Plan.pdf"),
+               "and a file by its full path")
+        for item in ["shortcuts://run-shortcut?name=x", "ssh://host", "smb://host/share", "vnc://host", "x-apple.systempreferences:com.apple.x", "mailto:a@example.com",
+                     "javascript:alert(1)", "applescript://com.apple.scripteditor?action=new", "terminal://x", "notes.txt", "example.com", "com.apple.Terminal", ""] {
+            if case .refused(let why) = RoutineRules.asked(item) { expect(!why.isEmpty, "refused in words") } else { expect(false, "Petal AI never opens \(item.debugDescription)") }
+        }
         let never = ["shortcuts://run-shortcut?name=Send%20Report", "x-apple.systempreferences:com.apple.preference.security", "mailto:someone@example.com",
                      "tel:5550100", "javascript:alert(1)", "ssh://example.com", "vnc://example.com", "smb://example.com/share", "applescript://com.apple.scripteditor",
                      "message://%3Cid@example.com%3E", "https://", "http:///nohost", "file:relative", "data:text/html,hello", "", "   ", "obsidian://open?vault=x"]

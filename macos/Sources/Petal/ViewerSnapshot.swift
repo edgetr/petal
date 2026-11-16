@@ -241,6 +241,7 @@ enum ViewerCheck {
             failed = !outsideBetweenTries(deck: url) || failed
         }
         failed = !remote() || failed
+        failed = !madePage() || failed
         try? FileManager.default.removeItem(at: trashed)
         try? FileManager.default.removeItem(at: versionsRoot)
         if let samples { try? FileManager.default.removeItem(at: samples) }
@@ -2415,6 +2416,42 @@ enum ViewerCheck {
         server.stop()
         let ok = (blocked ?? nil) != nil && reachedBlocked == 0 && reachedOpen > 0
         print("remote: " + (ok ? "nothing loaded from the network (without the rule list: \(reachedOpen) reached it)" : "FAIL \(reachedBlocked) requests reached the network with the rule list, \(reachedOpen) without; pages \(blocked.map { $0 != nil } ?? false)"))
+        return ok
+    }
+
+    /// A page Petal AI made (petal_show's window) is only shown: what it names on the network is never asked for (a
+    /// picture, a style, a frame, a page to go on to), and its own script doesn't run. The same local server counts.
+    private static func madePage() -> Bool {
+        let server = LocalServer()
+        guard let port = server.start() else { print("page: FAIL no local server"); return false }
+        let folder = FileManager.default.temporaryDirectory.appending(path: "petal-page-check-\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let out = "http://127.0.0.1:\(port)"
+        let html = """
+            <!doctype html><html><head><meta charset="utf-8"><title>As written</title>
+            <link rel="stylesheet" href="\(out)/style.css"><meta http-equiv="refresh" content="0;url=\(out)/next">
+            <script>document.title = "A script ran"; new Image().src = "\(out)/script.png"; fetch("\(out)/fetch");</script></head>
+            <body><p>Words of a page.</p><img src="\(out)/picture.png" width="40" height="40"><iframe src="\(out)/frame"></iframe>
+            <form action="\(out)/form"><input name="a"></form></body></html>
+            """
+        let file = folder.appending(path: "page.html")
+        try? Data(html.utf8).write(to: file)
+        let window = PageWindow()
+        window.load(file, title: "A page", show: false)
+        pause(0.2)
+        wait(20) { !window.isLoading }
+        pause(2)
+        var title: String?
+        window.web.evaluateJavaScript("document.title") { value, _ in title = value as? String ?? "" }
+        wait(5) { title != nil }
+        let at = window.web.url
+        window.close()
+        let reached = server.hits
+        server.stop()
+        let ok = reached == 0 && title == "As written" && at?.isFileURL == true && at?.lastPathComponent == "page.html"
+        print("page: " + (ok ? "a page Petal AI made loads nothing from the network and runs no script"
+                             : "FAIL \(reached) requests reached the network; the title reads “\(title ?? "nothing")”; the window is at \(at?.absoluteString ?? "nowhere")"))
         return ok
     }
 

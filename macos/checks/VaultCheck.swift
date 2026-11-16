@@ -274,6 +274,11 @@ struct VaultCheck {
         let shop = details.items.first { $0.kind == .login }
         expect(shop?.sites == ["shop.example", "www.shop.example", "pay.example"], "every URL in the cell, each site once (got \(shop?.sites ?? []))")
         expect(VaultSite.hosts("https://a.example/?q=1,2") == ["a.example"], "a comma inside one address adds no site")
+        expect(VaultSite.hosts("android://Jzj5T2E45Hb33D-lk-EHZVCrb7a064dEicTwrTYQYGXO99JqE2YERhbMP1qLogwJiy87OsBzC09Gk094Z-U_hg==@com.squareup.cash/") == []
+               && VaultSite.site("ftp://example.com/") == nil && VaultSite.site("app://example.com") == nil, "another kind of address names no site to save a login for")
+        expect(VaultSite.shown("apple.com") == "apple.com" && VaultSite.shown("localhost:3000") == "localhost:3000", "a plain name is shown as it is")
+        expect(VaultSite.shown(VaultSite.host("https://xn--80ak6aa92e.com/checkout") ?? "") == "аррӏе.com (xn--80ak6aa92e.com)",
+               "a name in another alphabet is shown with the form it's sent as (\(VaultSite.shown(VaultSite.host("https://xn--80ak6aa92e.com/checkout") ?? "")))")
 
         let protonJSON = #"""
         {"version":"1.21","encrypted":false,"vaults":{"s1":{"name":"Personal","items":[
@@ -463,7 +468,13 @@ struct VaultCheck {
         expect(Vault.decide(key, .value, target: text, place: web("http://127.0.0.1/", tab: "http://127.0.0.1/")) == .fill, "a key on 127.0.0.1")
         expect(isAsk(Vault.decide(key, .value, target: text, place: web("file://localhost/Users/x/page.html"))), "file://localhost isn't this Mac's web page")
         expect(isAsk(Vault.decide(key, .value, target: text, place: web("ftp://localhost/"))), "only http and https on this Mac")
-        expect(Vault.decide(key, .value, target: text, place: native) == .fill, "a key into an app")
+        expect(isAsk(Vault.decide(key, .value, target: text, place: native)), "a key into an app it isn't saved for asks")
+        var typedThere = key
+        Vault.bind(&typedThere, to: native)
+        expect(Vault.decide(typedThere, .value, target: text, place: native) == .fill, "a key into the app it was typed for")
+        var otherMaker = typedThere
+        otherMaker.appSigners[native.bundle] = "SOMEONEELSE"
+        expect(isAsk(Vault.decide(otherMaker, .value, target: text, place: native)), "a key into that app by another maker asks")
         let stolen = Vault.decide(key, .value, target: text, place: web("https://0penai-billing.com/"))
         if case .ask(let title, let detail) = stolen {
             expect(title.contains("0penai-billing.com") && detail.contains("platform.openai.com"), "a key on another site asks, saying both")
@@ -472,7 +483,7 @@ struct VaultCheck {
         var bare = key
         bare.sites = []
         expect(isAsk(Vault.decide(bare, .value, target: text, place: web("https://example.com/"))), "a key with no service asks on a site")
-        expect(Vault.decide(bare, .value, target: text, place: native) == .fill, "a key with no service fills into an app")
+        expect(isAsk(Vault.decide(bare, .value, target: text, place: native)), "a key with no service asks in an app")
 
         // Payment info: nothing before Buy; once Buy, every field; only https.
         let shop = web("https://checkout.shop.example/pay")

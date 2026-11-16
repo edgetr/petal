@@ -964,6 +964,8 @@ final class RunBrowser: @unchecked Sendable {
         }
         let stampBefore = lock.withLock { stamp }
         guard var frames = frameList(at.session), !frames.isEmpty else { return .failure(.closed) }
+        // Where the tab is now, however it got there: only a page `open` would take is told (and so given ids).
+        guard RunBrowserRules.landed(frames[0].url) else { return .failure(Problem(RunBrowserRules.notLanded(frames[0].url))) }
         var count = 0, more = false, title = ""
         let nodes = collect(0, frames: &frames, read: &count, depth: 0, more: &more, title: &title, deadline: Date().addingTimeInterval(8))
         guard count > 0 else { return .failure(Problem("The page couldn't be read (it may still be loading). Try wait, then read again.")) }
@@ -1067,6 +1069,9 @@ final class RunBrowser: @unchecked Sendable {
         var up = down
         up["type"] = "keyUp"
         up["text"] = nil
+        // A key goes to whatever page the tab is at: never one a run's browser doesn't work in (`landed`).
+        guard let top = frameList(session)?.first else { return .closed }
+        guard RunBrowserRules.landed(top.url) else { return Problem(RunBrowserRules.notLanded(top.url)) }
         guard !cancel.stopped else { return Problem(ComputerUse.stoppedText) }
         lock.withLock { activity = Date() }
         // A key is a press to the page too.
@@ -1082,8 +1087,10 @@ final class RunBrowser: @unchecked Sendable {
     func whereNow() -> (address: String, title: String)? {
         guard case .success(let at) = working(), var frames = frameList(at.session), !frames.isEmpty else { return nil }
         var title = ""
-        if world(&frames[0]), case .value(let found) = run("String(document.title).slice(0, 300)", in: frames[0], timeout: 3) { title = UIMap.tidy(found) }
-        return (frames[0].url, title)
+        // Nothing of a page a run's browser doesn't read is told, its title neither.
+        if RunBrowserRules.landed(frames[0].url), world(&frames[0]),
+           case .value(let found) = run("String(document.title).slice(0, 300)", in: frames[0], timeout: 3) { title = UIMap.tidy(found) }
+        return RunBrowserRules.told(address: frames[0].url, title: title)
     }
 
     /// Scrolls the page itself; where it is after ("at the top", "at the bottom", or between).
@@ -1093,8 +1100,9 @@ final class RunBrowser: @unchecked Sendable {
         case .failure(let problem): return .failure(problem)
         case .success(let at): session = at.session
         }
-        guard var frames = frameList(session), !frames.isEmpty, world(&frames[0]),
-              let expression = RunBrowserScript.call(RunBrowserScript.scroll, [direction]) else { return .failure(.closed) }
+        guard var frames = frameList(session), !frames.isEmpty else { return .failure(.closed) }
+        guard RunBrowserRules.landed(frames[0].url) else { return .failure(Problem(RunBrowserRules.notLanded(frames[0].url))) }
+        guard world(&frames[0]), let expression = RunBrowserScript.call(RunBrowserScript.scroll, [direction]) else { return .failure(.closed) }
         guard !cancel.stopped else { return .failure(Problem(ComputerUse.stoppedText)) }
         guard case .value(let json) = run(expression, in: frames[0]),
               let answer = try? JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any] else { return .failure(Problem("The page didn't scroll.")) }
@@ -1114,7 +1122,8 @@ final class RunBrowser: @unchecked Sendable {
             case .failure(let problem): return .failure(problem)
             case .success(let at): session = at.session
             }
-            if var frames = frameList(session), let expression = RunBrowserScript.call(RunBrowserScript.has, [words]) {
+            if var frames = frameList(session), RunBrowserRules.landed(frames.first?.url ?? ""),
+               let expression = RunBrowserScript.call(RunBrowserScript.has, [words]) {
                 for index in frames.indices.prefix(12) where world(&frames[index]) {
                     if case .value(let found) = run(expression, in: frames[index], timeout: 3), found == "1" { return .success(true) }
                 }
@@ -1625,9 +1634,10 @@ final class RunBrowsers {
     /// Returns what it ended and removed (for a check).
     @discardableResult
     nonisolated static func sweep(root: String, mine: Set<String>) -> (ended: [Int32], removed: [String]) {
+        // Nothing of a run's was ever there: no process is looked at. Only a real folder is swept, never a link
+        // standing where Petal's folder would be (what's removed would be somewhere else's).
+        guard (try? FileManager.default.attributesOfItem(atPath: root))?[.type] as? FileAttributeType == .typeDirectory else { return ([], []) }
         let folders = (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
-        // Nothing of a run's was ever there: no process is looked at.
-        guard FileManager.default.fileExists(atPath: root) else { return ([], []) }
         let plan = RunBrowserRules.leftovers(processes: processes(), folders: folders, root: root, mine: mine)
         for pid in plan.end { Darwin.kill(pid, SIGKILL) }
         if !plan.end.isEmpty { usleep(400_000) }

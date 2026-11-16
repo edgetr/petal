@@ -369,6 +369,9 @@ private final class BrowserChecker {
                 """)
             case "/frame":
                 return html("Frame", "<p>Inside the frame.</p><form><label for=\"fu\">Frame user</label><input id=\"fu\" name=\"username\"><label for=\"fp\">Frame password</label><input id=\"fp\" type=\"password\" name=\"password\"></form>")
+            case "/leaves":
+                // Sends itself where `open` wouldn't go: this Mac by a name that isn't its own, over plain http.
+                return html("Leaving", "<h1>Leaving</h1><script>setTimeout(function () { location.href = 'http://0.0.0.0:\(port)/two'; }, 50);</script>")
             case "/two":
                 return html("Second page", "<h1>Second page</h1><p>You got here.</p><a href=\"/\">Home</a>")
             case "/file":
@@ -984,6 +987,28 @@ private final class BrowserChecker {
             expect((read["left"] as? String)?.isEmpty == false, "and says what was left out (\(read["left"] ?? "nothing"))")
             expect(text.contains("link \"A link after them\""), "a control past the cut is still listed")
             return "4000 long headings told in \(text.count) characters, the rest said to be left out"
+        }
+
+        step("where a tab lands: only a page open would take is read or given keys") {
+            // Nothing answers on that port: the browser shows a page of its own, which is never read (so it has no
+            // ids to press) and never given a key.
+            let closed = browser("open", ["address": "http://127.0.0.1:1/"])
+            expect(!error(closed).isEmpty, "a page that doesn't load says so (\(closed))")
+            let own = browser("read")
+            expect(error(own).contains("page of its own") && page(own).isEmpty, "the browser's own page isn't read (\(own))")
+            let key = browser("key", ["key": "enter"])
+            expect(error(key).contains("page of its own"), "nor given a key (\(key))")
+            // A page that sends itself to plain http somewhere that isn't this Mac by its own name: wherever that
+            // ends (the page there, or the browser's own page for it), nothing of it is told and no key goes to it.
+            _ = browser("open", ["address": base() + "/leaves"])
+            _ = browser("wait", ["seconds": 2])
+            let left = browser("read")
+            expect(!error(left).isEmpty && page(left).isEmpty && !"\(left)".contains("You got here"), "a tab that left for somewhere open wouldn't go isn't read (\(left))")
+            expect(!error(browser("key", ["key": "enter"])).isEmpty, "nor given a key")
+            // And the run goes on: the next address opens and reads as ever.
+            _ = browser("open", ["address": base() + "/two"])
+            expect(page(browser("read")).contains("You got here"), "the next page opens and reads")
+            return "the browser's own error page and a page gone to plain http elsewhere: neither read, neither given a key; the next page read as ever"
         }
 
         step("the clipboard: no page writes it by itself, and a copied secret is cleared") {

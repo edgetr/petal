@@ -256,8 +256,9 @@ final class Assist {
         case "petal_trash": trash(args, caller: note, live: live, send, fail)
         case "petal_remember":
             guard config.bool("aiMemory") else { return fail("Memory is off in Petal's settings (aiMemory).") }
-            let text = (args["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = Self.memoryLine(args["text"] as? String ?? "")
             guard !text.isEmpty else { return fail("Nothing to remember.") }
+            guard memories.count < Self.memoryMost else { return fail("Memory is full (\(Self.memoryMost) things). Forget what's out of date with petal_forget first.") }
             let memory = remember(text, learned: args["learned"] as? Bool ?? false)
             did("Remembered \(quoted: memory.text, else: "something")", undo: .forget(memory.id))
             send(["remembered": memory.text, "id": memory.id])
@@ -831,20 +832,22 @@ final class Assist {
         case "open":
             // A run with hidden displays on opens on a display of its own (RunDisplays), unless it says the person's screen.
             let asked = args["on"] as? String
-            if let caller, app.displays.place(for: caller, asked: asked) == .display {
-                return openOnDisplay(name: name, target: target, caller: caller, label: label, live: live, send, fail)
-            }
-            if asked?.lowercased() == RunDisplayRules.Place.display.rawValue {
+            // What it opens besides an app is a web address, a document or a folder, never anything that runs
+            // (RoutineRules.asked; a file as it really is: NoteTasks.asked, off the main thread).
+            let onDisplay = caller.map { app.displays.place(for: $0, asked: asked) == .display } ?? false
+            if !onDisplay, asked?.lowercased() == RunDisplayRules.Place.display.rawValue {
                 return fail(app.config.bool("runDisplays") ? RunDisplayRules.unavailable : RunDisplayRules.off)
             }
-            if !target.isEmpty {
-                // An address or a file, in its app (or the one named).
-                let url = target.contains("://") ? URL(string: target) : URL(fileURLWithPath: (target as NSString).expandingTildeInPath)
-                guard let url else { return fail("That isn't an address or a file.") }
+            let open = { [weak self] (url: URL?) in
+                guard let self else { return }
+                if let caller, onDisplay {
+                    return self.openOnDisplay(name: name, target: target, url: url, caller: caller, label: label, live: live, send, fail)
+                }
+                guard let url else { return self.openApp(name, live: live, send, fail) }
                 // Finding the app (a scan of the Applications folders) and Launch Services wait on the disk or the
                 // app: off the main thread.
                 let opener = OpenedOnDisplay()
-                return Self.off(live, {
+                Self.off(live, {
                     let appURL = name.isEmpty ? nil : NSWorkspace.shared.urlForApplication(withBundleIdentifier: Self.bundleID(name))
                     opener.bundle = (appURL ?? NSWorkspace.shared.urlForApplication(toOpen: url)).flatMap { Bundle(url: $0)?.bundleIdentifier } ?? ""
                     // Its asker gone while the app was looked up: nothing opens.
@@ -864,17 +867,17 @@ final class Assist {
                     send(["opened": target])
                 }
             }
-            // The name is looked up off the main thread (it scans the Applications folders); the launch is the dock's.
-            var found: (id: String, url: URL?) = (name, nil)
-            Self.off(live, {
-                let id = Self.bundleID(name)
-                found = (id, NSWorkspace.shared.urlForApplication(withBundleIdentifier: id))
-            }) { [weak self] ran in
-                guard let self, ran, live() else { return }
-                guard found.url != nil else { return fail("No app called \(name) is installed.") }
-                self.app.docks.launch(found.id)
-                self.app.displays.handedOver(bundle: found.id)
-                send(["opened": Apps.name(found.id)])
+            guard !target.isEmpty else { return open(nil) }
+            switch RoutineRules.asked(target) {
+            case .refused(let why): return fail(why)
+            case .web(let url): return open(url)
+            case .file(let path):
+                var found: (url: URL?, refused: String) = (nil, "")
+                return Self.off(live, { found = NoteTasks.asked(path, inApp: !name.isEmpty) }) { ran in
+                    guard ran, live() else { return }
+                    guard let url = found.url else { return fail(found.refused) }
+                    open(url)
+                }
             }
         case "quit", "hide", "focus":
             guard let running = running(name) else { return fail("\(name) isn't open.") }
@@ -924,6 +927,22 @@ final class Assist {
         }
     }
 
+    /// An app by its name or bundle id, on the person's screen: the name is looked up off the main thread (it scans
+    /// the Applications folders); the launch is the dock's.
+    private func openApp(_ name: String, live: @escaping @Sendable () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+        var found: (id: String, url: URL?) = (name, nil)
+        Self.off(live, {
+            let id = Self.bundleID(name)
+            found = (id, NSWorkspace.shared.urlForApplication(withBundleIdentifier: id))
+        }) { [weak self] ran in
+            guard let self, ran, live() else { return }
+            guard found.url != nil else { return fail("No app called \(name) is installed.") }
+            self.app.docks.launch(found.id)
+            self.app.displays.handedOver(bundle: found.id)
+            send(["opened": Apps.name(found.id)])
+        }
+    }
+
     /// Opens an app, a file or an address on the caller's own hidden display: the app it opens in is found first,
     /// then its display (now, or once it's its turn), then its turn for that app (another run using it on its display
     /// has it until it ends or lets go: "Waiting for TextEdit"), then the open without activating anything, and the
@@ -931,15 +950,10 @@ final class Assist {
     /// before is moved: one the person had is never taken. Where nothing new would result (a browser already open
     /// takes an address as a tab in the person's own window; an app already open shows nothing new), nothing is
     /// opened and it says so. An app this open started is the run's to put away when it ends.
-    private func openOnDisplay(name: String, target: String, caller: String, label: String, live: @escaping @Sendable () -> Bool,
+    private func openOnDisplay(name: String, target: String, url: URL?, caller: String, label: String, live: @escaping @Sendable () -> Bool,
                                _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
-        var url: URL?
-        if !target.isEmpty {
-            url = target.contains("://") ? URL(string: target) : URL(fileURLWithPath: (target as NSString).expandingTildeInPath)
-            guard url != nil else { return fail("That isn't an address or a file.") }
-        } else if name.isEmpty {
-            return fail("Give an app, a file or an address to open.")
-        }
+        // `url`: what `target` names, already found to be a web address, a document or a folder (`apps`).
+        if url == nil, name.isEmpty { return fail("Give an app, a file or an address to open.") }
         // Which app: looked up off the main thread (it scans the Applications folders).
         let found = OpenedOnDisplay()
         Self.off(live, {
@@ -1252,10 +1266,32 @@ final class Assist {
         return gone
     }
 
-    /// What the chat is told it remembers.
+    /// What the chat is told it remembers: each thing as one short line, however it got into the file.
     func memoryBrief() -> String {
         guard config.bool("aiMemory") else { return "" }
-        return memories.map { "- \($0.text) [\($0.id)]" }.joined(separator: "\n")
+        return memories.prefix(Self.memoryMost).compactMap { memory -> String? in
+            let line = Self.memoryLine(memory.text)
+            return line.isEmpty ? nil : "- \(line) [\(Self.memoryLine(memory.id))]"
+        }.joined(separator: "\n")
+    }
+
+    /// The most things remembered, and the most one of them says.
+    nonisolated static let memoryMost = 200
+    nonisolated static let memoryLength = 300
+
+    /// One thing to remember, as it's kept and told: a single line of plain text (it goes into every chat's
+    /// instructions), with nothing in it that doesn't show.
+    nonisolated static func memoryLine(_ text: String) -> String {
+        let plain = String(String.UnicodeScalarView(text.unicodeScalars.map { scalar -> Unicode.Scalar in
+            // (The joiners letters and emoji are written with stay.)
+            if scalar.value == 0x200C || scalar.value == 0x200D { return scalar }
+            switch scalar.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator, .privateUse, .unassigned: return " "
+            default: return scalar
+            }
+        }))
+        let words = plain.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        return String(words.prefix(memoryLength))
     }
 }
 

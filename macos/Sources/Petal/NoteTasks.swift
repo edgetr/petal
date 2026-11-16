@@ -62,7 +62,8 @@ enum NoteTasks {
     static let neverOpened: Set<String> = ["app", "command", "tool", "workflow", "terminal", "pkg", "mpkg", "dmg", "sparseimage", "sparsebundle",
                                             "webloc", "inetloc", "fileloc", "sh", "zsh", "bash", "csh", "ksh", "py", "rb", "pl", "scpt", "scptd",
                                             "applescript", "action", "definition", "jar", "prefpane", "kext", "plugin", "bundle", "service", "framework",
-                                            "dylib", "so", "osax", "mobileconfig", "xpc", "appex", "url", "alias", "saver", "qlgenerator", "mdimporter"]
+                                            "dylib", "so", "osax", "mobileconfig", "xpc", "appex", "url", "alias", "saver", "qlgenerator", "mdimporter",
+                                            "playground", "playgroundbook"]
 
     static let neverTypes: [String] = ["com.apple.application", "com.apple.application-bundle", "public.executable", "public.unix-executable",
                                        "public.script", "public.shell-script", "com.apple.applescript.script", "com.apple.applescript.script-bundle",
@@ -70,7 +71,7 @@ enum NoteTasks {
                                        "com.apple.terminal.session", "com.apple.terminal.settings", "com.apple.installer-package-archive",
                                        "com.apple.installer-meta-package", "com.apple.disk-image", "public.disk-image", "com.apple.alias-file",
                                        "public.symlink", "com.apple.web-internet-location", "com.apple.internet-location",
-                                       "com.apple.file-internet-location", "com.apple.finder.file-location"]
+                                       "com.apple.file-internet-location", "com.apple.finder.file-location", "com.apple.dt.playground"]
 
     /// A file as it really is: its alias or symbolic links resolved, then what it is (`fileAction`). The resolved file
     /// is what's opened or shown. Off the main thread.
@@ -110,6 +111,30 @@ enum NoteTasks {
         let values = try? real.resourceValues(forKeys: [.contentTypeKey, .isDirectoryKey, .isSymbolicLinkKey, .isAliasFileKey])
         guard FileManager.default.fileExists(atPath: real.path), values?.isSymbolicLink != true, values?.isAliasFile != true else { return (real, .never) }
         return (real, routineFile(type: values?.contentType, ext: real.pathExtension, isDirectory: values?.isDirectory == true))
+    }
+
+    /// A file Petal AI asked to open (petal_apps), as it really is (its alias or links followed: `routine`, the rule
+    /// Open all and routines go by): a document is opened and a folder shown; an app is opened by its name, never
+    /// from a path; a script, a program, an installer or a file that points elsewhere is never opened. `inApp`: an
+    /// app was named to open it in, so it's never a file that can be run (a terminal runs what it's handed). Reads
+    /// the disk: off the main thread.
+    nonisolated static func asked(_ path: String, inApp: Bool) -> (url: URL?, refused: String) {
+        let named = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: named.path) else { return (nil, "No file at \(path).") }
+        let (real, what) = routine(named)
+        let name = real.lastPathComponent
+        switch what {
+        case .open, .folder:
+            var isFolder: ObjCBool = false
+            if inApp, FileManager.default.fileExists(atPath: real.path, isDirectory: &isFolder), !isFolder.boolValue,
+               FileManager.default.isExecutableFile(atPath: real.path) {
+                return (nil, "\(name) can be run as a program, so Petal AI doesn't hand it to an app. The person can open it themselves.")
+            }
+            return (real, "")
+        case .launch: return (nil, "\(name) is an app: open it by its name (app), not from a path.")
+        case .never:
+            return (nil, "\(name) isn't a document Petal AI opens (it opens documents and folders, never code, scripts, programs, installers, archives or files that point somewhere else). Open its folder to show it to the person, who can open it themselves.")
+        }
     }
 
     /// A task's file as it is now, found by the one file resolver (ViewerFiles: the very file it was put away as, by

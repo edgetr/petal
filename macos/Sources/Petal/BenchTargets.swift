@@ -172,7 +172,7 @@ enum BenchTargets {
             window.load(file, title: "A long page", show: false)
             let until = Date().addingTimeInterval(10)
             RunLoop.main.run(until: Date().addingTimeInterval(0.001))
-            while window.web.isLoading && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.001)) }
+            while window.isLoading && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.001)) }
             let parts = WindowBench.frame(window)
             samples.append(.init(ms: WindowBench.ms(start, WindowBench.now()), update: parts.update, draw: parts.draw,
                                  cpu: WindowBench.threadCPU() - cpu, bodies: 0, settleCPU: 0))

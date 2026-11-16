@@ -376,7 +376,7 @@ perl -0777 -ne '
     unless (/run\.reviewed = ""/ && /if let reviewed = run\.reviewed \{ return NoteHelp\.Result\(opinion: ink, reviewed: reviewed, steps: steps, helper: helper, asks: asks\) \}/
             && !/withOpinion|run\.carried|carried:/ && /run\.reviewed = NoteHelp\.inkHash\(primary\)\s*raw\.answer = primary\?\.text/
             && /let model = asked\?\.model \?\? run\.holes.*?self\.secondOpinion\(paper, model, asked: words, tree: run\.tree\)/s
-            && /folder: tree, placed: tree == nil\)\)/ && /where run\.launch != nil && run\.kind\.placed/ && /= run\.kind\.placed \? NoteHelp\.requirement\(/
+            && /folder: tree, placed: tree == nil, foreign: tree != nil\)\)/ && /where run\.launch != nil && run\.kind\.placed/ && /= run\.kind\.placed \? NoteHelp\.requirement\(/
             && /if run\.kind\.placed, let required = run\.requiredPlace \{/) { print "NoteHelpers: a second opinion must add only its own opinion and be bound to its place\n"; exit 1 }
     for my $f (qw(fail stopped)) { unless (/func $f\([^\n]*end\(run, \./) { print "NoteHelpers: $f must end through end\n"; exit 1 } }
     print "helpers: second opinions add only their own opinion, failures included; reviewers bound to their place\n";
