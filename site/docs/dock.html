@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121316" media="(prefers-color-scheme: dark)">
+  <title>The dock: Petal docs</title>
+  <meta name="description" content="How Petal&#x27;s dock works across Desktops and screens: apps, website shortcuts, stacks, previews, now playing and window tiling.">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="The dock: Petal docs">
+  <meta property="og:description" content="How Petal&#x27;s dock works across Desktops and screens: apps, website shortcuts, stacks, previews, now playing and window tiling.">
+  <meta property="og:url" content="https://petal.codes/docs/dock">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://petal.codes/docs/dock">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme.js"></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <!-- Every docs page repeats this header, the sidebar and the footer: a change to one goes on all of them. -->
+  <header class="dtop">
+    <div class="dtop-in">
+      <a class="brand" href="/"><img src="/icon.svg" width="32" height="32" alt="">Petal</a>
+      <a class="dtop-link" href="/docs" aria-current="page">Docs</a>
+      <a class="dtop-link" href="https://github.com/edgetr/petal">GitHub</a>
+      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
+      <a class="dtop-get" href="/download/mac">Download</a>
+    </div>
+  </header>
+
+  <div class="field pink dhead">
+    <div class="dwrap">
+      <p class="crumb"><a href="/docs">Docs</a> <span aria-hidden="true">›</span> Your dock</p>
+      <h1>The dock</h1>
+      <p class="lede">Petal gives you one dock with the same apps on every Desktop and one on each screen. When you add many apps, icons shrink to fit.</p>
+    </div>
+  </div>
+
+  <div class="dwrap docs">
+    <main id="main" class="dmain">
+      <article class="prose">
+<h2 id="what-sits-in-the-dock">What sits in the dock</h2>
+<p>From one end to the other, the dock holds:</p>
+<ul><li>The AI button (when an AI is chosen), with its usage ring; press <kbd>⌃⌥Space</kbd> to open <a href="/docs/petal-ai">Petal AI</a>.</li><li>Finder.</li><li>The note pad (while <a href="/docs/notes">Petal Notes</a> is on); click for a new note, like <kbd>⌃⌥N</kbd>, or drag a paper off it to place one.</li><li>Your kept apps, followed by open apps you didn't keep.</li><li><code>+</code> to add apps, folders or websites.</li><li>Now playing for Music and Spotify, with album art.</li><li>Minimized windows as thumbnails.</li><li>Folder stacks, with Downloads and Screenshots by default.</li><li>Trash.</li></ul>
+<h2 id="adding-opening-and-removing">Adding, opening and removing</h2>
+<p>Click <code>+</code> to search (“Add an app, folder or website…”), or drag an app, folder or web address straight onto the dock. A folder becomes a stack showing its newest files first; with “Download progress on stacks” on, active downloads show a progress ring. Drop documents onto an app to open them in it, and drag an app off the dock to remove it.</p>
+<p>Website shortcuts fetch the site's own icon, show a small globe and open in your default browser. Right-click one for “Open in Browser” or “Remove from Dock”.</p>
+<h2 id="previews-badges-and-menus">Previews, badges and menus</h2>
+<p>Hover over a running app to see live window previews (requires Screen Recording). Badges appear on app icons, and with “Bounce” on an icon bounces once when its badge goes up.</p>
+<ul><li>Right-click an app for its “Windows” (when “Its windows” is on), “Recent” files, “Open”, its own new-item command (such as “New Message”), “Keep in Dock” or “Remove from Dock”, “Show in Finder”, “Minimize All”, “Hide” and “Quit” (hold <kbd>Option</kbd> for “Force Quit”).</li><li>Right-click a minimized window for “Show” or “Close Window”.</li><li>Right-click now playing for “Previous”, “Next” or “Show Player”.</li><li>Right-click the dock's background for “Position” (Left, Bottom or Right), “Auto-hide”, “Anything else? Ask Petal AI…”, “Petal Settings…”, “Use macOS’s Dock” and “Quit Petal”.</li></ul>
+<h2 id="full-screen-and-mission-control">Full screen and Mission Control</h2>
+<p>On a full-screen Space, Petal's dock steps out of the way and comes out when you reach the screen's edge. In Mission Control, macOS's own Dock appears.</p>
+<aside class="aside"><p><b>Caveat.</b> In full screen, macOS's own Dock can still slide out at the screen's edge. macOS does not let Petal turn that off.</p></aside>
+<h2 id="tiling-windows">Tiling windows</h2>
+<p>Turn on Settings › Dock › “Tile windows” (off by default) to make windows sit side by side and fill the screen. Turning it off leaves every window where it is. Dialogs, sheets, fixed-size, minimized and full-screen windows stay floating.</p>
+<p>Drag a window onto another to swap them, or use the keyboard:</p>
+<ul><li><kbd>⌃⌥</kbd> with an arrow key moves focus to the window in that direction.</li><li><kbd>⌃⌥⇧</kbd> with an arrow key swaps places with that window.</li><li><kbd>⌃⌥T</kbd> floats or tiles the front window.</li><li><kbd>⌃⌥R</kbd> evens out the layout.</li></ul>
+<h2 id="switching-back-to-macos-s-dock">Switching back to macOS's Dock</h2>
+<p>Choose “Use macOS’s Dock” from the menu-bar mark or the dock's background menu, or change “Which dock” in Settings › Dock.</p>
+<aside class="aside"><p><b>In Terminal.</b> Run <code>petal dock macos</code> to switch to macOS's Dock, or <code>petal dock petal</code> to switch back.</p></aside>
+</article>
+      <nav class="pager" aria-label="Previous and next"><a class="pn prev" href="/docs/getting-started"><span>Previous</span>Getting started</a><a class="pn next n-yellow" href="/docs/customize"><span>Next</span>Make it yours</a></nav>
+    </main>
+    <div class="side-wrap">
+        <nav class="side" aria-label="Docs">
+        <a href="/docs">Overview</a>
+        <p class="side-group">Start</p>
+        <a class="s-paper" href="/docs/getting-started">Getting started</a>
+        <p class="side-group">Your dock</p>
+        <a class="s-pink" href="/docs/dock" aria-current="page">The dock</a>
+        <a class="s-yellow" href="/docs/customize">Make it yours</a>
+        <a class="s-yellow" href="/docs/settings">Settings</a>
+        <p class="side-group">Notes</p>
+        <a class="s-orange" href="/docs/notes">Petal Notes</a>
+        <a class="s-orange" href="/docs/helpers">Helpers in notes</a>
+        <p class="side-group">Petal AI</p>
+        <a class="s-blue" href="/docs/petal-ai">Petal AI</a>
+        <a class="s-green" href="/docs/routines">Routines</a>
+        <p class="side-group">The vault</p>
+        <a class="s-purple" href="/docs/vault">The vault</a>
+        <a class="s-purple" href="/docs/agents">Your own agents</a>
+        <p class="side-group">Help</p>
+        <a class="s-paper" href="/docs/support">Support</a>
+        </nav>
+    </div>
+  </div>
+
+  <footer class="dfoot">
+    <div class="dwrap">
+      <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt="">Petal</a>
+      <p class="dfoot-links"><a href="/download/mac">Download</a><a href="/docs">Docs</a><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="/docs/support">Support</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121316" media="(prefers-color-scheme: dark)">
+  <title>Petal AI: Petal docs</title>
+  <meta name="description" content="Ask Petal AI from the dock or selected text, review what it sees, approve actions and let it work on a hidden screen.">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="Petal AI: Petal docs">
+  <meta property="og:description" content="Ask Petal AI from the dock or selected text, review what it sees, approve actions and let it work on a hidden screen.">
+  <meta property="og:url" content="https://petal.codes/docs/petal-ai">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://petal.codes/docs/petal-ai">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme.js"></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <!-- Every docs page repeats this header, the sidebar and the footer: a change to one goes on all of them. -->
+  <header class="dtop">
+    <div class="dtop-in">
+      <a class="brand" href="/"><img src="/icon.svg" width="32" height="32" alt="">Petal</a>
+      <a class="dtop-link" href="/docs" aria-current="page">Docs</a>
+      <a class="dtop-link" href="https://github.com/edgetr/petal">GitHub</a>
+      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
+      <a class="dtop-get" href="/download/mac">Download</a>
+    </div>
+  </header>
+
+  <div class="field blue dhead">
+    <div class="dwrap">
+      <p class="crumb"><a href="/docs">Docs</a></p>
+      <h1>Petal AI</h1>
+      <p class="lede">Petal AI answers quick questions from the dock, helps with selected text and can use your apps on a hidden screen — always asking before risky steps.</p>
+    </div>
+  </div>
+
+  <div class="dwrap docs">
+    <main id="main" class="dmain">
+      <article class="prose">
+<h2 id="asking-petal-ai">Asking Petal AI</h2>
+<p>Click the AI button in the dock — or press <kbd>⌃⌥Space</kbd> — to open the AI panel; click again to close. An empty chat offers “Explain what I'm looking at”, “Tidy up my Downloads” and “Something in Petal isn't working right”. Drop files onto the AI button to attach them. Once an answer is done, choose “Stick here” to turn the conversation into a <a href="/docs/notes">Petal Note</a> on what was in front.</p>
+<p>Select text in any app to use the “Ask Petal AI” bar, or choose “Ask Petal AI” or “Add to Petal AI” from the macOS Services menu.</p>
+<p>Hover over the AI button to see each note or run currently at work (with “Stop”), or your remaining plan usage when idle. A <code>✦</code> on the button marks an answer you haven't seen. The ring around the button (“Usage ring around the AI button”) tracks plan usage, turning amber at 70% and red at 90%.</p>
+<h2 id="what-it-sees">What it sees</h2>
+<p>When it looks, Petal AI can see the front app and window, the active tab's address and title, selected text, open apps, the window's text, and a screenshot when asked. Password, card, code and key fields are blacked out in screenshots.</p>
+<p>For apps under Settings › Privacy › “Kept private” (by default: 1Password, Bitwarden, Passwords and Keychain Access), Petal AI sees only their names.</p>
+<h2 id="approvals-and-undo">Approvals and undo</h2>
+<p>When a step needs permission, Petal shows a card with “Allow”, “Always” and “Don't”. Purchases and mismatched details default to “Don't” and never offer “Always”.</p>
+<p>Under Settings › Petal AI › “Access”, choose “Ask before risky steps” (shown as “Safe steps only” with Codex) or “Full access”, which never asks before a step. “Full access” and “Always” cover Petal's own chats, note helpers and your own Claude Code and Codex; any other program is asked every time. Access can only be changed in Petal's settings. Review or remove past approvals in Settings › Privacy › “Allowed without asking”.</p>
+<p>Besides apps, Petal AI can open web addresses, documents and folders — never a script or program. Any file it removes goes to the Trash, never deleted outright. See and undo past actions in Settings › Privacy › “What Petal AI did”.</p>
+<h2 id="using-your-apps-and-hidden-screens">Using your apps and hidden screens</h2>
+<p>With Settings › Petal AI › “Let Petal AI use your apps” on (it is by default), it can read controls, click, type and choose menus with its own pointer (pink by default; change it in “Petal AI’s pointer”). Your pointer never moves. It asks before each app (“Let Petal AI use &lt;App&gt;?”), and “Stop” or <kbd>Esc</kbd> stops it immediately. It never acts inside private apps, password fields or Petal's own windows.</p>
+<p>With “Let Petal AI work on a hidden screen” (on by default), background runs open their windows on a display you don't see: one per 8 GB of memory (1 to 4). Extra runs show “Waiting for a display”, and two runs needing the same app take turns (such as “Waiting for TextEdit”). Hover the AI button to watch a run live with “Stop” and “Show me”. When it finishes, apps it started that you never used and that have nothing unsaved are asked to quit; anything else returns to your screen. Quick questions from the AI panel still run on your screen.</p>
+<p>For web tasks, a run can ask “Let Petal AI use a browser of its own?” and open a fresh, signed-out copy of Chrome, Edge, Brave, Vivaldi or Helium already on your Mac — never your default browser. Petal installs no browser, blocks downloads and file picking in it, and closes it when the work ends.</p>
+<h2 id="memory-and-standing-notes">Memory and standing notes</h2>
+<p>With Settings › Privacy › “Remember what helps” on, Petal AI keeps useful facts across chats; view or delete them in “What it remembers”. For standing instructions you write yourself, use Settings › Petal AI › “What Petal AI should always know” (<code>instructions.md</code>).</p>
+</article>
+      <nav class="pager" aria-label="Previous and next"><a class="pn prev" href="/docs/helpers"><span>Previous</span>Helpers in notes</a><a class="pn next n-green" href="/docs/routines"><span>Next</span>Routines</a></nav>
+    </main>
+    <div class="side-wrap">
+        <nav class="side" aria-label="Docs">
+        <a href="/docs">Overview</a>
+        <p class="side-group">Start</p>
+        <a class="s-paper" href="/docs/getting-started">Getting started</a>
+        <p class="side-group">Your dock</p>
+        <a class="s-pink" href="/docs/dock">The dock</a>
+        <a class="s-yellow" href="/docs/customize">Make it yours</a>
+        <a class="s-yellow" href="/docs/settings">Settings</a>
+        <p class="side-group">Notes</p>
+        <a class="s-orange" href="/docs/notes">Petal Notes</a>
+        <a class="s-orange" href="/docs/helpers">Helpers in notes</a>
+        <p class="side-group">Petal AI</p>
+        <a class="s-blue" href="/docs/petal-ai" aria-current="page">Petal AI</a>
+        <a class="s-green" href="/docs/routines">Routines</a>
+        <p class="side-group">The vault</p>
+        <a class="s-purple" href="/docs/vault">The vault</a>
+        <a class="s-purple" href="/docs/agents">Your own agents</a>
+        <p class="side-group">Help</p>
+        <a class="s-paper" href="/docs/support">Support</a>
+        </nav>
+    </div>
+  </div>
+
+  <footer class="dfoot">
+    <div class="dwrap">
+      <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt="">Petal</a>
+      <p class="dfoot-links"><a href="/download/mac">Download</a><a href="/docs">Docs</a><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="/docs/support">Support</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
+    </div>
+  </footer>
+</body>
+</html>
