@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121316" media="(prefers-color-scheme: dark)">
+  <title>Support: Petal docs</title>
+  <meta name="description" content="Check Petal with petal doctor, restore macOS&#x27;s Dock, report bugs, see what stays private, report security issues and contribute.">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="Support: Petal docs">
+  <meta property="og:description" content="Check Petal with petal doctor, restore macOS&#x27;s Dock, report bugs, see what stays private, report security issues and contribute.">
+  <meta property="og:url" content="https://petal.codes/docs/support">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://petal.codes/docs/support">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme.js"></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <!-- Every docs page repeats this header, the sidebar and the footer: a change to one goes on all of them. -->
+  <header class="dtop">
+    <div class="dtop-in">
+      <a class="brand" href="/"><img src="/icon.svg" width="32" height="32" alt="">Petal</a>
+      <a class="dtop-link" href="/docs" aria-current="page">Docs</a>
+      <a class="dtop-link" href="https://github.com/edgetr/petal">GitHub</a>
+      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
+      <a class="dtop-get" href="/download/mac">Download</a>
+    </div>
+  </header>
+
+  <div class="field paper dhead">
+    <div class="dwrap">
+      <p class="crumb"><a href="/docs">Docs</a> <span aria-hidden="true">›</span> Help</p>
+      <h1>Support</h1>
+      <p class="lede">Run Petal's built-in check first when something looks wrong, see what stays on your Mac, or report a bug or security issue.</p>
+    </div>
+  </div>
+
+  <div class="dwrap docs">
+    <main id="main" class="dmain">
+      <article class="prose">
+<h2 id="troubleshooting">Troubleshooting</h2>
+<p>Open Settings › About › “Check Petal” to check Petal's signature, damaged settings files, unknown settings, apps no longer installed, macOS's Dock hidden while Petal isn't running, the Dock helper, whether your AI is installed and signed in, and Petal's skill. Choose “Fix these” to repair what it safely can — damaged settings files are backed up before starting fresh.</p>
+<p>You can also open the AI panel and choose “Something in Petal isn't working right”.</p>
+<ul><li><b>Petal AI does nothing:</b> test <code>claude -p hi</code> (or <code>codex</code>) in Terminal to confirm the AI tool works on its own, then check Settings › Petal AI.</li><li><b>macOS's Dock didn't come back after a crash:</b> wait up to 30 seconds for Petal's Dock helper, or run <code>petal restore-dock</code> in Terminal.</li></ul>
+<aside class="aside"><p><b>In Terminal.</b> Run <code>petal doctor</code> for the same check, or <code>petal doctor --fix</code> to repair what it safely can. Run <code>petal logs</code> (optionally followed by a number of minutes; default 30) to read Petal's own log — it never records titles, addresses, file names or what you wrote. Run <code>petal restore-dock</code> to bring macOS's Dock back as you had it.</p></aside>
+<h2 id="reporting-a-problem">Reporting a problem</h2>
+<p>Choose Settings › About › “Report a problem…” (or run <code>petal report "&lt;what&gt;"</code> in Terminal). Petal leaves out your name, window titles and files, lets you review everything with “Show the report”, and posts to Petal's public GitHub page once you choose “Post it”. Posting needs a GitHub account.</p>
+<h2 id="privacy-in-brief">Privacy in brief</h2>
+<p>Petal has no server and no analytics. What you ask Petal AI goes through your own Claude Code, Codex or API key. Website shortcut icons are fetched from the sites themselves, and update checks go to GitHub.</p>
+<p>Your data stays on your Mac (and iCloud Drive for notes):</p>
+<ul><li>Vault items in your Mac's Keychain.</li><li>Settings in <code>~/.config/petal/</code>.</li><li>Notes in iCloud Drive's “Petal Notes” folder.</li><li>Chats and history in <code>~/Library/Application Support/Petal/</code>.</li></ul>
+<h2 id="security-issues">Security issues</h2>
+<p>Report security problems privately at <a href="https://github.com/edgetr/petal/security/advisories/new">GitHub Security Advisories</a> — never in a public issue. Include your Petal version (from Settings › About), your macOS version and steps to reproduce. Only the newest release receives fixes.</p>
+<h2 id="contributing">Contributing</h2>
+<p>Petal is open source under the MIT license at <a href="https://github.com/edgetr/petal">github.com/edgetr/petal</a>. Search <a href="https://github.com/edgetr/petal/issues">existing issues</a> before opening a bug or idea. New features need an issue the maker agreed to first; keep each pull request to one problem and show that it works. See <code>CONTRIBUTING.md</code> in the repository for the rest.</p>
+<aside class="aside"><p><b>Building from source.</b> Requires macOS 26 or later and Swift 6.2 or later command line tools, with no external dependencies:</p></aside>
+<pre class="code"><code>git clone https://github.com/edgetr/petal
+cd petal
+macos/build.sh
+macos/checks/run.sh</code></pre>
+</article>
+      <nav class="pager" aria-label="Previous and next"><a class="pn prev" href="/docs/agents"><span>Previous</span>Your own agents</a></nav>
+    </main>
+    <div class="side-wrap">
+        <nav class="side" aria-label="Docs">
+        <a href="/docs">Overview</a>
+        <p class="side-group">Start</p>
+        <a class="s-paper" href="/docs/getting-started">Getting started</a>
+        <p class="side-group">Your dock</p>
+        <a class="s-pink" href="/docs/dock">The dock</a>
+        <a class="s-yellow" href="/docs/customize">Make it yours</a>
+        <a class="s-yellow" href="/docs/settings">Settings</a>
+        <p class="side-group">Notes</p>
+        <a class="s-orange" href="/docs/notes">Petal Notes</a>
+        <a class="s-orange" href="/docs/helpers">Helpers in notes</a>
+        <p class="side-group">Petal AI</p>
+        <a class="s-blue" href="/docs/petal-ai">Petal AI</a>
+        <a class="s-green" href="/docs/routines">Routines</a>
+        <p class="side-group">The vault</p>
+        <a class="s-purple" href="/docs/vault">The vault</a>
+        <a class="s-purple" href="/docs/agents">Your own agents</a>
+        <p class="side-group">Help</p>
+        <a class="s-paper" href="/docs/support" aria-current="page">Support</a>
+        </nav>
+    </div>
+  </div>
+
+  <footer class="dfoot">
+    <div class="dwrap">
+      <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt="">Petal</a>
+      <p class="dfoot-links"><a href="/download/mac">Download</a><a href="/docs">Docs</a><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="/docs/support">Support</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121316" media="(prefers-color-scheme: dark)">
+  <title>The vault: Petal docs</title>
+  <meta name="description" content="Keep logins, contacts, addresses, cards and API keys in your Mac&#x27;s Keychain so Petal can fill forms without showing secrets to AI.">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="The vault: Petal docs">
+  <meta property="og:description" content="Keep logins, contacts, addresses, cards and API keys in your Mac&#x27;s Keychain so Petal can fill forms without showing secrets to AI.">
+  <meta property="og:url" content="https://petal.codes/docs/vault">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://petal.codes/docs/vault">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme.js"></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <!-- Every docs page repeats this header, the sidebar and the footer: a change to one goes on all of them. -->
+  <header class="dtop">
+    <div class="dtop-in">
+      <a class="brand" href="/"><img src="/icon.svg" width="32" height="32" alt="">Petal</a>
+      <a class="dtop-link" href="/docs" aria-current="page">Docs</a>
+      <a class="dtop-link" href="https://github.com/edgetr/petal">GitHub</a>
+      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
+      <a class="dtop-get" href="/download/mac">Download</a>
+    </div>
+  </header>
+
+  <div class="field purple dhead">
+    <div class="dwrap">
+      <p class="crumb"><a href="/docs">Docs</a></p>
+      <h1>The vault</h1>
+      <p class="lede">The vault stores logins, contact info, addresses, payment details and API keys in your Mac's Keychain so Petal can fill forms without Petal AI ever seeing a secret.</p>
+    </div>
+  </div>
+
+  <div class="dwrap docs">
+    <main id="main" class="dmain">
+      <article class="prose">
+<h2 id="what-goes-in-the-vault">What goes in the vault</h2>
+<p>Add items in Settings › Vault › “New item”. Five kinds are supported:</p>
+<ul><li>“Login”, with “Websites” and “Apps”.</li><li>“Contact info”, with a “This is me” option.</li><li>“Address”, which can belong to a contact.</li><li>“Payment info”.</li><li>“API key”.</li></ul>
+<p>Older items without a kind appear as “Unsorted” under “Tell Petal what each one is”; until you classify them, Petal asks before filling them.</p>
+<p>Every item is stored individually in your Mac's Keychain, never in a plain file. Viewing a saved secret or exporting requires Touch ID or your Mac password.</p>
+<h2 id="how-petal-ai-fills-forms">How Petal AI fills forms</h2>
+<p>Petal AI sees item kinds, titles, sites, usernames, contact info, addresses, and a card's name, last four digits and expiry. It never sees a password, card number, security code or API key — Petal types those values itself.</p>
+<ul><li>A login fills on its own only on its matching website or app. Anywhere else, a card asks first and defaults to “Don't”.</li><li>When a form needs something not yet saved, Petal shows a card for you to type it in, with “Save to your vault”.</li><li>For a new account, Petal can also generate a strong password, save it and fill it in.</li></ul>
+<p>Two-factor codes aren't supported yet, and Petal AI never asks for a password in chat.</p>
+<h2 id="buying">Buying</h2>
+<p>Purchases always stop for your approval with a card: “Buy on &lt;site&gt;?” showing “Petal AI says: “&lt;item, price&gt;”. Pays with &lt;card&gt;.” and buttons “Buy” and “Don't”. There is no “Always” option, and purchases only run over <code>https</code>.</p>
+<h2 id="import-and-export">Import and export</h2>
+<p>Open Settings › Vault › “Import” to bring in items “From Apple Passwords, Chrome, Proton Pass or Petal” by choosing or dropping a file. Afterward, Petal offers to move that file to the Trash.</p>
+<p>Choose “Export” to save “Everything, as a Petal file” or “Logins, for Apple Passwords or Chrome”.</p>
+<aside class="aside"><p><b>Careful.</b> An export holds your secrets as plain text. Remove the file once you have imported it where you need it.</p></aside>
+<h2 id="sharing-keys-with-coding-agents">Sharing keys with coding agents</h2>
+<p>You can let Claude Code, Codex and Terminal commands use API keys from your vault without seeing them. See <a href="/docs/agents">Your own agents</a>.</p>
+</article>
+      <nav class="pager" aria-label="Previous and next"><a class="pn prev" href="/docs/routines"><span>Previous</span>Routines</a><a class="pn next n-purple" href="/docs/agents"><span>Next</span>Your own agents</a></nav>
+    </main>
+    <div class="side-wrap">
+        <nav class="side" aria-label="Docs">
+        <a href="/docs">Overview</a>
+        <p class="side-group">Start</p>
+        <a class="s-paper" href="/docs/getting-started">Getting started</a>
+        <p class="side-group">Your dock</p>
+        <a class="s-pink" href="/docs/dock">The dock</a>
+        <a class="s-yellow" href="/docs/customize">Make it yours</a>
+        <a class="s-yellow" href="/docs/settings">Settings</a>
+        <p class="side-group">Notes</p>
+        <a class="s-orange" href="/docs/notes">Petal Notes</a>
+        <a class="s-orange" href="/docs/helpers">Helpers in notes</a>
+        <p class="side-group">Petal AI</p>
+        <a class="s-blue" href="/docs/petal-ai">Petal AI</a>
+        <a class="s-green" href="/docs/routines">Routines</a>
+        <p class="side-group">The vault</p>
+        <a class="s-purple" href="/docs/vault" aria-current="page">The vault</a>
+        <a class="s-purple" href="/docs/agents">Your own agents</a>
+        <p class="side-group">Help</p>
+        <a class="s-paper" href="/docs/support">Support</a>
+        </nav>
+    </div>
+  </div>
+
+  <footer class="dfoot">
+    <div class="dwrap">
+      <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt="">Petal</a>
+      <p class="dfoot-links"><a href="/download/mac">Download</a><a href="/docs">Docs</a><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="/docs/support">Support</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
+    </div>
+  </footer>
+</body>
+</html>

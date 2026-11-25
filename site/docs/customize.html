@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121316" media="(prefers-color-scheme: dark)">
+  <title>Make it yours: Petal docs</title>
+  <meta name="description" content="Change Petal by asking Petal AI, editing its settings files, using the petal command or modifying Petal&#x27;s own code.">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="Make it yours: Petal docs">
+  <meta property="og:description" content="Change Petal by asking Petal AI, editing its settings files, using the petal command or modifying Petal&#x27;s own code.">
+  <meta property="og:url" content="https://petal.codes/docs/customize">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://petal.codes/docs/customize">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme.js"></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <!-- Every docs page repeats this header, the sidebar and the footer: a change to one goes on all of them. -->
+  <header class="dtop">
+    <div class="dtop-in">
+      <a class="brand" href="/"><img src="/icon.svg" width="32" height="32" alt="">Petal</a>
+      <a class="dtop-link" href="/docs" aria-current="page">Docs</a>
+      <a class="dtop-link" href="https://github.com/edgetr/petal">GitHub</a>
+      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
+      <a class="dtop-get" href="/download/mac">Download</a>
+    </div>
+  </header>
+
+  <div class="field yellow dhead">
+    <div class="dwrap">
+      <p class="crumb"><a href="/docs">Docs</a> <span aria-hidden="true">›</span> Your dock</p>
+      <h1>Make it yours</h1>
+      <p class="lede">You can shape Petal by asking Petal AI in plain words, through the Settings window, by editing its files, or by changing Petal's own code.</p>
+    </div>
+  </div>
+
+  <div class="dwrap docs">
+    <main id="main" class="dmain">
+      <article class="prose">
+<h2 id="ask-petal-ai-or-search-settings">Ask Petal AI or search Settings</h2>
+<p>Ask Petal AI for what you want — “stop the icons bouncing”, “turn off the app glow”, “bigger icons” or “dock on the left”. You can also open “Petal Settings…” from the menu-bar mark or by right-clicking the dock, then type into “Ask Petal AI, or search settings” at the top of the window. See <a href="/docs/settings">Settings</a> for a page-by-page tour.</p>
+<p>For instructions you want Petal AI to keep in mind every time, write them in Settings › Petal AI › “What Petal AI should always know”.</p>
+<h2 id="changing-petal-s-own-code">Changing Petal's own code</h2>
+<p>When no setting does what you want, you can ask Petal AI to change Petal's own code. Petal builds a copy signed for this Mac and restarts into it. This requires Apple's command line tools.</p>
+<p>When a new Petal release arrives, Petal carries your changes onto the new version, handing any conflicts to your Claude Code or Codex. If that fails, your current Petal keeps running, nothing is lost and an alert says “Petal &lt;version&gt; couldn't take your changes” with “OK” and “Report…”.</p>
+<aside class="aside"><p><b>In Terminal.</b> Manage personal code changes yourself with <code>petal personal init</code>, make your edits, then run <code>petal personal save "&lt;what changed&gt;"</code>. Other subcommands are <code>status</code>, <code>list</code>, <code>undo</code>, <code>reset</code>, <code>retry</code> and <code>restore</code>.</p></aside>
+<h2 id="config-files">Config files</h2>
+<aside class="aside"><p><b>For engineers.</b> Petal keeps its config in <code>~/.config/petal/</code> and reloads files within a second when you save them:</p>
+<ul><li><code>settings.json</code> holds every setting.</li><li><code>dock.json</code> holds the dock's apps in order, position, auto-hide and related layout.</li><li><code>instructions.md</code> holds the same text as “What Petal AI should always know”.</li></ul>
+<p>Hand edits that would give Petal AI more power — widening its access, letting it use your apps or removing apps from “Kept private” — are refused and put back. Those change only in Petal's own settings.</p></aside>
+<h2 id="the-petal-command">The <code>petal</code> command</h2>
+<aside class="aside"><p><b>For engineers.</b> While Settings › Petal AI › “Let other AI agents change Petal” is on, Petal links the <code>petal</code> command at <code>~/.local/bin/petal</code>. See <a href="/docs/agents">Your own agents</a> for <code>petal run</code> and vault keys.</p></aside>
+<pre class="code"><code>petal apps                the dock's apps, in the order they show
+petal get                 everything about the dock: settings (with help), its apps, files
+petal set &lt;key&gt; &lt;value&gt;   change a setting (value as JSON: true, 44, "#d9367f", ["~/Downloads"])
+petal dock [petal|macos]  which dock is showing, or switch
+petal ask | chat &lt;text&gt;   open the AI panel, or open it with &lt;text&gt; typed for you to send
+petal chats               your kept chats with Petal AI, to read again or carry on
+petal search | settings   open the "+" search, or Petal's settings (settings privacy: a page by name)
+petal restart | update    restart Petal, or check for a new one
+petal doctor [--fix]      check Petal, and repair what it safely can
+petal report "&lt;what&gt;"     tell Petal's maker what went wrong (a GitHub issue; shown to you first)
+petal restore-dock        give macOS its Dock back, even if Petal crashed
+petal logs [&lt;minutes&gt;]    Petal's own log, the last 30 minutes (or as many as asked)
+petal personal …          your own changes to Petal's code, kept through updates (petal personal help)
+petal run --key "&lt;title&gt;" [--env NAME] [--stdin] -- &lt;command…&gt;</code></pre>
+</article>
+      <nav class="pager" aria-label="Previous and next"><a class="pn prev" href="/docs/dock"><span>Previous</span>The dock</a><a class="pn next n-yellow" href="/docs/settings"><span>Next</span>Settings</a></nav>
+    </main>
+    <div class="side-wrap">
+        <nav class="side" aria-label="Docs">
+        <a href="/docs">Overview</a>
+        <p class="side-group">Start</p>
+        <a class="s-paper" href="/docs/getting-started">Getting started</a>
+        <p class="side-group">Your dock</p>
+        <a class="s-pink" href="/docs/dock">The dock</a>
+        <a class="s-yellow" href="/docs/customize" aria-current="page">Make it yours</a>
+        <a class="s-yellow" href="/docs/settings">Settings</a>
+        <p class="side-group">Notes</p>
+        <a class="s-orange" href="/docs/notes">Petal Notes</a>
+        <a class="s-orange" href="/docs/helpers">Helpers in notes</a>
+        <p class="side-group">Petal AI</p>
+        <a class="s-blue" href="/docs/petal-ai">Petal AI</a>
+        <a class="s-green" href="/docs/routines">Routines</a>
+        <p class="side-group">The vault</p>
+        <a class="s-purple" href="/docs/vault">The vault</a>
+        <a class="s-purple" href="/docs/agents">Your own agents</a>
+        <p class="side-group">Help</p>
+        <a class="s-paper" href="/docs/support">Support</a>
+        </nav>
+    </div>
+  </div>
+
+  <footer class="dfoot">
+    <div class="dwrap">
+      <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt="">Petal</a>
+      <p class="dfoot-links"><a href="/download/mac">Download</a><a href="/docs">Docs</a><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="/docs/support">Support</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
+    </div>
+  </footer>
+</body>
+</html>

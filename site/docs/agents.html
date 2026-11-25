@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121316" media="(prefers-color-scheme: dark)">
+  <title>Your own agents: Petal docs</title>
+  <meta name="description" content="Connect your own Claude Code or Codex to Petal&#x27;s tools and notes, and pass vault API keys to commands without exposing them.">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="Your own agents: Petal docs">
+  <meta property="og:description" content="Connect your own Claude Code or Codex to Petal&#x27;s tools and notes, and pass vault API keys to commands without exposing them.">
+  <meta property="og:url" content="https://petal.codes/docs/agents">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://petal.codes/docs/agents">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme.js"></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <!-- Every docs page repeats this header, the sidebar and the footer: a change to one goes on all of them. -->
+  <header class="dtop">
+    <div class="dtop-in">
+      <a class="brand" href="/"><img src="/icon.svg" width="32" height="32" alt="">Petal</a>
+      <a class="dtop-link" href="/docs" aria-current="page">Docs</a>
+      <a class="dtop-link" href="https://github.com/edgetr/petal">GitHub</a>
+      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
+      <a class="dtop-get" href="/download/mac">Download</a>
+    </div>
+  </header>
+
+  <div class="field purple dhead">
+    <div class="dwrap">
+      <p class="crumb"><a href="/docs">Docs</a> <span aria-hidden="true">›</span> The vault</p>
+      <h1>Your own agents</h1>
+      <p class="lede">Petal connects to your own Claude Code and Codex so they can read and change the dock, work with Petal Notes and run commands with vault API keys they never see.</p>
+    </div>
+  </div>
+
+  <div class="dwrap docs">
+    <main id="main" class="dmain">
+      <article class="prose">
+<h2 id="connecting-claude-code-and-codex">Connecting Claude Code and Codex</h2>
+<p>Turn on Settings › Petal AI › “Let other AI agents change Petal” (on by default). Petal registers its tools with Claude Code (<code>claude mcp add -s user petal …</code>) and Codex (<code>codex mcp add petal …</code>), installs its skill for each and links the <code>petal</code> command at <code>~/.local/bin/petal</code>.</p>
+<p>Turning the switch off removes all of it. While it is on, Petal's tools are available anywhere that runs your Claude Code or Codex, such as a terminal or T3 Code.</p>
+<h2 id="what-agents-can-and-cannot-change">What agents can and cannot change</h2>
+<p>Connected agents can read and change settings and the dock, read and write <a href="/docs/notes">Petal Notes</a>, and use <a href="/docs/petal-ai">Petal AI's</a> tools.</p>
+<p>They can never widen Petal AI's access, turn on “Let Petal AI use your apps”, or remove apps from “Kept private”. Those stay in Petal's own settings.</p>
+<h2 id="vault-keys-for-agents">Vault keys for agents</h2>
+<p>When an agent runs a command that needs an API key from <a href="/docs/vault">the vault</a>, the first use in a project shows a card naming who is asking, what key it wants, the command and the folder — for example: “Codex in T3 Code wants your Anthropic key for “npm test” in ~/petal”.</p>
+<p>Choose one of three buttons:</p>
+<ul><li>“Allow once” for that single run.</li><li>“Always for this project”, available only for your own signed Claude Code or Codex, and never for your home folder.</li><li>“Don't” to refuse.</li></ul>
+<p>Manage saved grants in Settings › Vault › “Other AI agents”, where you can “Remove” any grant or choose “Allow an agent” to add one ahead of time.</p>
+<aside class="aside"><p><b>Keep in mind.</b> Agents ask first unless allowed in Settings › Vault › “Other AI agents”. They never see a password or key directly, though a command written to print one can still reveal it.</p></aside>
+<h2 id="passing-a-key-in-terminal">Passing a key in Terminal</h2>
+<aside class="aside"><p><b>For engineers.</b> Use <code>petal run</code> to give a command a key from the vault without putting it on the command line:</p></aside>
+<pre class="code"><code>petal run --key "&lt;title&gt;" [--env NAME] [--stdin] -- &lt;command…&gt;</code></pre>
+<p>Petal puts the key into the matching environment variable (<code>ANTHROPIC_API_KEY</code>, <code>OPENAI_API_KEY</code>, <code>GEMINI_API_KEY</code>, <code>XAI_API_KEY</code>, <code>GITHUB_TOKEN</code> or <code>STRIPE_SECRET_KEY</code>, or the name you pass with <code>--env</code>), or pipes it on standard input with <code>--stdin</code>. Any occurrence of the key in what the command prints is replaced with <code>[&lt;title&gt; key]</code>.</p>
+<p>Keys shorter than 16 characters are refused. Never pass a key as a command-line argument.</p>
+</article>
+      <nav class="pager" aria-label="Previous and next"><a class="pn prev" href="/docs/vault"><span>Previous</span>The vault</a><a class="pn next n-paper" href="/docs/support"><span>Next</span>Support</a></nav>
+    </main>
+    <div class="side-wrap">
+        <nav class="side" aria-label="Docs">
+        <a href="/docs">Overview</a>
+        <p class="side-group">Start</p>
+        <a class="s-paper" href="/docs/getting-started">Getting started</a>
+        <p class="side-group">Your dock</p>
+        <a class="s-pink" href="/docs/dock">The dock</a>
+        <a class="s-yellow" href="/docs/customize">Make it yours</a>
+        <a class="s-yellow" href="/docs/settings">Settings</a>
+        <p class="side-group">Notes</p>
+        <a class="s-orange" href="/docs/notes">Petal Notes</a>
+        <a class="s-orange" href="/docs/helpers">Helpers in notes</a>
+        <p class="side-group">Petal AI</p>
+        <a class="s-blue" href="/docs/petal-ai">Petal AI</a>
+        <a class="s-green" href="/docs/routines">Routines</a>
+        <p class="side-group">The vault</p>
+        <a class="s-purple" href="/docs/vault">The vault</a>
+        <a class="s-purple" href="/docs/agents" aria-current="page">Your own agents</a>
+        <p class="side-group">Help</p>
+        <a class="s-paper" href="/docs/support">Support</a>
+        </nav>
+    </div>
+  </div>
+
+  <footer class="dfoot">
+    <div class="dwrap">
+      <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt="">Petal</a>
+      <p class="dfoot-links"><a href="/download/mac">Download</a><a href="/docs">Docs</a><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="/docs/support">Support</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
+    </div>
+  </footer>
+</body>
+</html>

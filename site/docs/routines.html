@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121316" media="(prefers-color-scheme: dark)">
+  <title>Routines: Petal docs</title>
+  <meta name="description" content="Describe a rule once to sort downloads, move files, open or hide apps or run Shortcuts automatically, with Put back undo.">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="Routines: Petal docs">
+  <meta property="og:description" content="Describe a rule once to sort downloads, move files, open or hide apps or run Shortcuts automatically, with Put back undo.">
+  <meta property="og:url" content="https://petal.codes/docs/routines">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://petal.codes/docs/routines">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme.js"></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <!-- Every docs page repeats this header, the sidebar and the footer: a change to one goes on all of them. -->
+  <header class="dtop">
+    <div class="dtop-in">
+      <a class="brand" href="/"><img src="/icon.svg" width="32" height="32" alt="">Petal</a>
+      <a class="dtop-link" href="/docs" aria-current="page">Docs</a>
+      <a class="dtop-link" href="https://github.com/edgetr/petal">GitHub</a>
+      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
+      <a class="dtop-get" href="/download/mac">Download</a>
+    </div>
+  </header>
+
+  <div class="field green dhead">
+    <div class="dwrap">
+      <p class="crumb"><a href="/docs">Docs</a> <span aria-hidden="true">›</span> Petal AI</p>
+      <h1>Routines</h1>
+      <p class="lede">Tell Petal a rule once in plain words and it keeps running in the background — sorting files, tidying folders, opening or hiding apps and running Shortcuts.</p>
+    </div>
+  </div>
+
+  <div class="dwrap docs">
+    <main id="main" class="dmain">
+      <article class="prose">
+<h2 id="making-a-routine">Making a routine</h2>
+<p>Open Settings › Routines › “Make a routine” and choose “Ask Petal AI”. Describe what you want in plain words, such as:</p>
+<ul><li>“Keep my Downloads tidy”</li><li>“When a PDF lands in Downloads, file it under Receipts”</li><li>“When I open Xcode, hide Messages”</li></ul>
+<p>Petal AI turns your words into a routine once, when saving. After that, runs use no AI at all — except when sorting files by what they are.</p>
+<h2 id="triggers-and-actions">Triggers and actions</h2>
+<p>A routine can start when:</p>
+<ul><li>A file lands in a folder, matched by type or name.</li><li>An app opens or comes to the front.</li><li>A set time arrives, on the days you choose.</li></ul>
+<p>When triggered, a routine can:</p>
+<ul><li>Sort files by kind, or by what they are.</li><li>Move files to a folder.</li><li>Open apps, web addresses or documents (never a script or program).</li><li>Hide apps.</li><li>Run a Shortcut.</li></ul>
+<p>Routines act on new files as they arrive; they touch existing files only when you ask.</p>
+<h2 id="safety-and-undoing-moves">Safety and undoing moves</h2>
+<p>Petal asks before saving a routine that opens something or runs a Shortcut, and asks before tidying 10 or more files at once.</p>
+<p>Files are only moved — never deleted, and never moved over another file. Everything a routine did appears in Settings › Routines › “What they did”, with “Put back” to undo any move.</p>
+<h2 id="managing-routines">Managing routines</h2>
+<p>In Settings › Routines:</p>
+<ul><li>Switch “Run my routines” off to pause every routine at once.</li><li>Under “Your routines”, each entry shows its words, “Last ran …”, an on/off switch and <code>×</code> to delete it.</li></ul>
+<p>Deleting a routine leaves any moved files where they are, and you can still put them back from “What they did”.</p>
+</article>
+      <nav class="pager" aria-label="Previous and next"><a class="pn prev" href="/docs/petal-ai"><span>Previous</span>Petal AI</a><a class="pn next n-purple" href="/docs/vault"><span>Next</span>The vault</a></nav>
+    </main>
+    <div class="side-wrap">
+        <nav class="side" aria-label="Docs">
+        <a href="/docs">Overview</a>
+        <p class="side-group">Start</p>
+        <a class="s-paper" href="/docs/getting-started">Getting started</a>
+        <p class="side-group">Your dock</p>
+        <a class="s-pink" href="/docs/dock">The dock</a>
+        <a class="s-yellow" href="/docs/customize">Make it yours</a>
+        <a class="s-yellow" href="/docs/settings">Settings</a>
+        <p class="side-group">Notes</p>
+        <a class="s-orange" href="/docs/notes">Petal Notes</a>
+        <a class="s-orange" href="/docs/helpers">Helpers in notes</a>
+        <p class="side-group">Petal AI</p>
+        <a class="s-blue" href="/docs/petal-ai">Petal AI</a>
+        <a class="s-green" href="/docs/routines" aria-current="page">Routines</a>
+        <p class="side-group">The vault</p>
+        <a class="s-purple" href="/docs/vault">The vault</a>
+        <a class="s-purple" href="/docs/agents">Your own agents</a>
+        <p class="side-group">Help</p>
+        <a class="s-paper" href="/docs/support">Support</a>
+        </nav>
+    </div>
+  </div>
+
+  <footer class="dfoot">
+    <div class="dwrap">
+      <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt="">Petal</a>
+      <p class="dfoot-links"><a href="/download/mac">Download</a><a href="/docs">Docs</a><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="/docs/support">Support</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
+    </div>
+  </footer>
+</body>
+</html>

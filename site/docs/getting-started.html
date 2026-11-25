@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121316" media="(prefers-color-scheme: dark)">
+  <title>Getting started: Petal docs</title>
+  <meta name="description" content="Install Petal on macOS 26 or later, pick an AI plan or API key, allow permissions, handle updates and remove it cleanly.">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="Getting started: Petal docs">
+  <meta property="og:description" content="Install Petal on macOS 26 or later, pick an AI plan or API key, allow permissions, handle updates and remove it cleanly.">
+  <meta property="og:url" content="https://petal.codes/docs/getting-started">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://petal.codes/docs/getting-started">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme.js"></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <!-- Every docs page repeats this header, the sidebar and the footer: a change to one goes on all of them. -->
+  <header class="dtop">
+    <div class="dtop-in">
+      <a class="brand" href="/"><img src="/icon.svg" width="32" height="32" alt="">Petal</a>
+      <a class="dtop-link" href="/docs" aria-current="page">Docs</a>
+      <a class="dtop-link" href="https://github.com/edgetr/petal">GitHub</a>
+      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
+      <a class="dtop-get" href="/download/mac">Download</a>
+    </div>
+  </header>
+
+  <div class="field paper dhead">
+    <div class="dwrap">
+      <p class="crumb"><a href="/docs">Docs</a> <span aria-hidden="true">›</span> Start</p>
+      <h1>Getting started</h1>
+      <p class="lede">Petal runs on any Mac with macOS 26 or later. Setup takes a minute, and you can skip AI completely if you only want the dock and notes.</p>
+    </div>
+  </div>
+
+  <div class="dwrap docs">
+    <main id="main" class="dmain">
+      <article class="prose">
+<h2 id="install">Install</h2>
+<ol><li>Open <a href="https://petal.codes/download/mac">Download for Mac</a> to get the newest release from GitHub, unzip it and move <code>Petal.app</code> to Applications.</li><li>Open Petal. Because Petal has no Apple Developer ID and isn't notarized, macOS blocks the first launch.</li><li>Open System Settings › Privacy &amp; Security, scroll down and choose “Open Anyway”.</li></ol>
+<aside class="aside"><p><b>In Terminal.</b> Run <code>curl -fsSL https://petal.codes/install.sh | bash</code> to skip “Open Anyway”. The script checks that your Mac runs macOS 26 or later, downloads the newest release from GitHub, verifies its SHA-256 checksum, version and signature against Petal's own certificate, quits any running Petal, installs to <code>/Applications</code> (or <code>~/Applications</code> if <code>/Applications</code> isn't writable) and opens it.</p></aside>
+<h2 id="first-setup">First setup</h2>
+<p>When “Meet Petal” opens, pick what you want to turn on:</p>
+<ul><li>“Bring your Dock along” (on by default) copies your macOS Dock's apps in order and turns its folders into stacks. Later, Settings › Dock › “Import macOS’s Dock” adds only what is missing.</li><li>“Petal AI, with Claude” and “Petal AI, with ChatGPT (Codex)” use your own Claude or ChatGPT plan. Any AI already installed starts switched on. Otherwise choose “Install” to run its maker's installer, then “Sign in…” to finish in your browser.</li><li>“Let Petal see your windows” opens Accessibility so Petal can see windows and place notes on them. Choose “Allow…” until it shows “Allowed”.</li><li>“Open Petal at login” starts Petal automatically when you log in.</li></ul>
+<p>Choose “Use Petal” to switch to Petal's dock, or “Keep macOS’s Dock” to use notes and AI beside Apple's Dock. Closing the window keeps macOS's Dock.</p>
+<h2 id="using-an-api-key-instead">Using an API key instead</h2>
+<p>You don't need a subscription to use <a href="/docs/petal-ai">Petal AI</a>. Open Settings › Petal AI › “Paying”, switch from “My subscription” to “An API key”, paste your Anthropic or OpenAI key and choose “Save”. You can also “Check”, “Replace” or “Remove” it, or follow “Get a key from …”. Your key stays in your Mac's Keychain, and only Petal AI uses it.</p>
+<aside class="aside"><p><b>Where Petal looks for Claude Code and Codex.</b> Petal checks your shell's <code>PATH</code> and the usual install folders: <code>~/.local/bin</code>, <code>/opt/homebrew/bin</code> and <code>/usr/local/bin</code>.</p></aside>
+<h2 id="permissions">Permissions</h2>
+<p>Petal asks for other permissions only when you first use a feature. You can review them in Settings › Privacy › “Permissions”:</p>
+<ul><li>“Accessibility” for windows, badges, notes on windows and using your apps.</li><li>“Screen Recording” for a still preview of each window, never a recording. Restart Petal after allowing it.</li><li>“Browsers” to see which site a tab is on.</li><li>“Music and Spotify” for now playing in the dock.</li></ul>
+<h2 id="updates-switching-back-and-removing">Updates, switching back and removing</h2>
+<p>While “Update automatically” is on, Petal checks GitHub Releases 2 minutes after launch and every 6 hours after that. When an update is ready, the menu-bar mark turns blue with a dot and offers “Restart to Update” and “What’s New in &lt;version&gt;”. You can check manually from the menu-bar mark's “Check for Updates” or Settings › About › “Check for updates” › “Check now”.</p>
+<p>The menu-bar mark also opens “Petal Notes” (when notes are on), “Petal Settings…”, “Use macOS’s Dock” / “Use Petal’s Dock” and “Quit Petal”.</p>
+<p>Quitting Petal — or a crash, or logging out — brings macOS's Dock back as it was. A small helper restores it within 30 seconds if Petal isn't running. To uninstall Petal, choose “Quit Petal” from the menu-bar mark and move <code>Petal.app</code> to the Trash.</p>
+</article>
+      <nav class="pager" aria-label="Previous and next"><a class="pn prev" href="/docs"><span>Previous</span>Overview</a><a class="pn next n-pink" href="/docs/dock"><span>Next</span>The dock</a></nav>
+    </main>
+    <div class="side-wrap">
+        <nav class="side" aria-label="Docs">
+        <a href="/docs">Overview</a>
+        <p class="side-group">Start</p>
+        <a class="s-paper" href="/docs/getting-started" aria-current="page">Getting started</a>
+        <p class="side-group">Your dock</p>
+        <a class="s-pink" href="/docs/dock">The dock</a>
+        <a class="s-yellow" href="/docs/customize">Make it yours</a>
+        <a class="s-yellow" href="/docs/settings">Settings</a>
+        <p class="side-group">Notes</p>
+        <a class="s-orange" href="/docs/notes">Petal Notes</a>
+        <a class="s-orange" href="/docs/helpers">Helpers in notes</a>
+        <p class="side-group">Petal AI</p>
+        <a class="s-blue" href="/docs/petal-ai">Petal AI</a>
+        <a class="s-green" href="/docs/routines">Routines</a>
+        <p class="side-group">The vault</p>
+        <a class="s-purple" href="/docs/vault">The vault</a>
+        <a class="s-purple" href="/docs/agents">Your own agents</a>
+        <p class="side-group">Help</p>
+        <a class="s-paper" href="/docs/support">Support</a>
+        </nav>
+    </div>
+  </div>
+
+  <footer class="dfoot">
+    <div class="dwrap">
+      <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt="">Petal</a>
+      <p class="dfoot-links"><a href="/download/mac">Download</a><a href="/docs">Docs</a><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="/docs/support">Support</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f3f2ee" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#121316" media="(prefers-color-scheme: dark)">
+  <title>Helpers in notes: Petal docs</title>
+  <meta name="description" content="Write @Petal or plain instructions in a note to set reminders, watch pages, chain notes or run coding tasks in a worktree.">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Petal">
+  <meta property="og:title" content="Helpers in notes: Petal docs">
+  <meta property="og:description" content="Write @Petal or plain instructions in a note to set reminders, watch pages, chain notes or run coding tasks in a worktree.">
+  <meta property="og:url" content="https://petal.codes/docs/helpers">
+  <meta property="og:image" content="https://petal.codes/og.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="canonical" href="https://petal.codes/docs/helpers">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="preload" href="/fonts/Geist-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/theme.js"></script>
+  <script src="/site.js" defer></script>
+</head>
+<body class="docs-page">
+  <a class="skip" href="#main">Skip to content</a>
+  <!-- Every docs page repeats this header, the sidebar and the footer: a change to one goes on all of them. -->
+  <header class="dtop">
+    <div class="dtop-in">
+      <a class="brand" href="/"><img src="/icon.svg" width="32" height="32" alt="">Petal</a>
+      <a class="dtop-link" href="/docs" aria-current="page">Docs</a>
+      <a class="dtop-link" href="https://github.com/edgetr/petal">GitHub</a>
+      <button class="theme-toggle" type="button" data-toggle-theme aria-pressed="false" aria-label="Switch to dark appearance" hidden><svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg><svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A7.8 7.8 0 0 1 9.4 4.5a7.8 7.8 0 1 0 10.1 10.1z"/></svg></button>
+      <a class="dtop-get" href="/download/mac">Download</a>
+    </div>
+  </header>
+
+  <div class="field orange dhead">
+    <div class="dwrap">
+      <p class="crumb"><a href="/docs">Docs</a> <span aria-hidden="true">›</span> Notes</p>
+      <h1>Helpers in notes</h1>
+      <p class="lede">Any Petal Note can run background tasks when you type @Petal, and understands plain-word instructions for reminders, page watchers and daily notes.</p>
+    </div>
+  </div>
+
+  <div class="dwrap docs">
+    <main id="main" class="dmain">
+      <article class="prose">
+<h2 id="typing">Typing <code>@</code></h2>
+<p>Type <code>@</code> in a note to open a menu with “Petal” followed by your notes and notebooks by name. Chips show what each <code>@</code> and understood date or time bound to (such as “Friday 9:00”). When you want a specific model, name it in plain words — there is no <code>@Claude</code> or <code>@Codex</code>.</p>
+<p>A line runs only when you press <kbd>Return</kbd> at the end of it, in that note, and only if you typed or pasted it. Synced, imported or tool-written text never runs on its own. After a restart, an older line runs again only once you edit it. A bare <code>@Petal</code> isn't sent (“Ask Petal something after @Petal”).</p>
+<h2 id="how-petal-works">How <code>@Petal</code> works</h2>
+<p><code>@Petal</code> runs your chat AI with Petal's tools on the note's place in the background (up to 4 runs at once). The answer appears as ink on the front of the note, and the next run replaces it. Flip to the back to see its steps and a stamp for each permission you allowed (“Tap a stamp to take it back”).</p>
+<p>While it works, you can choose “Show me”, “Pause” / “Go on” or “Stop”. If a run doesn't finish, you get “Try again” (only on the Mac that sent it) and “Edit”. When a step needs approval, a card appears on the note with “Allow” / “Don't”, or “Buy” for a purchase.</p>
+<h2 id="plain-word-instructions">Plain-word instructions</h2>
+<p>Plain instructions trigger built-in behaviors; questions or conditions go to the helper as normal requests instead.</p>
+<ul><li><b>Bring a note back:</b> “bring this back Friday” or “remind me …” with a day, a time, “the 20th” or “next month”. Without a time, Petal asks “When?”.</li><li><b>Notebook memory:</b> “remember …” or “forget …” adds or removes lines on the notebook's cover under “Petal remembers”.</li><li><b>Pack up a workspace:</b> “put this away” saves the window's tabs, file and mail into the note with an “Open all” button.</li><li><b>Watch a page:</b> “check this every morning, tell me under $300” (include a repeating phrase such as “every”, “each morning”, “keep checking” or “tell me when”; defaults to daily at 9:00). Petal fetches plainly and asks the AI only when it can't read the value. It never buys. Write “stop watching” to end it.</li><li><b>Chain or compare notes:</b> “when @Research is done, draft @Proposal”, or “check this against @Notebook”.</li><li><b>Morning notes:</b> “leave me a note every morning” (8:00 by default). Write “stop the mornings” to end it.</li></ul>
+<aside class="aside"><p><b>This Mac only.</b> Chains, watchers and morning notes run only on the Mac where you wrote them.</p></aside>
+<h2 id="notes-on-code">Notes on code</h2>
+<aside class="aside"><p><b>For engineers.</b> A note stuck to a GitHub pull request or issue, or to a file inside a git repository in your home folder, runs your Claude Code or Codex in the note's own git worktree of that checkout — only when the line asks for work, after asking once per project. On a pull request from a fork, the project's own settings, hooks, tool servers and instructions aren't loaded. The PR link and proof come back as ink. You can name another model for a second opinion, such as “have GPT 6.1 Sol look for holes”.</p></aside>
+<h2 id="privacy-and-redaction">Privacy and redaction</h2>
+<p>A “Private” notebook can be read only by a note inside it. Everything a helper writes back passes through <a href="/docs/vault">the vault's</a> redaction before it is shown or saved.</p>
+</article>
+      <nav class="pager" aria-label="Previous and next"><a class="pn prev" href="/docs/notes"><span>Previous</span>Petal Notes</a><a class="pn next n-blue" href="/docs/petal-ai"><span>Next</span>Petal AI</a></nav>
+    </main>
+    <div class="side-wrap">
+        <nav class="side" aria-label="Docs">
+        <a href="/docs">Overview</a>
+        <p class="side-group">Start</p>
+        <a class="s-paper" href="/docs/getting-started">Getting started</a>
+        <p class="side-group">Your dock</p>
+        <a class="s-pink" href="/docs/dock">The dock</a>
+        <a class="s-yellow" href="/docs/customize">Make it yours</a>
+        <a class="s-yellow" href="/docs/settings">Settings</a>
+        <p class="side-group">Notes</p>
+        <a class="s-orange" href="/docs/notes">Petal Notes</a>
+        <a class="s-orange" href="/docs/helpers" aria-current="page">Helpers in notes</a>
+        <p class="side-group">Petal AI</p>
+        <a class="s-blue" href="/docs/petal-ai">Petal AI</a>
+        <a class="s-green" href="/docs/routines">Routines</a>
+        <p class="side-group">The vault</p>
+        <a class="s-purple" href="/docs/vault">The vault</a>
+        <a class="s-purple" href="/docs/agents">Your own agents</a>
+        <p class="side-group">Help</p>
+        <a class="s-paper" href="/docs/support">Support</a>
+        </nav>
+    </div>
+  </div>
+
+  <footer class="dfoot">
+    <div class="dwrap">
+      <a class="brand" href="/"><img src="/icon.svg" width="28" height="28" alt="">Petal</a>
+      <p class="dfoot-links"><a href="/download/mac">Download</a><a href="/docs">Docs</a><a href="https://github.com/edgetr/petal">GitHub</a><a href="https://github.com/edgetr/petal/releases">Releases</a><a href="/docs/support">Support</a><a href="https://edgetr.tech">Made by Edgetr</a></p>
+    </div>
+  </footer>
+</body>
+</html>
