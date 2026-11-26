@@ -237,7 +237,7 @@ When the user says "get the Anthropic key from Petal to test this" or "use the l
   Look, Notes, Petal AI, Vault, Routines, Privacy, About. The bar across its top finds any setting by name as the
   user types, and Return hands what they typed to Petal AI. Point the user at a page by these names.
 - Petal hides macOS's Dock while it runs and gives it back on quit; `petal restore-dock` gives it back by
-  hand. Permissions it may need: Accessibility (window lists, badges, notes on windows, using apps, tiling), Screen
+  hand, also when it's still hidden with Petal's dock off (`petal doctor` reports that). Permissions it may need: Accessibility (window lists, badges, notes on windows, using apps, tiling), Screen
   Recording (previews) and Automation for each browser (reading a tab's address) and for Music and Spotify (now
   playing). Accessibility is asked in the welcome; the others where they're first used (a window's preview, a note's
   place menu in a browser, a player's preview), and all four are listed in Settings › Privacy.
