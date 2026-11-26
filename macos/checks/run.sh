@@ -49,10 +49,24 @@ swiftc -parse-as-library -O -o "$out/magnify" Sources/Petal/MagnifyRules.swift c
 "$out/magnify"
 # Petal's own files: an entry in dock.json's apps that isn't text never empties the dock, a file someone is
 # editing that doesn't read as JSON yet keeps what was read before, and a change in settings.json that would let Petal
-# AI do more (Full access, using apps, more allowed without asking, an app off the private list) isn't taken while
-# Petal runs, while one that lets it do less is (ConfigRules).
+# AI do more (Full access, using apps, more allowed without asking, an app off the private list, another program as
+# its AI) isn't taken, while Petal runs or at launch (weighed against what Petal last went by, kept in the Keychain),
+# while one that lets it do less is (ConfigRules).
 swiftc -parse-as-library -O -o "$out/configrules" Sources/Petal/ConfigRules.swift checks/ConfigRulesCheck.swift
 "$out/configrules"
+# The first read is weighed too, against what's kept in the Keychain, and what Petal goes by is kept there as it changes.
+grep -qF '(read, refused) = ConfigRules.first(read, approved: approvedAtLaunch(), defaults: Settings.defaults, trusted: trusted)' Sources/Petal/Config.swift \
+    && grep -qF 'if file == settingsFile { keep() }' Sources/Petal/Config.swift \
+    || { echo "Config: settings.json at launch is weighed against what the person last set, kept in the Keychain"; exit 1; }
+# Claude Code or Codex from claudePath or codexPath: run only when it's that app as its maker signed it, never a script
+# or a program signed otherwise (MakerSigned, against throwaway copies; the real ones on this Mac when there are).
+swiftc -parse-as-library -O -o "$out/makersigned" Sources/Petal/MakerSigned.swift checks/MakerSignedCheck.swift
+"$out/makersigned"
+grep -qF 'if signedByMaker(provider, setting) { return setting }' Sources/Petal/App.swift \
+    || { echo "PetalApp.find: a path setting is used only when its maker signed it"; exit 1; }
+# Codex without Full access works in a scratch folder of its own, never the home folder its sandbox could write.
+grep -qF '"-C", chat.folder ?? (chat.fullAccess ? NSHomeDirectory() : Self.scratch)]' Sources/Petal/Providers.swift \
+    || { echo "Codex: a chat without Full access starts in its scratch folder, not the home folder"; exit 1; }
 # A website shortcut's cached icon: an ask while it's being read waits for that read, so a cached icon is never
 # fetched from the site again (SiteLoads).
 swiftc -parse-as-library -O -o "$out/siteloads" Sources/Petal/SiteLoads.swift checks/SiteLoadsCheck.swift
@@ -780,6 +794,9 @@ grep -qF 'AgentCallers.started(process.processIdentifier, for: noteID.uuidString
     && grep -qF 'AgentCallers.identify(client: client, tools: words.first == "assist")' Sources/Petal/IPC.swift \
     && grep -qF 'let caller = who.note ?? "mcp-\(who.pid)"' Sources/Petal/App.swift \
     || { echo "agents: a chat is Petal's own only by Petal's record of the AI process it started"; exit 1; }
+# Agents' grants come only from the Keychain: a plain file any program can write is never read for them.
+grep -qF 'OwnRecords.read(OwnRecords.grants)' Sources/Petal/AgentVault.swift && ! grep -nE 'Data\(contentsOf|JSONDecoder\(\)\.decode\(\[AgentAccess\.Grant\]\.self, from: \(try' Sources/Petal/AgentVault.swift \
+    || { echo "agents: grants are read from the Keychain only, never from a file"; exit 1; }
 if grep -nE 'agent == \.petal|kind: \.petal|pass\(\.petal' Sources/Petal/AgentVault.swift; then echo "agents: petal run must ask for every caller, Petal's own chats too"; exit 1; fi
 if grep -nE 'who\.agent == \.petal' Sources/Petal/App.swift; then echo "agents: a chat's id comes from Petal's record, never from who claims it"; exit 1; fi
 echo "agents: Petal AI is only the tools of an AI Petal started; petal run always asks"

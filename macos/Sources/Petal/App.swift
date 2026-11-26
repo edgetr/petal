@@ -322,11 +322,15 @@ final class PetalApp {
         return environment
     }
 
-    /// The path setting, else the one the person's own terminal runs (an interactive login shell, so .zshrc
-    /// counts), else the places its installer puts it.
+    /// The path setting, only when it's that app as its maker signed it (`signedByMaker`: Petal runs it as its AI,
+    /// with the person's API key, as its own chat); else the one the person's own terminal runs (an interactive login
+    /// shell, so .zshrc counts), else the places its installer puts it.
     nonisolated static func find(_ provider: Provider, setting: String) -> String? {
         let isTool = { (path: String) in !path.isEmpty && FileManager.default.isExecutableFile(atPath: path) }
-        if isTool(setting) { return setting }
+        if isTool(setting) {
+            if signedByMaker(provider, setting) { return setting }
+            NSLog("Petal: %@", refusedPath(provider, setting))
+        }
         let shell = Process()
         shell.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
         shell.arguments = ["-lic", "command -v \(provider.binary)"]
@@ -343,6 +347,19 @@ final class PetalApp {
             }
         }
         return provider.knownPaths(home: NSHomeDirectory()).first(where: isTool)
+    }
+
+    /// `path` (its links followed) is `provider`'s own program, signed by its maker (Claude Code by Anthropic, Codex
+    /// by OpenAI, as `AgentAccess.makers` says), its signature valid now; never a script or anything signed otherwise.
+    nonisolated static func signedByMaker(_ provider: Provider, _ path: String) -> Bool {
+        guard let maker = AgentAccess.makers[provider == .claude ? .claude : .codex], let real = AgentCallers.realPath(path) else { return false }
+        return MakerSigned.check(real, team: maker.team, identifiers: maker.identifiers)
+    }
+
+    /// Why a path setting wasn't used.
+    nonisolated static func refusedPath(_ provider: Provider, _ path: String) -> String {
+        "\(provider.pathSetting) in settings.json (\(path)) isn't \(provider.appName) as \(provider == .claude ? "Anthropic" : "OpenAI") signed it, "
+            + "so Petal doesn't run it. Point it at \(provider.appName) itself, or leave it empty for Petal to find it."
     }
 
     /// Codex's own model list (`codex debug models`): listed models in its order, each with its efforts.

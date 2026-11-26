@@ -182,6 +182,7 @@ final class Config {
         Perf.span("config: in memory") {
             if file == settingsFile { settings = root } else { dock = root }
         }
+        if file == settingsFile { keep() }
         // Someone else changed a file in the last second, before the watcher read it: read it once this is written.
         let stale = writing == 0 && currentStamps() != stamps
         let files = self.files
@@ -224,19 +225,27 @@ final class Config {
 
     /// Both files as they are on disk. One that's there but doesn't read as JSON (an editor halfway through writing
     /// it, a typo) keeps what was read before until it does: the dock never loses its apps to a file being edited.
-    /// Once Petal runs, what Petal AI may do grows only in Petal itself (`ConfigRules.taken`): a change in the file
-    /// that would turn on Full access or using apps, allow more without asking or take an app off the private list
-    /// isn't taken, and the file is written to say what Petal goes by again. One that narrows any of them is taken.
+    /// What Petal AI may do grows only in Petal itself (`ConfigRules.taken`): a change in the file that would turn
+    /// on Full access or using apps, allow more without asking, take an app off the private list or point Petal at
+    /// another program for its AI isn't taken, and the file is written to say what Petal goes by again. One that
+    /// narrows any of them is taken. At launch the file is weighed the same way against what Petal last went by,
+    /// kept in the Keychain (`ConfigRules.first`), so a change written while Petal wasn't running isn't taken either.
     private func reload() {
         let parsed = Self.parse(settingsFile), exists = FileManager.default.fileExists(atPath: settingsFile.path)
         var read = ConfigRules.reread(parsed, exists: exists, before: settings)
         var refused: [String] = []
-        if loaded { (read, refused) = ConfigRules.taken(read, over: settings, defaults: Settings.defaults) }
+        let trusted = { (key: String, path: String) in PetalApp.signedByMaker(key == "codexPath" ? .codex : .claude, path) }
+        if loaded {
+            (read, refused) = ConfigRules.taken(read, over: settings, defaults: Settings.defaults, trusted: trusted)
+        } else if parsed != nil || !exists {
+            (read, refused) = ConfigRules.first(read, approved: approvedAtLaunch(), defaults: Settings.defaults, trusted: trusted)
+        }
         settings = read
         dock = ConfigRules.reread(Self.parse(dockFile), exists: FileManager.default.fileExists(atPath: dockFile.path), before: dock)
         // Only a read that said what the person chose counts as the first: one that couldn't read the file (a typo at
-        // launch) leaves the next good read to be taken as it is.
+        // launch) leaves the next good read to be the first.
         if parsed != nil || !exists { loaded = true }
+        if loaded { keep() }
         guard !refused.isEmpty else { return }
         // Once for the file as it is now: one that can't be written is left, and Petal goes by what it has.
         let stamp = Self.stamp(settingsFile) ?? .distantPast
@@ -249,9 +258,48 @@ final class Config {
         }
     }
 
-    /// The files were read once (at launch, as they are: the person's own choices from before). From then on
-    /// `reload` keeps what Petal AI may do from growing through the file.
+    /// The files were read once (at launch, weighed against what Petal last went by). From then on `reload` weighs
+    /// every change against what Petal goes by now.
     @ObservationIgnored private var loaded = false
+
+    // MARK: What the person last set, in the Keychain
+
+    /// Benches and checks (`PETAL_CONFIG_DIR`) never touch the Keychain: the defaults stand in for what was kept, so
+    /// a Petal started on another folder can't be handed more through that folder's file either.
+    nonisolated private static let ownInKeychain = (ProcessInfo.processInfo.environment["PETAL_CONFIG_DIR"] ?? "").isEmpty
+    nonisolated private static let own = DispatchQueue(label: "petal.config.own", qos: .userInitiated)
+    /// What was last kept (or read) there.
+    @ObservationIgnored private var kept: NSDictionary?
+
+    /// What Petal last went by for `ConfigRules.personsOwn`, read once, at the first read: nil when nothing was ever
+    /// kept (this is the first launch of a Petal that keeps it: the file is taken as it is, once); the defaults when
+    /// the Keychain won't give it (never more than they allow). One Keychain read, waited for, before anything shows.
+    private func approvedAtLaunch() -> [String: Any]? {
+        guard Self.ownInKeychain else { return [:] }
+        switch Self.own.sync(execute: { OwnRecords.read(OwnRecords.settings) }) {
+        case .none: return nil
+        case .found(let data):
+            let approved = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            kept = approved as NSDictionary
+            return approved
+        case .unreadable(let status):
+            NSLog("Petal settings: the Keychain didn't give what you last set for Petal AI (%d); its defaults stand until you set them in Petal.", status)
+            return [:]
+        }
+    }
+
+    /// Keeps what Petal goes by for `ConfigRules.personsOwn` in the Keychain when it changed: what the person set in
+    /// Petal, or a narrowing the file made. Off the main thread, in order.
+    private func keep() {
+        guard Self.ownInKeychain else { return }
+        let now = ConfigRules.approved(values) as NSDictionary
+        guard kept?.isEqual(now) != true,
+              let data = try? JSONSerialization.data(withJSONObject: now, options: [.sortedKeys]) else { return }
+        kept = now
+        Self.own.async {
+            if !OwnRecords.write(OwnRecords.settings, data) { NSLog("Petal settings: the Keychain didn't keep what you set for Petal AI.") }
+        }
+    }
     /// settings.json's date when it was last written to say what Petal goes by.
     @ObservationIgnored private var putBack: Date?
 
