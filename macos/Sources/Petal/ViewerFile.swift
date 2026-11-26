@@ -54,7 +54,7 @@ enum ViewerKind: Equatable, Sendable {
 /// is fine; anywhere else (/tmp, /private, /System, /Library, another person's home) is refused.
 enum ViewerPath {
     enum Refusal: Error, Equatable, CustomStringConvertible {
-        case notAbsolute, missing, notRegular, notOwned, notReadable, outsideRoots, notShown
+        case notAbsolute, missing, notRegular, notOwned, notReadable, outsideRoots, notShown, tooLarge, privateNote
 
         var description: String {
             switch self {
@@ -65,6 +65,8 @@ enum ViewerPath {
             case .notReadable: "The person can't read that file."
             case .outsideRoots: "That file isn't in the person's home folder or on a mounted drive: Petal's viewer shows only files there."
             case .notShown: ViewerKind.shows
+            case .tooLarge: "That file is too large for Petal's viewer (over \(ViewerPath.maxBytes / 1_000_000) MB): open it in its own app."
+            case .privateNote: "That file is in a Private notebook of Petal Notes: it isn't shown to you."
             }
         }
     }
@@ -73,6 +75,8 @@ enum ViewerPath {
     nonisolated(unsafe) static var home: String = NSHomeDirectory()
     /// Where mounted volumes are (external drives and network shares).
     nonisolated(unsafe) static var volumes: String = "/Volumes"
+    /// The largest file the viewer reads: every original is read whole into memory (a copy, Quick Look's export).
+    nonisolated(unsafe) static var maxBytes: Int64 = 500_000_000
 
     /// The path as given: "~/" for the home folder; nil when it isn't absolute. Nothing else is done to it by its
     /// words: the destination is resolved by the disk.
@@ -92,7 +96,7 @@ enum ViewerPath {
     /// In the home folder the file must be the person's own; on a mounted volume (inside one, never /Volumes itself)
     /// one they can read.
     static func decide(destination: String?, home: String, volumes: String = "/Volumes", regular: Bool, owner: UInt32, me: UInt32,
-                       readable: Bool) -> Result<String, Refusal> {
+                       readable: Bool, size: Int64 = 0) -> Result<String, Refusal> {
         guard let destination else { return .failure(.missing) }
         let inHome = inside(destination, home)
         let onVolume = !inHome && inside(destination, volumes) && components(destination).count > components(volumes).count + 1
@@ -101,7 +105,41 @@ enum ViewerPath {
         if inHome, owner != me { return .failure(.notOwned) }
         if onVolume, !readable { return .failure(.notReadable) }
         guard ViewerKind.of(destination) != nil else { return .failure(.notShown) }
+        guard size <= maxBytes else { return .failure(.tooLarge) }
         return .success(destination)
+    }
+
+    /// Where a file is in Petal Notes' folder (`notesRoot`, canonical), by its canonical path: outside it; in a
+    /// notebook's folder (by its name as read, every note one level down); in a note's pictures ("Pictures/<hash of
+    /// the note's id>"); or elsewhere in the folder.
+    enum NotePlace: Equatable {
+        case outside, notebook(String), pictures(String), other
+    }
+
+    static func notePlace(_ destination: String, notesRoot: String) -> NotePlace {
+        guard !notesRoot.isEmpty, inside(destination, notesRoot) else { return .outside }
+        let rest = components(destination).dropFirst(components(notesRoot).count).map(String.init)
+        guard rest.count >= 2 else { return .other }
+        if rest[0].compare(NoteShelf.picturesRoot, options: .caseInsensitive) == .orderedSame {
+            return rest.count >= 3 ? .pictures(NoteShelf.picturesRoot + "/" + rest[1].lowercased()) : .other
+        }
+        return .notebook(rest[0])
+    }
+
+    /// Whether an agent asking from `asker` (the notebook of the note it's in; nil: from no note) may have the
+    /// viewer show it a file at `place`: the Private fence of the note tools (NotePrivacy.readable). A note's pictures
+    /// are its notebook's; pictures no note is known for, and anything else in the notes' folder, only while no
+    /// notebook is Private. `notes`: each note's id and notebook.
+    static func mayView(_ place: NotePlace, notes: [(id: String, notebook: String)], privateBooks: Set<String>, asker: String?) -> Bool {
+        switch place {
+        case .outside: return true
+        case .notebook(let book): return NotePrivacy.readable(notebook: book, privateBooks: privateBooks, asker: asker)
+        case .pictures(let folder):
+            let owners = notes.filter { NoteShelf.pictureFolder(id: $0.id).lowercased() == folder.lowercased() }
+            guard !owners.isEmpty else { return privateBooks.isEmpty }
+            return owners.allSatisfy { NotePrivacy.readable(notebook: $0.notebook, privateBooks: privateBooks, asker: asker) }
+        case .other: return privateBooks.isEmpty
+        }
     }
 
     /// Whether the person can write in a folder (where a copy beside a file goes).
@@ -128,7 +166,7 @@ enum ViewerPath {
         let regular = found && (info.st_mode & S_IFMT) == S_IFREG
         let readable = destination.map { access($0, R_OK) == 0 } ?? false
         let decided = decide(destination: found ? destination : nil, home: canonical(home) ?? home, volumes: canonical(volumes) ?? volumes,
-                             regular: regular, owner: info.st_uid, me: getuid(), readable: readable)
+                             regular: regular, owner: info.st_uid, me: getuid(), readable: readable, size: found ? Int64(info.st_size) : 0)
         return decided.map { URL(fileURLWithPath: $0) }
     }
 }

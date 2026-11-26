@@ -142,9 +142,8 @@ enum Markdown {
         }.joined(separator: "\n")
     }
 
-    static func escape(_ text: String) -> String {
-        text.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;")
-    }
+    /// `&`, `<`, `>` and both quotes: a link's address goes into a quoted attribute, so a `"` in it can't end it.
+    static func escape(_ text: String) -> String { PageCopy.escape(text) }
 
     private static func inlineHTML(_ text: String) -> String {
         var s = escape(text)
@@ -311,6 +310,11 @@ enum Pages {
         window.load(file, title: title)
     }
 
+    /// A page's window closed: it goes (a page opened again gets a new one), so closed windows aren't kept.
+    static func closed(_ window: PageWindow) {
+        windows = windows.filter { $0.value !== window }
+    }
+
     /// A page's whole document: `body` in Petal's look.
     static func document(title: String, body: String) -> String { template(title: title, body: body) }
 
@@ -342,7 +346,8 @@ enum Pages {
 /// page drawn over the glass. The page is words Petal AI wrote, often from what it read elsewhere, so it is only
 /// ever shown: its scripts are off, nothing it names is fetched (the viewer's rule list, added before the page is
 /// loaded: an image, a style, a frame or a form's address on the network loads nothing), nothing is kept, and the
-/// window never goes to another page. A web link the person clicks opens in their browser.
+/// window never goes to another page. A web link the person clicks opens in their browser; Open in Browser opens a
+/// copy made safe the same way (PageCopy.forBrowser), never the page's own file.
 @MainActor
 final class PageWindow: NSWindow, WKNavigationDelegate {
     let web: WKWebView
@@ -442,8 +447,25 @@ final class PageWindow: NSWindow, WKNavigationDelegate {
         decisionHandler(.cancel)
     }
 
+    /// The browser gets a copy made safe (PageCopy.forBrowser: no script runs there, nothing is fetched), never the
+    /// page's own file, made off the main thread in a temporary folder of Petal's own.
+    override func close() {
+        super.close()
+        Pages.closed(self)
+    }
+
     @objc private func openInBrowser() {
-        if let file { NSWorkspace.shared.open(file) }
+        guard let file else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let text = try? String(contentsOf: file, encoding: .utf8) else { return }
+            let folder = FileManager.default.temporaryDirectory.appending(path: "Petal pages for the browser")
+            let copy = folder.appending(path: file.lastPathComponent)
+            guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil,
+                  (try? PageCopy.forBrowser(text).write(to: copy, atomically: true, encoding: .utf8)) != nil else {
+                return NSLog("Petal page: couldn't make the browser's copy")
+            }
+            DispatchQueue.main.async { NSWorkspace.shared.open(copy) }
+        }
     }
 
     override var canBecomeKey: Bool { true }

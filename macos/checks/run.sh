@@ -81,6 +81,10 @@ perl -0777 -ne 'exit(/if !setting\.isEmpty \{\n\s+if isTool\(setting\), signedBy
 # Codex without Full access works in a scratch folder of its own, never the home folder its sandbox could write.
 grep -qF '"-C", chat.folder ?? (chat.fullAccess ? NSHomeDirectory() : Self.scratch)]' Sources/Petal/Providers.swift \
     || { echo "Codex: a chat without Full access starts in its scratch folder, not the home folder"; exit 1; }
+# A page Petal AI made, as Open in Browser hands it over: text escaped with both quotes, and a copy with no script, no
+# event handler, no javascript: address or refresh, and a strict Content Security Policy first (PageCopy).
+swiftc -parse-as-library -O -o "$out/pagecopy" Sources/Petal/PageCopy.swift checks/PageCopyCheck.swift
+"$out/pagecopy"
 # A website shortcut's cached icon: an ask while it's being read waits for that read, so a cached icon is never
 # fetched from the site again (SiteLoads).
 swiftc -parse-as-library -O -o "$out/siteloads" Sources/Petal/SiteLoads.swift checks/SiteLoadsCheck.swift
@@ -853,7 +857,10 @@ perl -0777 -ne '
     my ($open) = /(        case "open":\n            \/\/ Apps, web addresses and documents only.*?\n        case "hide":)/s;
     $bad .= "saving a routine never reaches the card\n" unless defined $save && $save =~ /guard RoutineRules\.savingAsks\(.*?else \{ return keep\(\) \}.*?self\.allow\(/s;
     $bad .= "running a routine never reaches the card\n" unless defined $run && $run =~ /guard !dry, Self\.asksFirst\(routine\) else \{.*?\n        allow\(/s;
-    $bad .= "the card isn\x27t Petal AI\x27s\n" unless defined $allow && $allow =~ /assist\.ask\("routine", title, detail: detail, owner: owner, done: done\)/;
+    $bad .= "the card isn\x27t Petal AI\x27s\n" unless defined $allow && $allow =~ /assist\.ask\("routine", title, detail: detail, always: always, owner: owner, done: done\)/;
+    my ($adopt) = /(    private func adopt\(.*?\n    \}\n)/s;
+    $bad .= "a routine written into routines.json by hand never reaches the card\n"
+        unless defined $adopt && $adopt =~ /RoutineRules\.savingAsks\(.*?routines\[index\]\.on = false.*?confirmFromFile\(held\)/s && /allow\("Turn on the routine.*?always: true\)/s;
     $bad .= "open takes more than RoutineRules.opens gives\n"
         unless defined $open && $open =~ /switch RoutineRules\.opens\(item\)/ && $open =~ /NoteTasks\.routine\(file\)/ && $open !~ /URL\(string: item\)|expandingTildeInPath/;
     END { if ($bad) { print "routines: $bad"; exit 1 } print "routines: opening and Shortcuts ask on a card, and open takes only what its rule gives\n" }

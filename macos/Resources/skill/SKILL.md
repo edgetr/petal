@@ -132,7 +132,8 @@ Use, in this order:
    away. A note in its margin can follow what the user selects (right-click it: Follow what I select): each selection
    is handed to the quick AI with what the note says to do (an empty note: explain it plainly), answered beside the
    paragraph; it's the user's to turn on, not a tool. `petal_view` opens one (`path`: a file whose final destination, every link followed, is in their home folder
-   and theirs, or on a drive or share mounted under /Volumes and readable by them; `page` from 1); it never moves or
+   and theirs, or on a drive or share mounted under /Volumes and readable by them, up to 500 MB, and not in a Private
+   notebook of Petal Notes; `page` from 1); it never moves or
    changes the file, and answers with the words of the page or slide it shows (`text`). To change a document, try it
    on copies first:
    `petal_view_versions` (`path`, `names`) makes a copy per name in a folder of Petal's own and shows them under the
@@ -183,7 +184,8 @@ Use, in this order:
   as (hidden), and say nothing while the vault can't be read. A note changed in two places at once shows as two read-only papers (one may be a
   "(conflicted copy)" file) until the user keeps one. Which notes are open on this Mac, and which watchers, chains and morning notes were set up on it, is in `~/Library/Application Support/Petal/notes-state.json`.
 - `routines.json`: the routines; change them with the routine tools rather than by hand (one written there with
-  a folder outside the home folder, or in its Library, is listed and never runs). What they did is in
+  a folder outside the home folder, or in its Library, is listed and never runs; one that opens something or runs a
+  Shortcut, written there by hand, stays off until the user allows it on Petal's card). What they did is in
   `~/Library/Application Support/Petal/routines-log.json`.
 
 Keep the JSON valid: Petal won't overwrite a file it can't read, and won't apply it either.

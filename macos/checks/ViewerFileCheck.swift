@@ -125,6 +125,34 @@ struct ViewerFileCheck {
         expect(decide("/Users/someone/a.pdf", regular: false) == .failure(.notRegular), "a folder or package isn't a file")
         expect(decide(nil) == .failure(.missing), "nothing there")
         expect(decide("/Users/someone/a.txt.exe") == .failure(.notShown), "only what the viewer shows")
+        // Too large to read into memory: refused with a clear word, before anything is read.
+        expect(ViewerPath.decide(destination: "/Users/someone/huge.pdf", home: home, regular: true, owner: 501, me: 501, readable: true,
+                                 size: ViewerPath.maxBytes + 1) == .failure(.tooLarge)
+               && ViewerPath.decide(destination: "/Users/someone/big.pdf", home: home, regular: true, owner: 501, me: 501, readable: true,
+                                    size: ViewerPath.maxBytes) == .success("/Users/someone/big.pdf")
+               && ViewerPath.Refusal.tooLarge.description.contains("too large"), "a file over the viewer's size is refused as too large")
+        // Petal Notes' files: a Private notebook's notes and their pictures only for an asker inside it, as the note
+        // tools fence them.
+        let notesRoot = "/Users/someone/Library/Mobile Documents/com~apple~CloudDocs/Petal Notes"
+        expect(ViewerPath.notePlace("/Users/someone/Docs/a.md", notesRoot: notesRoot) == .outside
+               && ViewerPath.notePlace(notesRoot + "/Health/Blood.md", notesRoot: notesRoot) == .notebook("Health")
+               && ViewerPath.notePlace(notesRoot + "/" + NoteShelf.pictureFolder(id: "N1") + "/p.png", notesRoot: notesRoot) == .pictures(NoteShelf.pictureFolder(id: "N1"))
+               && ViewerPath.notePlace(notesRoot + "/stray.md", notesRoot: notesRoot) == .other
+               && ViewerPath.notePlace(notesRoot + " 2/Health/Blood.md", notesRoot: notesRoot) == .outside, "where a file is among the notes, by components")
+        let noteRows: [(id: String, notebook: String)] = [(id: "N1", notebook: "Health"), (id: "N2", notebook: "Work")]
+        let privateBooks: Set<String> = ["Health"]
+        expect(!ViewerPath.mayView(.notebook("Health"), notes: noteRows, privateBooks: privateBooks, asker: nil)
+               && !ViewerPath.mayView(.notebook("health"), notes: noteRows, privateBooks: privateBooks, asker: "Work")
+               && ViewerPath.mayView(.notebook("Health"), notes: noteRows, privateBooks: privateBooks, asker: "Health")
+               && ViewerPath.mayView(.notebook("Work"), notes: noteRows, privateBooks: privateBooks, asker: nil)
+               && ViewerPath.mayView(.outside, notes: noteRows, privateBooks: privateBooks, asker: nil),
+               "a Private notebook's note isn't shown to an agent outside it; others are")
+        expect(!ViewerPath.mayView(.pictures(NoteShelf.pictureFolder(id: "N1")), notes: noteRows, privateBooks: privateBooks, asker: nil)
+               && ViewerPath.mayView(.pictures(NoteShelf.pictureFolder(id: "N2")), notes: noteRows, privateBooks: privateBooks, asker: nil)
+               && !ViewerPath.mayView(.pictures(NoteShelf.pictureFolder(id: "gone")), notes: noteRows, privateBooks: privateBooks, asker: nil)
+               && !ViewerPath.mayView(.other, notes: noteRows, privateBooks: privateBooks, asker: nil)
+               && ViewerPath.mayView(.other, notes: noteRows, privateBooks: [], asker: nil),
+               "a Private note's pictures neither; pictures of no known note and other files there only while nothing is Private")
         // On the disk, in a throwaway folder standing in for the home folder.
         let base = FileManager.default.temporaryDirectory.appending(path: "petal-viewer-check-\(UUID().uuidString)")
         let fakeHome = base.appending(path: "Home")

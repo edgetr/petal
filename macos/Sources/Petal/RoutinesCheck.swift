@@ -286,6 +286,36 @@ enum RoutinesCheck {
         let document = opening(plan.path)
         check(document["saved"] != nil && asked.count == 7, "open takes a document by its path")
         for made in [oid, hideID, (document["saved"] as? [String: Any])?["id"] as? String ?? ""] { _ = tool("petal_routine_delete", ["id": made], routines) }
+        // One that opens something, written into routines.json by hand (not through Petal AI's tool): kept off, in
+        // the file too, until the person says yes on the card; with a yes it's on.
+        Routines.flush()
+        // At a time twelve hours away: never due while the check runs, so nothing is ever opened.
+        let never = String(format: "%02d:00", (Calendar.current.component(.hour, from: Date()) + 12) % 24)
+        func handWrite(on: Bool) {
+            var all = (Config.parse(Routines.file)?["routines"] as? [[String: Any]]) ?? []
+            all.removeAll { $0["id"] as? String == "byhand" }
+            all.append(["id": "byhand", "name": "By hand", "words": "open the plan at nine", "on": on, "lastResult": "",
+                        "trigger": ["on": "time", "at": never], "actions": [["do": "open", "apps": ["https://example.com/plan"]]]])
+            Config.writeObject(["routines": all], to: Routines.file)
+            routines.readFile()
+        }
+        // What the deletions above handed back to the main thread taken in first: the file as Petal last wrote it.
+        wait(1) { false }
+        let handAsked = asked.count
+        answer = false
+        handWrite(on: true)
+        wait(15) { asked.count > handAsked && routines.list.contains { $0.id == "byhand" } }
+        Routines.flush()
+        let onDisk = ((Config.parse(Routines.file)?["routines"] as? [[String: Any]]) ?? []).first { $0["id"] as? String == "byhand" }
+        check(asked.count == handAsked + 1 && asked.last?.title.contains("routines.json") == true
+              && routines.list.first { $0.id == "byhand" }?.on == false && onDisk?["on"] as? Bool == false,
+              "a routine that opens something, added to routines.json by hand, stays off (there too) and asks: \(asked.count - handAsked) card(s), \(asked.last?.title ?? "not asked")")
+        answer = true
+        wait(1) { false }
+        handWrite(on: true)
+        wait(15) { routines.list.first { $0.id == "byhand" }?.on == true }
+        check(asked.count == handAsked + 2 && routines.list.first { $0.id == "byhand" }?.on == true, "turned on there again and allowed: it's on")
+        _ = tool("petal_routine_delete", ["id": "byhand"], routines)
         routines.answering = nil
         Routines.flush()
         check(fm.fileExists(atPath: Routines.file.path) && Routines.file.path.hasPrefix(state.path), "kept in the test's own folder")

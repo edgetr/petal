@@ -46,18 +46,25 @@ final class Viewers {
     /// the person owns, never through a link out of the home folder, of a kind the viewer shows), then shown in its
     /// own window, or the one already showing it brought forward. `page`: counted from 1. `live`: whoever asked is
     /// still there (an agent's request), checked right before anything is shown: gone, nothing opens and `done`
-    /// isn't called.
-    func open(path: String, page: Int? = nil, show: Bool = true, live: @escaping @Sendable () -> Bool = { true },
+    /// isn't called. `caller`: the agent asking (nil: the person): a file in a Private notebook of Petal Notes (a
+    /// note, its pictures) is refused to one asking from outside it, as the note tools refuse it (`mayView`).
+    func open(path: String, page: Int? = nil, show: Bool = true, caller: String? = nil, live: @escaping @Sendable () -> Bool = { true },
               done: @escaping @MainActor (Result<ViewerModel, ViewerPath.Refusal>) -> Void = { _ in }) {
         guard live() else { return }
+        let notes = app.paper.store.root.path
         Self.queue.async {
             let checked = ViewerPath.check(path)
+            let notesRoot = ViewerPath.canonical(notes) ?? notes
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard live() else { return }
                     switch checked {
                     case .failure(let refusal): done(.failure(refusal))
-                    case .success(let url): done(.success(self.show(url, page: page, front: show)))
+                    case .success(let url):
+                        guard self.mayView(ViewerPath.notePlace(url.path, notesRoot: notesRoot), by: caller) else { return done(.failure(.privateNote)) }
+                        let model = self.show(url, page: page, front: show)
+                        model.notesRoot = notesRoot
+                        done(.success(model))
                     }
                 }
             }
@@ -339,6 +346,10 @@ final class ViewerModel: Identifiable {
     let kind: ViewerKind
     var unit: ViewerUnit { kind.unit }
     var name: String { url.lastPathComponent }
+    /// Petal Notes' folder as the disk spells it, worked out when it was last opened (off the main thread): where
+    /// its file is among the notes (ViewerPath.notePlace), weighed again for every answer to an agent.
+    @ObservationIgnored var notesRoot = ""
+    var notePlace: ViewerPath.NotePlace { ViewerPath.notePlace(url.path, notesRoot: notesRoot) }
 
     /// Its pages: the PDF, or what Quick Look exported. Only ever used on the main thread; its bytes are kept to
     /// make thumbnails and find passages from a copy of their own off it.
@@ -1426,7 +1437,7 @@ final class ViewerModel: Identifiable {
             switch pinned {
             case .read(let bytes, _, let stamp) where stamp == baseStamp: original = bytes
             case .read, .changed: return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.originalChanged)) } }
-            case .refused: return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.refused)) } }
+            case .refused, .tooLarge: return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.refused)) } }
             case .unreadable: return DispatchQueue.main.async { MainActor.assumeIsolated { done(.failure(.copy)) } }
             }
             // The set's folder made and pinned in Petal's own versions root (ViewerVersionStore): the copies are
@@ -1956,6 +1967,8 @@ enum ViewerLoader {
         case read(Data, ViewerFileID, ViewerUpdated.Stamp)
         /// Not a file the viewer may read (the path rule, or a link where the file was).
         case refused
+        /// Larger than the viewer reads (ViewerPath.maxBytes): never read into memory.
+        case tooLarge
         /// Another file, or this one changed, between its checks and its bytes (or not the incarnation expected).
         case changed
         case unreadable
@@ -1968,7 +1981,12 @@ enum ViewerLoader {
     /// file, unchanged. `expected`: the incarnation it must be (the one the viewer has loaded). Off the main thread,
     /// inside the caller's coordinated read.
     nonisolated static func readPinned(_ url: URL, expected: ViewerFileID?) -> PinnedRead {
-        guard case .success(let checked) = ViewerPath.check(url.path) else { return .refused }
+        let checked: URL
+        switch ViewerPath.check(url.path) {
+        case .success(let url): checked = url
+        case .failure(.tooLarge): return .tooLarge
+        case .failure: return .refused
+        }
         guard let id = ViewerFileID.of(checked.path), let before = stamp(checked) else { return .unreadable }
         if let expected, id != expected { return .changed }
         let fd = open(checked.path, O_RDONLY | O_NOFOLLOW)
@@ -1978,6 +1996,7 @@ enum ViewerLoader {
         guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, UInt64(info.st_ino) == id.inode, Int64(info.st_size) == before.size else {
             return .changed
         }
+        guard Int64(info.st_size) <= ViewerPath.maxBytes else { return .tooLarge }
         guard let bytes = try? handle.readToEnd() else { return .unreadable }
         guard case .success = ViewerPath.check(url.path) else { return .refused }
         guard ViewerFileID.of(checked.path) == id, stamp(checked) == before else { return .changed }
@@ -2006,6 +2025,7 @@ enum ViewerLoader {
             if gone { return Read(pages: .failed("The file isn't there any more."), stamp: nil, appName: appName, appURL: app) }
             switch pinned {
             case .refused: return Read(pages: .failed(ViewerModel.cantShowText), stamp: nil, appName: appName, appURL: app)
+            case .tooLarge: return Read(pages: .failed(ViewerPath.Refusal.tooLarge.description), stamp: nil, appName: appName, appURL: app)
             case .changed: continue
             case .unreadable:
                 return Read(pages: .failed(kind == .pdf ? "Petal can't read this PDF." : "Petal can't read this file."), stamp: nil, appName: appName, appURL: app)

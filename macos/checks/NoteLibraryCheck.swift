@@ -417,6 +417,12 @@ struct NoteLibraryCheck {
         // Only cover-named files are covers: another note's `cover: true` counts for nothing, and is kept as written.
         expect(NoteLibrary.isCoverName("About this notebook (conflicted copy).md") && NoteLibrary.isCoverName("about this notebook 2.md")
                && !NoteLibrary.isCoverName("Trip.md") && !NoteLibrary.isCoverName("About this notebook.txt"), "the cover, its conflict copies; nothing else")
+        expect(NoteLibrary.isCoverName("About this notebook.md") && NoteLibrary.isCoverName("About this notebook (conflicted copy 3).md")
+               && NoteLibrary.isCoverName("About this notebook (recovered).md") && NoteLibrary.isCoverName("About this notebook (recovered) 2.md")
+               && NoteLibrary.isCoverName("About this notebook (conflicted copy) 2.md"), "Petal's and iCloud's own copies of a cover are covers")
+        expect(!NoteLibrary.isCoverName("About this notebook – Q3.md") && !NoteLibrary.isCoverName("About this notebook trip.md")
+               && !NoteLibrary.isCoverName("About this notebooks.md") && !NoteLibrary.isCoverName("About this notebook (draft).md"),
+               "a note whose name only starts like a cover's isn't one")
         var stray = NoteFile.parse("---\nid: S1\ncover: true\nprivate: true\n---\nnot a cover", fallbackID: "", fallbackDate: Date())
         NoteLibrary.coverFlag(&stray, fileName: "Trip.md")
         expect(!stray.cover && stray.serialized().contains("cover: true"), "a stray cover: true isn't a cover, and stays in its file")
