@@ -56,14 +56,23 @@ swiftc -parse-as-library -O -o "$out/configrules" Sources/Petal/ConfigRules.swif
 "$out/configrules"
 # The first read is weighed too, against what's kept in the Keychain, and what Petal goes by is kept there as it changes.
 grep -qF '(read, refused) = ConfigRules.first(read, approved: approvedAtLaunch(), defaults: Settings.defaults, trusted: trusted)' Sources/Petal/Config.swift \
-    && grep -qF 'if file == settingsFile { keep() }' Sources/Petal/Config.swift \
+    && grep -qF 'if !ownUnreadable { keep() }' Sources/Petal/Config.swift \
     || { echo "Config: settings.json at launch is weighed against what the person last set, kept in the Keychain"; exit 1; }
+# A launch the Keychain didn't answer goes by the defaults in memory only: neither the Keychain record nor settings.json
+# is written over with them, until the person sets one of personsOwn in Petal.
+grep -qF 'ownUnreadable = true' Sources/Petal/Config.swift \
+    && grep -qF 'if loaded, !ownUnreadable { keep() }' Sources/Petal/Config.swift \
+    && grep -qF 'guard !refused.isEmpty, !ownUnreadable else { return }' Sources/Petal/Config.swift \
+    || { echo "Config: an unreadable Keychain at launch would write the defaults over what the person set"; exit 1; }
 # Claude Code or Codex from claudePath or codexPath: run only when it's that app as its maker signed it, never a script
 # or a program signed otherwise (MakerSigned, against throwaway copies; the real ones on this Mac when there are).
 swiftc -parse-as-library -O -o "$out/makersigned" Sources/Petal/MakerSigned.swift checks/MakerSignedCheck.swift
 "$out/makersigned"
-grep -qF 'if signedByMaker(provider, setting) { return setting }' Sources/Petal/App.swift \
+grep -qF 'if isTool(setting), signedByMaker(provider, setting) { return setting }' Sources/Petal/App.swift \
     || { echo "PetalApp.find: a path setting is used only when its maker signed it"; exit 1; }
+# A path setting that's set but refused finds nothing: never the login shell's or an installer's place instead.
+perl -0777 -ne 'exit(/if !setting\.isEmpty \{\n\s+if isTool\(setting\), signedByMaker\(provider, setting\) \{ return setting \}\n\s+NSLog\([^\n]*\n\s+return nil\n/ ? 0 : 1)' Sources/Petal/App.swift \
+    || { echo "PetalApp.find: a refused path setting falls back to the login shell"; exit 1; }
 # Codex without Full access works in a scratch folder of its own, never the home folder its sandbox could write.
 grep -qF '"-C", chat.folder ?? (chat.fullAccess ? NSHomeDirectory() : Self.scratch)]' Sources/Petal/Providers.swift \
     || { echo "Codex: a chat without Full access starts in its scratch folder, not the home folder"; exit 1; }

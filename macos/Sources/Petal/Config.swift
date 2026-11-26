@@ -178,11 +178,17 @@ final class Config {
     /// changing and writing a file took the main thread several milliseconds, and the settings window stuttered).
     private func update(_ file: URL, _ change: @escaping (inout [String: Any]) -> Void) {
         var root = file == settingsFile ? settings : dock
+        let ownBefore = ConfigRules.approved(root) as NSDictionary
         change(&root)
         Perf.span("config: in memory") {
             if file == settingsFile { settings = root } else { dock = root }
         }
-        if file == settingsFile { keep() }
+        if file == settingsFile {
+            // The person set one of `personsOwn` in Petal itself: that's kept, even after a launch the Keychain
+            // didn't answer. Any other change leaves what the Keychain wouldn't give alone.
+            if !ownBefore.isEqual(ConfigRules.approved(root)) { ownUnreadable = false }
+            if !ownUnreadable { keep() }
+        }
         // Someone else changed a file in the last second, before the watcher read it: read it once this is written.
         let stale = writing == 0 && currentStamps() != stamps
         let files = self.files
@@ -245,8 +251,11 @@ final class Config {
         // Only a read that said what the person chose counts as the first: one that couldn't read the file (a typo at
         // launch) leaves the next good read to be the first.
         if parsed != nil || !exists { loaded = true }
-        if loaded { keep() }
-        guard !refused.isEmpty else { return }
+        // While the Keychain hasn't given what the person last set, Petal goes by the defaults in memory only: neither
+        // the Keychain record nor settings.json is written over with them (a locked or busy Keychain at launch would
+        // otherwise erase Full access and the rest for good). A change made in Petal itself ends this (`update`).
+        if loaded, !ownUnreadable { keep() }
+        guard !refused.isEmpty, !ownUnreadable else { return }
         // Once for the file as it is now: one that can't be written is left, and Petal goes by what it has.
         let stamp = Self.stamp(settingsFile) ?? .distantPast
         guard stamp != putBack else { return }
@@ -270,6 +279,9 @@ final class Config {
     nonisolated private static let own = DispatchQueue(label: "petal.config.own", qos: .userInitiated)
     /// What was last kept (or read) there.
     @ObservationIgnored private var kept: NSDictionary?
+    /// The Keychain didn't give what was kept at launch: nothing is written over it, or over the file, until the
+    /// person changes a setting in Petal.
+    @ObservationIgnored private var ownUnreadable = false
 
     /// What Petal last went by for `ConfigRules.personsOwn`, read once, at the first read: nil when nothing was ever
     /// kept (this is the first launch of a Petal that keeps it: the file is taken as it is, once); the defaults when
@@ -284,6 +296,7 @@ final class Config {
             return approved
         case .unreadable(let status):
             NSLog("Petal settings: the Keychain didn't give what you last set for Petal AI (%d); its defaults stand until you set them in Petal.", status)
+            ownUnreadable = true
             return [:]
         }
     }

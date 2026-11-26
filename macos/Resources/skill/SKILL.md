@@ -152,7 +152,8 @@ Use, in this order:
   this file or a tool, whether Petal is running or not: `claudeAccess` to full, `computerUse` on, more in
   `aiAllowed`, fewer apps in `aiNeverLook`. Petal puts such a change back; ask the user to make it in Settings.
   `claudePath` and `codexPath` count only when they point at Claude Code or Codex itself, signed by Anthropic or
-  OpenAI (never a script or a wrapper); otherwise Petal ignores them and finds the app itself.
+  OpenAI (never a script or a wrapper); otherwise Petal doesn't run that AI app (Settings › Petal AI says why)
+  until the path is fixed or emptied, when Petal finds the app itself.
   Agents' grants (Always for this project on a vault card) live in the Keychain, not in a file: an agent gets
   one only from the person, on the card or in Settings › Vault › Agents.
 - `dock.json`: the dock itself. `apps` (its apps in the order they show: bundle ids, and `https://` addresses for

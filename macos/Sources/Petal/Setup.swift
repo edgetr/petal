@@ -25,7 +25,7 @@ final class AISetup {
                 // A path setting Petal won't run, and nothing else found: said as it is, not as a missing app.
                 let setting = app.config.string(provider.pathSetting)
                 let refused = await Task.detached {
-                    !setting.isEmpty && FileManager.default.isExecutableFile(atPath: setting) && !PetalApp.signedByMaker(provider, setting)
+                    !setting.isEmpty && !(FileManager.default.isExecutableFile(atPath: setting) && PetalApp.signedByMaker(provider, setting))
                 }.value
                 states[provider] = refused ? .failed(PetalApp.refusedPath(provider, setting)) : .missing
                 return

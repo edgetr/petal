@@ -323,13 +323,16 @@ final class PetalApp {
     }
 
     /// The path setting, only when it's that app as its maker signed it (`signedByMaker`: Petal runs it as its AI,
-    /// with the person's API key, as its own chat); else the one the person's own terminal runs (an interactive login
-    /// shell, so .zshrc counts), else the places its installer puts it.
+    /// with the person's API key, as its own chat); with no path set, the one the person's own terminal runs (an
+    /// interactive login shell, so .zshrc counts), else the places its installer puts it. A path that is set but
+    /// isn't that app (changed, moved or removed) finds nothing: falling back to the login shell would let a program
+    /// that can only write files break the signed app and have Petal run whatever .zshrc or ~/.local/bin names.
     nonisolated static func find(_ provider: Provider, setting: String) -> String? {
         let isTool = { (path: String) in !path.isEmpty && FileManager.default.isExecutableFile(atPath: path) }
-        if isTool(setting) {
-            if signedByMaker(provider, setting) { return setting }
+        if !setting.isEmpty {
+            if isTool(setting), signedByMaker(provider, setting) { return setting }
             NSLog("Petal: %@", refusedPath(provider, setting))
+            return nil
         }
         let shell = Process()
         shell.executableURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
