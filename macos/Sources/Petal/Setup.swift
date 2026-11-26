@@ -21,7 +21,15 @@ final class AISetup {
         guard !Headless.on else { return }   // a benchmark runs nothing
         Task {
             if app.paths[provider] == nil { await app.lookFor(provider) }
-            guard let path = app.paths[provider] else { states[provider] = .missing; return }
+            guard let path = app.paths[provider] else {
+                // A path setting Petal won't run, and nothing else found: said as it is, not as a missing app.
+                let setting = app.config.string(provider.pathSetting)
+                let refused = await Task.detached {
+                    !setting.isEmpty && !(FileManager.default.isExecutableFile(atPath: setting) && PetalApp.signedByMaker(provider, setting))
+                }.value
+                states[provider] = refused ? .failed(PetalApp.refusedPath(provider, setting)) : .missing
+                return
+            }
             let status = await Self.run(path, provider.statusArguments, environment: app.childEnvironment, timeout: 20)
             if let who = provider.signedIn(status: status.status, output: status.output) {
                 // Installed or signed in since Petal started (from the welcome, Settings or a terminal): the person's
@@ -152,12 +160,14 @@ enum DockGuard {
         if [ ! -d "$app" ] && [ ! -f "$backup" ]; then launchctl bootout gui/$(id -u)/\(label) 2>/dev/null; rm -f "$plist"; exit 0; fi
         [ -f "$backup" ] || exit 0
         if [ -d "$app" ] && petal_dock; then exit 0; fi
-        if [ "$(plutil -extract autohide raw -o - "$backup" 2>/dev/null)" = "true" ]; then
+        delay="$(plutil -extract autohide-delay raw -o - "$backup" 2>/dev/null)"
+        # A saved wait that long is Petal's own hiding, saved after the Dock was hidden: macOS's default goes back instead (SystemDockRules.own).
+        case "$delay" in ''|*[!0-9.]*) ;; *) if awk -v d="$delay" 'BEGIN { exit !(d + 0 >= \(SystemDockRules.hiddenDelay)) }'; then delay=hidden; fi ;; esac
+        if [ "$delay" != hidden ] && [ "$(plutil -extract autohide raw -o - "$backup" 2>/dev/null)" = "true" ]; then
           defaults write com.apple.dock autohide -bool true
         else
           defaults write com.apple.dock autohide -bool false
         fi
-        delay="$(plutil -extract autohide-delay raw -o - "$backup" 2>/dev/null)"
         case "$delay" in ''|*[!0-9.]*) defaults delete com.apple.dock autohide-delay 2>/dev/null ;; *) defaults write com.apple.dock autohide-delay -float "$delay" ;; esac
         if grep -q '"autohide-time-modifier"' "$backup"; then
           pace="$(plutil -extract autohide-time-modifier raw -o - "$backup" 2>/dev/null)"
@@ -172,7 +182,7 @@ enum DockGuard {
           case "$size" in ''|*[!0-9.]*) defaults delete com.apple.dock tilesize 2>/dev/null ;; *) defaults write com.apple.dock tilesize -float "$size" ;; esac
         fi
         if grep -q '"no-bouncing"' "$backup"; then
-          if [ "$(plutil -extract no-bouncing raw -o - "$backup" 2>/dev/null)" = "true" ]; then defaults write com.apple.dock no-bouncing -bool true; else defaults delete com.apple.dock no-bouncing 2>/dev/null; fi
+          if [ "$delay" != hidden ] && [ "$(plutil -extract no-bouncing raw -o - "$backup" 2>/dev/null)" = "true" ]; then defaults write com.apple.dock no-bouncing -bool true; else defaults delete com.apple.dock no-bouncing 2>/dev/null; fi
         fi
         rm -f "$backup"
         killall Dock

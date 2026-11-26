@@ -3,8 +3,9 @@ import Observation
 import SwiftUI
 
 /// The person's grants: an agent may use a vault item in a project (and everything in it) without asking. Kept in
-/// Application Support/Petal/agent-grants.json (`PETAL_AGENT_GRANTS` points elsewhere for testing), with no secret
-/// in it: the item's id and title, the project's folder and the agent.
+/// the Keychain beside the vault (`OwnRecords.grants`), never in a file any program could write itself a grant
+/// into, with no secret in it: the item's id and title, the project's folder and the agent. Under
+/// `PETAL_SUPPORT_DIR` (a bench or a check) they're kept only while Petal runs, and start empty.
 @MainActor @Observable
 final class AgentGrants {
     static let shared = AgentGrants()
@@ -12,10 +13,11 @@ final class AgentGrants {
     private(set) var grants: [AgentAccess.Grant] = []
     private(set) var loaded = false
 
-    nonisolated static var file: URL {
-        if let path = ProcessInfo.processInfo.environment["PETAL_AGENT_GRANTS"], !path.isEmpty { return URL(fileURLWithPath: path) }
-        return Config.supportFolder.appending(path: "agent-grants.json")
-    }
+    /// Where an older Petal kept them, as a plain file: never read (anyone could have written it), and removed.
+    nonisolated static var oldFile: URL { Config.supportFolder.appending(path: "agent-grants.json") }
+    nonisolated private static let inKeychain = (ProcessInfo.processInfo.environment["PETAL_SUPPORT_DIR"] ?? "").isEmpty
+    /// The Keychain gave what it keeps (or had none): saving won't write over grants it wouldn't give.
+    @ObservationIgnored private var readable = false
 
     nonisolated private static let queue = DispatchQueue(label: "petal.agent-grants", qos: .utility)
     nonisolated static func flush() { queue.sync {} }
@@ -27,14 +29,33 @@ final class AgentGrants {
             // A grant for an agent Petal can't verify (opencode, from an older Petal) counts for nothing: left out.
             // So does one for a project no card ever offers Always for (the home folder and above, or no folder).
             let home = NSHomeDirectory()
-            let read = ((try? Data(contentsOf: Self.file)).flatMap { try? JSONDecoder().decode([AgentAccess.Grant].self, from: $0) } ?? [])
+            let stored = Self.inKeychain ? OwnRecords.read(OwnRecords.grants) : .none
+            var data: Data?
+            var readable = true
+            switch stored {
+            case .found(let found): data = found
+            case .none: break
+            case .unreadable(let status):
+                readable = false
+                NSLog("Petal: the Keychain didn't give agents' grants (%d); each use asks until it does.", status)
+            }
+            let read = (data.flatMap { try? JSONDecoder().decode([AgentAccess.Grant].self, from: $0) } ?? [])
                 .filter { $0.storable && $0.project.hasPrefix("/") && !AgentAccess.tooBroad($0.project, home: home) }
+            // Grants an older Petal kept in a plain file aren't carried over: any program could have written one
+            // there. The person grants again on the card; the file goes.
+            if Self.inKeychain, readable, FileManager.default.fileExists(atPath: Self.oldFile.path) {
+                try? FileManager.default.removeItem(at: Self.oldFile)
+                NSLog("Petal: agents' grants from agent-grants.json weren't carried over (a plain file anyone could write); they're asked for again.")
+            }
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard !self.loaded else { return }
-                    // A grant made before the file was read is kept with what was there.
-                    self.grants = read + self.grants.filter { new in !read.contains { $0.id == new.id } }
+                    self.readable = readable
+                    // A grant made before they were read is kept with what was there.
+                    let made = self.grants.filter { new in !read.contains { $0.id == new.id } }
+                    self.grants = read + made
                     self.loaded = true
+                    if !made.isEmpty { self.save() }
                 }
             }
         }
@@ -94,11 +115,12 @@ final class AgentGrants {
     @ObservationIgnored private var snapshot = false
 
     private func save() {
-        guard !snapshot else { return }
+        // Read first (or unreadable): what's kept isn't written over with only the grants made since.
+        guard !snapshot, Self.inKeychain, loaded, readable else { return }
         let list = grants
         Self.queue.async {
-            try? FileManager.default.createDirectory(at: Self.file.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if let data = try? JSONEncoder().encode(list) { try? data.write(to: Self.file, options: .atomic) }
+            guard let data = try? JSONEncoder().encode(list) else { return }
+            if !OwnRecords.write(OwnRecords.grants, data) { NSLog("Petal: the Keychain didn't keep agents' grants.") }
         }
     }
 

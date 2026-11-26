@@ -51,7 +51,7 @@ MainActor.assumeIsolated {
         exit(0)
     case .restoreDock:
         // `Petal --restore-dock` gives macOS's Dock back without Petal running (`petal restore-dock`).
-        SystemDock.restore()
+        SystemDock.restore(leftover: true)
         exit(0)
     case .benchWindowsIdle(let name):
         // Petal's windows, timed headless on a copy of the settings (SettingsBench.swift).

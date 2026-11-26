@@ -6,6 +6,11 @@ Read this before changing what Petal does for the person, or how it is described
 
 Petal is an AI-native dock for the Mac, with Claude built in: a native app (macOS 26 and later, in `macos/`) that replaces macOS's Dock with one dock of the person's apps, and has Petal AI, the vault, routines and Petal Notes. It runs on the Mac only.
 
+The owner is Gökay Ege Süren. The repository is `edgetr/petal` on GitHub (public, MIT; where it is checked out is under Fleet in `docs/agents/repo.md`). Petal is an Edgetr product; the studio site (`edgetr/edgetr`, in `~/edgetr`) describes it and follows `AGENTS.md` and this file for facts.
+
+- **Status:** released, at 2.1.x (`macos/VERSION`); it updates itself from GitHub Releases.
+- **Business model:** free and open source. Petal has no server and no analytics. Its AI features use the user's own Claude Code or Codex login, and count toward that plan's usage, or the user's own Anthropic or OpenAI API key. Without an AI app, everything else works.
+
 - **One dock:** Petal's dock is one list of apps and website shortcuts, in the order they show, the same on every Desktop (`dock.json`'s `apps`), in Petal's accent. It has a built-in tiling window manager (`tiling`, off by default), per Desktop.
 - **Website shortcuts:** an `https://` address among the dock's apps is a dock item with the site's own icon and a globe badge. A mail address or another kind of link (`mailto:`) is never taken for a website.
 - **AI in the dock, optional:** the AI button opens a chat with the user's own Claude Code or Codex (their own CLI and plan; `aiProviders` picks Claude, Codex, both or none, and `chatProvider` the one the chat uses). Petal's tools let it change any setting and the dock's apps; when a setting can't do it, it may edit Petal's code. A ring around the button shows that AI's usage.

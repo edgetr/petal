@@ -150,8 +150,13 @@ Use, in this order:
 
 - `settings.json`: settings; `petal_get_state` (or `petal get`) lists every key with its default and help.
   Four of them widen only in Petal's own windows (Settings, the chat's options, Always on a card), never from
-  this file or a tool while Petal runs: `claudeAccess` to full, `computerUse` on, more in `aiAllowed`, fewer apps
-  in `aiNeverLook`. Petal puts such a change back; ask the user to make it in Settings.
+  this file or a tool, whether Petal is running or not: `claudeAccess` to full, `computerUse` on, more in
+  `aiAllowed`, fewer apps in `aiNeverLook`. Petal puts such a change back; ask the user to make it in Settings.
+  `claudePath` and `codexPath` count only when they point at Claude Code or Codex itself, signed by Anthropic or
+  OpenAI (never a script or a wrapper); otherwise Petal doesn't run that AI app (Settings › Petal AI says why)
+  until the path is fixed or emptied, when Petal finds the app itself.
+  Agents' grants (Always for this project on a vault card) live in the Keychain, not in a file: an agent gets
+  one only from the person, on the card or in Settings › Vault › Agents.
 - `dock.json`: the dock itself. `apps` (its apps in the order they show: bundle ids, and `https://` addresses for
   website shortcuts, shown with the site's own icon and a globe badge), `position` (bottom, left, right),
   `autoHide`, `dock` (petal or macos), `keepWindowsClear`. There is no `modes.json`: one from an earlier Petal,
@@ -239,7 +244,7 @@ When the user says "get the Anthropic key from Petal to test this" or "use the l
   Look, Notes, Petal AI, Vault, Routines, Privacy, About. The bar across its top finds any setting by name as the
   user types, and Return hands what they typed to Petal AI. Point the user at a page by these names.
 - Petal hides macOS's Dock while it runs and gives it back on quit; `petal restore-dock` gives it back by
-  hand. Permissions it may need: Accessibility (window lists, badges, notes on windows, using apps, tiling), Screen
+  hand, also when it's still hidden with Petal's dock off (`petal doctor` reports that). Permissions it may need: Accessibility (window lists, badges, notes on windows, using apps, tiling), Screen
   Recording (previews) and Automation for each browser (reading a tab's address) and for Music and Spotify (now
   playing). Accessibility is asked in the welcome; the others where they're first used (a window's preview, a note's
   place menu in a browser, a player's preview), and all four are listed in Settings › Privacy.

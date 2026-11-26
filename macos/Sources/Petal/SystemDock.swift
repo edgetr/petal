@@ -59,10 +59,14 @@ enum SystemDock {
     static func replace() -> Bool {
         // Saved once, before the first change. A file from an older Petal lacks the newer settings: theirs now are
         // still the person's own, so they're added to it.
-        var saved = isReplaced ? Config.readObject(backup) : [:]
+        // Never Petal's own hiding as theirs: a Dock found already hidden (its file lost while Petal was the dock)
+        // is saved as macOS's default instead (SystemDockRules.own).
+        let found = isReplaced ? Config.readObject(backup) : [:]
+        var saved = found
         let missing = keys.filter { saved[$0.0] == nil }
-        if !missing.isEmpty {
-            for (key, _) in missing { saved[key] = read(key) ?? NSNull() }
+        for (key, _) in missing { saved[key] = read(key) ?? NSNull() }
+        saved = SystemDockRules.own(saved)
+        if !missing.isEmpty || !NSDictionary(dictionary: saved).isEqual(to: found) {
             Config.writeObject(saved, to: backup)
             // Read back: every setting Petal changes must be saved before it changes one.
             let written = Config.readObject(backup)
@@ -83,9 +87,27 @@ enum SystemDock {
         return true
     }
 
-    static func restore() {
-        guard isReplaced else { return }
-        let saved = Config.readObject(backup)
+    /// Whether macOS's Dock still has Petal's hiding on it (a wait only Petal sets), saved settings or not.
+    static var isLeftHidden: Bool { SystemDockRules.isHidden(delay: read("autohide-delay")) }
+
+    /// Gives macOS's Dock back as the person had it, from the saved settings. With `leftover`, a Dock still hidden
+    /// by Petal with nothing saved (or saved settings that were Petal's own) is shown too: for choosing macOS's Dock,
+    /// `petal restore-dock` and `doctor --fix`, where Petal isn't the dock. Returns whether anything changed.
+    @discardableResult
+    static func restore(leftover: Bool = false) -> Bool {
+        guard isReplaced else {
+            guard leftover, let clear = SystemDockRules.leftover(delay: read("autohide-delay")) else { return false }
+            put(clear)
+            restartDock()
+            return true
+        }
+        put(SystemDockRules.own(Config.readObject(backup)))
+        try? FileManager.default.removeItem(at: backup)
+        restartDock()
+        return true
+    }
+
+    private static func put(_ saved: [String: Any]) {
         for (key, type) in keys {
             guard let value = saved[key] else { continue }   // never saved: never changed
             if !(value is NSNull) {
@@ -94,8 +116,6 @@ enum SystemDock {
                 defaults("delete", "com.apple.dock", key)
             }
         }
-        try? FileManager.default.removeItem(at: backup)
-        restartDock()
     }
 
     private static func read(_ key: String) -> Any? {
