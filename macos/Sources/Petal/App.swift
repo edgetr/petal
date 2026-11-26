@@ -207,7 +207,8 @@ final class PetalApp {
             hotkeys.refresh()
             popups.closeAll()
             popups.closeAsk()
-            SystemDock.restore()
+            // Also a Dock still hidden by Petal with nothing saved: Petal isn't the dock now, so it must show.
+            SystemDock.restore(leftover: true)
         }
     }
 

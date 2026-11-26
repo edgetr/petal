@@ -42,6 +42,11 @@ swiftc -parse-as-library -O -o "$out/signals" Sources/Petal/SignalRules.swift ch
 # never shortened later, nothing creeps, and turning it off gives every window back (DockRules).
 swiftc -parse-as-library -O -o "$out/dockrules" Sources/Petal/DockRules.swift checks/DockRulesCheck.swift
 "$out/dockrules"
+# macOS's Dock: settings saved after Petal had already hidden it are never put back as the person's own, and a Dock
+# left hidden by Petal with nothing saved is shown again by choosing macOS's Dock, restore-dock and doctor --fix
+# (SystemDockRules).
+swiftc -parse-as-library -O -o "$out/systemdock" Sources/Petal/SystemDockRules.swift checks/SystemDockRulesCheck.swift
+"$out/systemdock"
 # Magnification: the icon under the pointer grows by the amount set and stays under it, its neighbours ease aside
 # without overlapping, the glass stretches with them, nothing grows past the room the panel keeps, and the zone the
 # pointer counts as at the dock (MagnifyRules). `Petal --bench-dock` drives the real dock the same way.
