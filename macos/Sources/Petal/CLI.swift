@@ -57,9 +57,8 @@ enum CLI {
         case "restore-dock":
             // Done here, not by the running Petal: it has to work when Petal has crashed.
             MainActor.assumeIsolated {
-                guard SystemDock.isReplaced else { print("macOS's Dock is already as you had it."); return }
-                SystemDock.restore()
-                print("macOS's Dock is back as you had it.")
+                // Also a Dock still hidden by Petal with nothing saved to put back (SystemDock.restore).
+                print(SystemDock.restore(leftover: true) ? "macOS's Dock is back as you had it." : "macOS's Dock is already as you had it.")
             }
         case "logs":
             let minutes = rest.first.flatMap(Int.init) ?? 30

@@ -72,9 +72,13 @@ enum Doctor {
         // macOS's Dock: never left hidden without Petal running.
         let running = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
             .contains { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && PetalProcess.isDock(pid: $0.processIdentifier) }
-        if SystemDock.isReplaced && !running {
-            if fix { SystemDock.restore() }
-            note("error", "dock", "macOS's Dock is hidden but Petal isn't running.", fixed: fix ? "gave macOS its Dock back" : nil, fixable: true)
+        let petalDock = (dock["dock"] as? String ?? "petal") == "petal"
+        if (SystemDock.isReplaced || SystemDock.isLeftHidden) && (!running || !petalDock) {
+            // Hidden with its settings saved, or still with Petal's hiding on it and nothing saved (saved settings
+            // that were Petal's own, put back): either way macOS's Dock never shows.
+            if fix { SystemDock.restore(leftover: true) }
+            note("error", "dock", running ? "macOS's Dock is in use but still hidden by Petal." : "macOS's Dock is hidden but Petal isn't running.",
+                 fixed: fix ? "gave macOS its Dock back" : nil, fixable: true)
         } else if dock["welcomed"] as? Bool != true {
             note("ok", "dock", "Petal hasn't been set up yet: open it to start.")
         } else if (dock["dock"] as? String ?? "petal") == "petal" && !running {

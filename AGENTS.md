@@ -2,19 +2,15 @@
 
 Updated 2026-11-16. This file holds Petal's current rules for every coding agent (Claude, Codex, Gemini, opencode). It states the decision that applies now, not its history.
 
-This file is the core every session loads: the project in brief, the rules any change could break, and a map of the rest. The files under `docs/agents/` are part of these rules: before you change something the map lists, read its file first. That is required, not optional.
+This file is the core every session loads: the project in one line, the rules any change could break, and a map of the rest. The files under `docs/agents/` are part of these rules: before you change something the map lists, read its file first. That is required, not optional.
 
 ## Project
 
 Petal is an AI-native dock for the Mac, with Claude built in: a native app (macOS 26 and later, in `macos/`) that replaces macOS's Dock with one dock of the person's apps, and has Petal AI, the vault, routines and Petal Notes. It runs on the Mac only.
 
-The owner is Gökay Ege Süren. The repository is `edgetr/petal` on GitHub (public, MIT; where it is checked out is under Fleet in `docs/agents/repo.md`). Petal is an Edgetr product; the studio site (`edgetr/edgetr`, in `~/edgetr`) describes it and follows this file for facts.
-
-- **Status:** released, at 2.1.x (`macos/VERSION`); it updates itself from GitHub Releases.
-- **Business model:** free and open source. Petal has no server and no analytics. Its AI features use the user's own Claude Code or Codex login, and count toward that plan's usage, or the user's own Anthropic or OpenAI API key. Without an AI app, everything else works.
 - **Wording:** Petal is a Mac app: say the Mac for where it runs, and macOS 26 or later for what it needs.
 
-What Petal does, part by part, and the promises each part makes: `docs/agents/product.md`.
+The owner, the repository, status, business model, and what Petal does, part by part, with the promises each part makes: `docs/agents/product.md`.
 
 ## Read before you change
 
@@ -31,7 +27,7 @@ What Petal does, part by part, and the promises each part makes: `docs/agents/pr
 | how anything in the app looks or is worded (a view, a card, a settings row, `Scale.swift`, colors, glass) | `docs/agents/design.md` (The app) |
 | `site/`, `brand/site-views.py`, `brand/og.html`, `brand/og.sh`, the promotional video, `site/vercel.json` | `docs/agents/design.md` (Marketing site) |
 | a check, a bench or a snapshot (`macos/checks/`, `macos/bench/`, `Bench*.swift`, any `Petal --…-check`), or proving that a change works | `docs/agents/verification.md` |
-| `AGENTS.md`, `CLAUDE.md` or `docs/agents/` | Documentation ownership, below |
+| `AGENTS.md`, `CLAUDE.md` or `docs/agents/` | `docs/agents/documentation.md`, and Documentation rules, below |
 
 A change that touches several rows reads every file they name.
 
@@ -81,26 +77,8 @@ The minimum before saying something works:
 
 Every other check and what it proves (`macos/checks/run.sh`, `--snapshot`, `--helpers-check`, `--browser-check`, the benches): `docs/agents/verification.md`.
 
-## Documentation ownership
+## Documentation rules
 
-| File | Owns |
-| --- | --- |
-| `AGENTS.md` | the project in brief, the rules every session needs, and the map of what to read before changing what |
-| `docs/agents/product.md` | what Petal does for the person, part by part |
-| `docs/agents/repo.md` | the fleet, the stack, the icon, user data, the installer and how a release is made |
-| `docs/agents/app-core.md` | Petal.app's overview: its shell, the dock, windows, the settings window, updates, the socket, and how the pieces fit |
-| `docs/agents/app-settings-tools.md` | settings and tools as one list each, how every agent can change Petal (MCP, skill, CLI), and the personal source |
-| `docs/agents/app-ai.md` | Petal AI's chat, providers, tools on the Mac, chats and their notes, routines and quick calls |
-| `docs/agents/app-vault.md` | the vault, agents outside Petal using it, and secrets kept out of pictures |
-| `docs/agents/app-computer-use.md` | Petal AI using apps, a hidden display and a browser for each run |
-| `docs/agents/app-notes.md` | what every agent must hold to in Petal Notes' code, and its files |
-| `docs/agents/design.md` | the design language of the app and of the marketing site |
-| `docs/agents/verification.md` | every check, bench and snapshot, and what each one proves |
-| `CLAUDE.md` | Claude-specific notes; imports this file |
-| `docs/petal-notes.md` | how Petal Notes is built: every rule of its files, journal, desk, editor, window, canvas, viewer and helpers, and how to check them |
-| `README.md` | the public description, requirements and install steps |
-| `CONTRIBUTING.md` | how to set up, what a pull request needs, and the rules for an agent working on someone's Mac |
-| `SECURITY.md` | how to report a hole privately, and what Petal keeps and where |
-| `~/.config/petal/instructions.md` | the user's own notes for Petal's in-dock Claude (not in the repository) |
+Which file owns what: `docs/agents/documentation.md`.
 
-`AGENTS.md` stays rules-only and under 12,000 characters. Feature specs, design detail, history and long explanations go in the matching `docs/agents/*.md` file; a new file there gets a row in the map above and in this table. A change also fixes the documents it makes untrue: its `docs/agents/` file, `docs/petal-notes.md` and Petal's skill. Change the skill when Petal's files, tools or commands change, so agents stay right.
+`AGENTS.md` stays rules-only and under 12,000 characters. Feature specs, design detail, history and long explanations go in the matching `docs/agents/*.md` file; a new file there gets a row in the map above and in `docs/agents/documentation.md`. A change also fixes the documents it makes untrue: its `docs/agents/` file, `docs/petal-notes.md` and Petal's skill. Change the skill when Petal's files, tools or commands change, so agents stay right.
