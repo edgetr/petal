@@ -216,8 +216,15 @@ extension Viewers {
                             guard self.mayView(ViewerPath.notePlace(url.path, notesRoot: notesRoot), by: caller) else { return fail(Self.privateText) }
                             guard ViewerKind.of(url.path) == .pdf else { return fail("Comments go into a PDF; that file isn't one.") }
                             // What was written is a fact of its own (no viewer's state): told while its asker is there.
+                            // Checked again right before the write and the answer: the notebook may turn Private while
+                            // the file is looked up or the person is asked.
+                            let place = ViewerPath.notePlace(url.path, notesRoot: notesRoot)
                             self.comments(url, opened: path, intoOriginal: original, caller: caller, live: live,
-                                          { value in told { Told(value) } }, fail)
+                                          mayStill: { [weak self] in self?.mayView(place, by: caller) ?? false },
+                                          { value in
+                                              guard self.mayView(place, by: caller) else { return fail(Self.privateText) }
+                                              told { Told(value) }
+                                          }, fail)
                         }
                     }
                 }
@@ -375,6 +382,7 @@ extension Viewers {
     /// The notes on a PDF as comments (ViewerPDFComments): into a copy beside it, or into the PDF itself once the
     /// person allows it.
     func comments(_ pdf: URL, opened: String, intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool = { true },
+                  mayStill: @escaping @MainActor () -> Bool = { true },
                   _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         // The notes on this PDF by the one resolver the margin uses (ViewerFiles: each place's own file wherever it
         // went, else its bookmark's, else its path's), worked out off the main thread.
@@ -389,14 +397,14 @@ extension Viewers {
                 MainActor.assumeIsolated {
                     guard live() else { return fail(NoteDesk.hungUp) }
                     guard let id else { return fail("Petal can't read that file now.") }
-                    self.comments(pdf, file: id, onFile: found, intoOriginal: intoOriginal, caller: caller, live: live, send, fail)
+                    self.comments(pdf, file: id, onFile: found, intoOriginal: intoOriginal, caller: caller, live: live, mayStill: mayStill, send, fail)
                 }
             }
         }
     }
 
     private func comments(_ pdf: URL, file: ViewerFileID, onFile: Set<String>, intoOriginal: Bool, caller: String?, live: @escaping @Sendable () -> Bool,
-                          _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
+                          mayStill: @escaping @MainActor () -> Bool, _ send: @escaping (Any) -> Void, _ fail: @escaping (String) -> Void) {
         let comments = app.paper.store.notes.compactMap { paper -> ViewerPDFComments.Comment? in
             // For an agent, only the notes it may read (a Private notebook's never leave it in a file an agent reads).
             guard paper.version == nil, readable(paper, by: caller),
@@ -408,6 +416,7 @@ extension Viewers {
         guard !comments.isEmpty else { return fail("No notes are on this PDF yet.") }
         let write = {
             guard live() else { return fail(NoteDesk.hungUp) }
+            guard mayStill() else { return fail(Self.privateText) }
             // Its asker hanging up stops it right up to the change (checked inside the coordinated write).
             ViewerPDFComments.write(pdf, comments: comments, intoOriginal: intoOriginal, author: NSFullUserName(), expected: file, live: live) { outcome in
                 switch outcome {
