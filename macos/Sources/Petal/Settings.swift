@@ -84,8 +84,8 @@ enum Settings {
     static let ai: [Setting] = [
         Setting("aiProviders", .list(["claude"]), "The AI apps Petal uses, each the user's own install and account: claude, codex, both, or none ([] = no AI; the dock still works)."),
         Setting("chatProvider", .string("claude"), "Which of aiProviders the chat panel, the usage ring and small jobs use: claude or codex."),
-        Setting("claudePath", .string(""), "Where Claude Code is, when Petal can't find it by itself (a path to `claude`). The person's to set, in settings.json.", forTools: false),
-        Setting("codexPath", .string(""), "Where Codex is, when Petal can't find it by itself (a path to `codex`). The person's to set, in settings.json.", forTools: false),
+        Setting("claudePath", .string(""), "Where Claude Code is, when Petal can't find it by itself (a path to `claude` itself, signed by Anthropic: a script or wrapper isn't used). The person's to set, in settings.json.", forTools: false),
+        Setting("codexPath", .string(""), "Where Codex is, when Petal can't find it by itself (a path to `codex` itself, signed by OpenAI: a script or wrapper isn't used). The person's to set, in settings.json.", forTools: false),
         Setting("chatModel", .string("sonnet"), "The chat's model with Claude: haiku, sonnet, opus or fable."),
         Setting("chatEffort", .string("medium"), "The chat's effort with Claude: low, medium, high, xhigh or max."),
         Setting("codexModel", .string(""), "Codex chat model; empty = Codex's own default."),

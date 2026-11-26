@@ -42,7 +42,8 @@ struct ConfigRulesCheck {
             ConfigRules.taken(disk, over: memory, defaults: defaults)
         }
         func strings(_ settings: [String: Any], _ key: String) -> [String] { settings[key] as? [String] ?? defaults[key] as? [String] ?? [] }
-        expect(ConfigRules.personsOwn.sorted() == ["aiAllowed", "aiNeverLook", "claudeAccess", "computerUse"], "the four settings that are the person's own")
+        expect(ConfigRules.personsOwn.sorted() == ["aiAllowed", "aiNeverLook", "claudeAccess", "claudePath", "codexPath", "computerUse"],
+               "the settings that are the person's own: the four and the AI apps' paths")
 
         // Full access.
         var answer = taken(["claudeAccess": "full", "magnify": false], over: ["claudeAccess": "auto"])
@@ -100,10 +101,60 @@ struct ConfigRulesCheck {
         // Several at once, and a file that asks for nothing more.
         answer = taken(["claudeAccess": "full", "computerUse": true, "aiAllowed": ["quit"], "aiNeverLook": [String](), "accentColor": "#112233"],
                        over: ["computerUse": false])
-        expect(answer.refused == ConfigRules.personsOwn && answer.settings["accentColor"] as? String == "#112233", "all four at once are all refused", "\(answer)")
+        expect(answer.refused == ["claudeAccess", "computerUse", "aiAllowed", "aiNeverLook"] && answer.settings["accentColor"] as? String == "#112233",
+               "all four at once are all refused", "\(answer)")
         let same: [String: Any] = ["claudeAccess": "full", "computerUse": false, "aiAllowed": ["quit"], "aiNeverLook": ["com.example.bank"], "magnify": false]
         answer = taken(same, over: same)
         expect(answer.refused.isEmpty && (answer.settings as NSDictionary).isEqual(same as NSDictionary), "a file that says what Petal has is taken whole")
+
+        // Which program is Petal's AI: a path pointed somewhere new is taken only when it's that app, signed by its
+        // maker (`trusted`, here made up: only paths under /signed are).
+        let signed = { (key: String, path: String) in path.hasPrefix("/signed/") && (key == "claudePath" || key == "codexPath") }
+        func pathTaken(_ disk: [String: Any], over memory: [String: Any]) -> (settings: [String: Any], refused: [String]) {
+            ConfigRules.taken(disk, over: memory, defaults: defaults, trusted: signed)
+        }
+        answer = pathTaken(["claudePath": "/tmp/fake/claude", "magnify": false], over: [:])
+        expect(answer.settings["claudePath"] == nil && answer.refused == ["claudePath"] && answer.settings["magnify"] as? Bool == false,
+               "a path to a program that isn't Claude Code as Anthropic signed it isn't taken, the rest is", "\(answer)")
+        answer = pathTaken(["codexPath": "/tmp/fake/codex"], over: ["codexPath": "/signed/codex"])
+        expect(answer.settings["codexPath"] as? String == "/signed/codex" && answer.refused == ["codexPath"], "nor one put over a signed one", "\(answer)")
+        answer = pathTaken(["claudePath": "/signed/claude"], over: [:])
+        expect(answer.settings["claudePath"] as? String == "/signed/claude" && answer.refused.isEmpty, "one to the app as its maker signed it is taken")
+        answer = pathTaken(["claudePath": ""], over: ["claudePath": "/signed/claude"])
+        expect(answer.settings["claudePath"] as? String == "" && answer.refused.isEmpty, "emptied is taken: Petal finds the app itself")
+        answer = pathTaken([:], over: ["codexPath": "/signed/codex"])
+        expect(answer.settings["codexPath"] == nil && answer.refused.isEmpty, "and so is the key taken out")
+        answer = pathTaken(["claudePath": "/elsewhere/claude"], over: ["claudePath": "/elsewhere/claude"])
+        expect(answer.refused.isEmpty, "a path Petal already goes by stays")
+        answer = pathTaken(["claudePath": 3], over: [:])
+        expect(answer.refused.isEmpty, "one that isn't text is no path (the default, empty)")
+        answer = taken(["claudePath": "/signed/claude"], over: [:])
+        expect(answer.refused == ["claudePath"], "with nothing to vouch for it, no new path is taken")
+
+        // At launch: the file weighed against what Petal last went by, kept in the Keychain, as if Petal had run all
+        // along. A file written while Petal wasn't running widens nothing.
+        let keptBefore: [String: Any] = ["claudeAccess": "auto", "computerUse": false, "aiAllowed": ["quit"], "aiNeverLook": ["com.example.bank"]]
+        let tampered: [String: Any] = ["claudeAccess": "full", "computerUse": true, "aiAllowed": ["quit", "trash"], "aiNeverLook": [String](),
+                                       "claudePath": "/tmp/fake/claude", "accentColor": "#445566"]
+        var launch = ConfigRules.first(tampered, approved: keptBefore, defaults: defaults, trusted: signed)
+        expect(launch.refused == ConfigRules.personsOwn.filter { $0 != "codexPath" }, "every widening in the file at launch is refused", "\(launch)")
+        expect(launch.settings["claudeAccess"] as? String == "auto" && launch.settings["computerUse"] as? Bool == false
+               && strings(launch.settings, "aiAllowed") == ["quit"] && strings(launch.settings, "aiNeverLook") == ["com.example.bank"]
+               && launch.settings["claudePath"] == nil && launch.settings["accentColor"] as? String == "#445566",
+               "at launch Petal goes by what the person last set, and takes the rest of the file", "\(launch)")
+        launch = ConfigRules.first(tampered, approved: [:], defaults: defaults, trusted: signed)
+        expect(launch.settings["claudeAccess"] as? String != "full" && strings(launch.settings, "aiAllowed").isEmpty
+               && Set(strings(launch.settings, "aiNeverLook")) == Set(strings(defaults, "aiNeverLook")) && launch.settings["claudePath"] == nil,
+               "what the Keychain wouldn't give is the defaults, which widen nothing", "\(launch)")
+        launch = ConfigRules.first(tampered, approved: nil, defaults: defaults, trusted: signed)
+        expect(launch.refused.isEmpty && (launch.settings as NSDictionary).isEqual(tampered as NSDictionary),
+               "nothing ever kept (the first launch of a Petal that keeps it): the file is taken as it is, once")
+        let narrower: [String: Any] = ["claudeAccess": "auto", "computerUse": false, "aiAllowed": [String](), "aiNeverLook": ["com.example.bank", "com.example.mail"]]
+        launch = ConfigRules.first(narrower, approved: ["claudeAccess": "full", "aiAllowed": ["quit"], "aiNeverLook": ["com.example.bank"]],
+                                   defaults: defaults, trusted: signed)
+        expect(launch.refused.isEmpty && (launch.settings as NSDictionary).isEqual(narrower as NSDictionary), "a file narrowed while Petal was away is taken")
+        let kept = ConfigRules.approved(tampered)
+        expect(Set(kept.keys) == ["claudeAccess", "computerUse", "aiAllowed", "aiNeverLook", "claudePath"], "only the person's own settings are kept", "\(kept)")
 
         // Swept: settings.json read again with every mix of the four, including values of the wrong type, as Config
         // reads them (a value that isn't the setting's type is its default). Whatever the file says, Petal AI may do

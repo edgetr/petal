@@ -21,7 +21,15 @@ final class AISetup {
         guard !Headless.on else { return }   // a benchmark runs nothing
         Task {
             if app.paths[provider] == nil { await app.lookFor(provider) }
-            guard let path = app.paths[provider] else { states[provider] = .missing; return }
+            guard let path = app.paths[provider] else {
+                // A path setting Petal won't run, and nothing else found: said as it is, not as a missing app.
+                let setting = app.config.string(provider.pathSetting)
+                let refused = await Task.detached {
+                    !setting.isEmpty && !(FileManager.default.isExecutableFile(atPath: setting) && PetalApp.signedByMaker(provider, setting))
+                }.value
+                states[provider] = refused ? .failed(PetalApp.refusedPath(provider, setting)) : .missing
+                return
+            }
             let status = await Self.run(path, provider.statusArguments, environment: app.childEnvironment, timeout: 20)
             if let who = provider.signedIn(status: status.status, output: status.output) {
                 // Installed or signed in since Petal started (from the welcome, Settings or a terminal): the person's

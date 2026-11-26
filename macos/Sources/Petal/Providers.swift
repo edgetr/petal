@@ -96,7 +96,10 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
             return arguments + ["--allowedTools", "mcp__petal", "Bash(petal doctor:*)", "Bash(petal logs:*)",
                                 "Bash(\(petal) doctor:*)", "Bash(\(petal) logs:*)"] + chat.allowed
         case .codex:
-            var arguments = ["exec", "--json", "--skip-git-repo-check", "-C", chat.folder ?? NSHomeDirectory()]
+            // Where it works, which its sandbox may write: the chat's own folder (a helper's worktree), or with Full
+            // access (no sandbox) the home folder. Otherwise a scratch folder of its own, so a chat's commands never
+            // write the home folder: Petal's settings, the person's shell files, other apps' configuration.
+            var arguments = ["exec", "--json", "--skip-git-repo-check", "-C", chat.folder ?? (chat.fullAccess ? NSHomeDirectory() : Self.scratch)]
             arguments += chat.fullAccess ? ["--dangerously-bypass-approvals-and-sandbox"] : ["--sandbox", "workspace-write"]
             if chat.foreign { arguments += ["-c", "project_doc_max_bytes=0"] }
             if !chat.model.isEmpty { arguments += ["-m", chat.model] }
@@ -113,6 +116,14 @@ enum Provider: String, CaseIterable, Identifiable, Sendable {
             if let session = chat.session, Self.sessionShaped(session) { arguments += ["resume", session] }
             return arguments + ["-"]
         }
+    }
+
+    /// The folder Codex works in for a chat without Full access or a folder of its own: in the temporary folder,
+    /// which its sandbox may write anyway, made when it's needed.
+    static var scratch: String {
+        let folder = (NSTemporaryDirectory() as NSString).appendingPathComponent("Petal chat")
+        try? FileManager.default.createDirectory(atPath: folder, withIntermediateDirectories: true)
+        return folder
     }
 
     /// A session's id as either AI names one (letters, digits and hyphens): what's kept with a chat is in a plain

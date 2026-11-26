@@ -26,7 +26,8 @@ Petal has no server and no analytics. Everything below is on the person's own Ma
 | An API key for Petal's own AI runs | The Keychain, service `tech.edgetr.petal.api` | Handed only to the AI app Petal starts, in its environment. |
 | Settings, the dock's apps, what Petal AI remembers, routines | Plain files in `~/.config/petal/` | Not secrets, and not encrypted. |
 | Notes | Markdown files in iCloud Drive (`Petal Notes`) | Protected as any file there is; Petal doesn't encrypt them. |
-| Chats, what Petal AI did, agents' grants | `~/Library/Application Support/Petal/` | A grant holds no secret. What Petal AI did is put through the vault's redaction before it's kept. |
+| Chats, what Petal AI did | `~/Library/Application Support/Petal/` | What Petal AI did is put through the vault's redaction before it's kept. |
+| Agents' grants, and what the person last set for how far Petal AI may go | The Keychain, service `tech.edgetr.petal.own` | A grant holds no secret. Kept there, not in a file, so another program can't grant itself a key or turn on Full access by writing a file. |
 
 The AI never sees a password, a card number, a security code or a key. Petal fills those itself, decides from what it reads of the page or app (never from what the AI says) whether a login belongs there, asks first anywhere else, and takes every vault secret out of what the AI is shown.
 
@@ -56,7 +57,7 @@ With changes of the person's own to Petal's code (`petal personal`), an update i
 
 These are how Petal works today, not holes:
 
-- A program already running as the person can read their files, including Petal's settings and notes.
+- A program already running as the person can read their files, including Petal's settings and notes. Writing them doesn't widen what Petal AI or an agent may do, but such a program can still use the Keychain's own interfaces, or change the files a shell reads at login (where Petal looks for Claude Code or Codex when no path is set).
 - A Private notebook is kept from Petal AI and from Petal's own pictures; it is not protection from another app recording the screen.
 - `petal run` takes a key out of what a command prints. A command written to leak a key in another form still can.
 - An agent's Always for a project covers anything that can start or set up that agent in that project.

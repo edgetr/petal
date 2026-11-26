@@ -14,7 +14,7 @@ Petal is developed, built and run on the owner's Mac (Gökay MacBook Pro), in `~
 
 | Layer | Decision |
 | --- | --- |
-| AI | the user's own `claude` or `codex` CLI. Quick calls (routines' sorting and helpers in notes): `claude -p --model haiku --effort low`, or `codex exec --json --ephemeral --sandbox read-only` at low effort. Chat: stream-json Claude Code sessions, or `codex exec --json` resumed by thread id, with Petal's MCP tools approved ahead (codex exec can't ask) |
+| AI | the user's own `claude` or `codex` CLI. Quick calls (routines' sorting and helpers in notes): `claude -p --model haiku --effort low`, or `codex exec --json --ephemeral --sandbox read-only` at low effort. Chat: stream-json Claude Code sessions, or `codex exec --json` resumed by thread id (without Full access in a scratch folder, `--sandbox workspace-write`), with Petal's MCP tools approved ahead (codex exec can't ask) |
 | MCP | Petal itself: `Petal --mcp` speaks MCP on stdin and stdout; the tools are listed in `macos/Resources/mcp/tools.json` |
 | Scripts | Bash (`get.sh`, `macos/build.sh`, `macos/checks/run.sh`, `tools/fleet`) and Python 3 standard library (`macos/Resources/personal/petal-personal`, run with the python3 of Apple's command line tools; `brand/icon.py`). Building Petal needs no Python |
 | Website | static `site/` (no build step, self-hosted Geist), Vercel project `petal-dock` |
