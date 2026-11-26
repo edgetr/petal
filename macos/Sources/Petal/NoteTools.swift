@@ -10,6 +10,7 @@ extension NoteDesk {
 
     static let readOnlyWords = "This note has two versions right now (it changed in two places at once): nothing was changed. The person keeps one with Keep this one on the paper; then try again."
     static let notMade = "Petal couldn't make the note's file. It keeps the note and tries again; nothing to do now."
+    static let coverStays = "That's its notebook's cover (About this notebook: its color, view and privacy): it stays in its notebook, so nothing was moved."
     static let hungUp = "The request ended before this was done: nothing was changed."
     static let turnedPrivate = "A notebook this answer is about turned Private meanwhile, so nothing of it is told."
     static let notThisNote = "That note's file is another note's now (it was renamed or moved meanwhile): nothing was changed. petal_notes lists them."
@@ -169,6 +170,7 @@ extension NoteDesk {
             guard !notebook.isEmpty else { return fail("Which notebook? (a new name makes one)") }
             guard destination(notebook) else { return fail("Petal can't move notes there. Pick another notebook.") }
             resolve(args["id"] as? String ?? "", readable: readable, told: told, refuse, fail) { paper in
+                guard !NoteStore.isCover(paper) else { return fail(Self.coverStays) }
                 guard !self.store.readOnly(paper) else { return fail(Self.readOnlyWords) }
                 guard live() else { return fail(Self.hungUp) }
                 guard destination(notebook) else { return fail("Petal can't move notes there. Pick another notebook.") }

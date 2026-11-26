@@ -357,11 +357,13 @@ enum NoteLibrary {
 
 extension NoteLibrary {
     /// A notebook's cover, by its file's name only: "About this notebook.md", its iCloud versions (the same name) and
-    /// its conflict copies (any name starting "About this notebook" and ending ".md"). `cover: true` in any other note
-    /// counts for nothing: not its privacy, color or view.
+    /// the copies Petal and iCloud make of it: "About this notebook 2.md", "About this notebook (conflicted copy).md"
+    /// ("… (conflicted copy 2).md"), "About this notebook (recovered).md", and those together. Never any other name
+    /// that only starts so ("About this notebook – Q3.md" is a note). `cover: true` in any other note counts for
+    /// nothing: not its privacy, color or view.
     static func isCoverName(_ fileName: String) -> Bool {
-        let name = fileName.lowercased()
-        return name.hasPrefix("about this notebook") && name.hasSuffix(".md")
+        fileName.range(of: "^about this notebook(?: \\(recovered\\)| \\(conflicted copy(?: [0-9]+)?\\)| [0-9]+)*\\.md$",
+                       options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     static func isCover(fileName: String, file: NoteFile) -> Bool { isCoverName(fileName) }

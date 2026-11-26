@@ -1930,10 +1930,17 @@ enum NoteShelf {
 
     /// A file name for a note's text that holds no secret: its title, made from its text after the vault's
     /// redaction (`redacted`: nil while the vault can't be read), else `fallback` (one that holds none: a date).
+    /// Never a cover's name for a note (`notCover`): a note titled "About this notebook" is named "Note, About this
+    /// notebook", so its file is never taken for its notebook's cover.
     static func safeStem(redacted: String?, fallback: String) -> String {
-        guard let redacted else { return NoteText.fileName(fallback) }
+        guard let redacted else { return notCover(NoteText.fileName(fallback)) }
         let title = NoteText.title(redacted)
-        return NoteText.fileName(title.isEmpty ? fallback : title)
+        return notCover(NoteText.fileName(title.isEmpty ? fallback : title))
+    }
+
+    /// A note's name stem that no copy of it (" 2", " (conflicted copy)", " (recovered)") makes a cover's name.
+    static func notCover(_ stem: String) -> String {
+        stem.lowercased().hasPrefix("about this notebook") ? "Note, " + stem : stem
     }
 
     /// Notes renamed or moved elsewhere (Finder, another Mac) while Petal holds them: old key → new key, for each id

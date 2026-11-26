@@ -176,6 +176,9 @@ struct NoteStoreCheck {
         sessions(root: root)
         journal(root: root)
         toolCancelled(root: root)
+        toolsInARow(root: root)
+        coverStays(root: root)
+        damagedJournalEntry(root: root)
         concurrentMakes(root: root)
         renamedMakes(root: root)
         identity(root: root)
@@ -2878,6 +2881,61 @@ struct NoteStoreCheck {
         NoteStore.io.sync {}
         NoteStore.io.sync {}
         expect(text(file) == base, "and, cancelled, leaves the file as it was")
+    }
+
+    /// Two tool changes to one note queued before the first lands: the second is made on the first's text, so both
+    /// land in the note, one after the other, and no conflict copy is made.
+    @MainActor static func toolsInARow(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Tools in a row")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appending(path: "Row.md")
+        let base = NoteFile(id: "TR", body: "start").serialized()
+        _ = NoteStore.create(base, at: file, root: root)
+        let store = NoteStore(root: root)
+        store.preview([PaperNote(file: NoteFile.parse(base, fallbackID: "", fallbackDate: Date()), url: file, notebook: "Tools in a row", revision: base)], notebooks: [])
+        var outcomes: [NoteStore.Outcome] = []
+        store.change(file.path, live: { true }, edit: { $0.body += " one" }) { outcomes.append($0) }
+        store.change(file.path, live: { true }, edit: { $0.body += " two" }) { outcomes.append($0) }
+        wait { outcomes.count == 2 }
+        idle(store)
+        let names = (try? fm.contentsOfDirectory(atPath: folder.path)) ?? []
+        let landed = text(file).map { NoteFile.parse($0, fallbackID: "", fallbackDate: Date()).body } ?? ""
+        expect(outcomes == [.written, .written] && landed == "start one two" && !names.contains { $0.contains("conflicted copy") },
+               "two tool changes queued at once both land in the note, no conflict copy", "\(outcomes) \(landed) \(names)")
+    }
+
+    /// A notebook's cover is never moved into another notebook (its privacy, color and view stay with its notebook).
+    @MainActor static func coverStays(root: URL) {
+        let fm = FileManager.default
+        let folder = root.appending(path: "Covered")
+        try? fm.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appending(path: NoteShelf.coverName)
+        var cover = NoteFile(id: "CV", body: "What this notebook is for")
+        cover.cover = true
+        _ = NoteStore.create(cover.serialized(), at: url, root: root)
+        let store = NoteStore(root: root)
+        store.preview([PaperNote(file: cover, url: url, notebook: "Covered", revision: cover.serialized())], notebooks: [])
+        var answered = false
+        var moved: PaperNote?
+        store.move(url.path, to: "Elsewhere") { moved = $0; answered = true }
+        idle(store)
+        expect(answered && moved == nil && fm.fileExists(atPath: url.path) && !fm.fileExists(atPath: root.appending(path: "Elsewhere/\(NoteShelf.coverName)").path),
+               "a notebook's cover isn't moved to another notebook")
+    }
+
+    /// A journal entry that isn't one (damaged) is never deleted at recovery: it's kept, whole, in "Unsaved notes".
+    @MainActor static func damagedJournalEntry(root: URL) {
+        let fm = FileManager.default
+        let holding = Config.supportFolder.appending(path: "Notes journal, recovering damaged")
+        try? fm.createDirectory(at: holding, withIntermediateDirectories: true)
+        let bytes = Data("{ not an entry".utf8)
+        try? bytes.write(to: holding.appending(path: "damaged.json"))
+        NoteJournal.recover(holding, root: root)
+        let kept = Config.supportFolder.appending(path: "Unsaved notes/Damaged journal entries/damaged.json")
+        expect((try? Data(contentsOf: kept)) == bytes && !fm.fileExists(atPath: holding.appending(path: "damaged.json").path),
+               "a damaged journal entry is set aside whole in Unsaved notes, never deleted")
+        try? fm.removeItem(at: holding)
     }
 
     static func finish() {

@@ -265,7 +265,12 @@ enum NoteJournal {
         let notes = NoteStore.read(root).notes
         for name in names {
             let url = holding.appending(path: name)
-            guard let kept = read(url) else { try? fm.removeItem(at: url); continue }
+            // Never deleted for not reading: one that can't be read now stays for the next launch; one read that
+            // isn't an entry (damaged) is set aside, its bytes whole, in "Unsaved notes".
+            guard let kept = read(url) else {
+                if let data = try? Data(contentsOf: url) { setAside(data, name: name, from: url) }
+                continue
+            }
             let (entry, waiting) = readImports(kept)
             guard let at = land(entry, notes: notes, root: root) else { continue }
             if waiting.isEmpty { try? fm.removeItem(at: url); continue }
@@ -277,6 +282,22 @@ enum NoteJournal {
             if let data = try? JSONEncoder().encode(rest) { try? data.write(to: url, options: .atomic) }
         }
         if (((try? fm.contentsOfDirectory(atPath: holding.path)) ?? []).filter { $0.hasSuffix(".json") }).isEmpty { try? fm.removeItem(at: holding) }
+    }
+
+    /// A journal entry that doesn't read as one, kept as it is in "Unsaved notes/Damaged journal entries" (never over
+    /// another), then out of the journal; one that can't be kept there stays where it is.
+    nonisolated static func setAside(_ data: Data, name: String, from url: URL) {
+        let fm = FileManager.default
+        let folder = Config.supportFolder.appending(path: "Unsaved notes").appending(path: "Damaged journal entries")
+        guard (try? fm.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else { return }
+        let stem = (name as NSString).deletingPathExtension
+        for n in 1...100 {
+            let into = folder.appending(path: n == 1 ? name : "\(stem) \(n).json")
+            if (try? data.write(to: into, options: .withoutOverwriting)) != nil {
+                if (try? Data(contentsOf: into)) == data { try? fm.removeItem(at: url) }
+                return
+            }
+        }
     }
 
     /// One paste of an entry (`token`) put into its note now, on what the entry says the note was: true once its

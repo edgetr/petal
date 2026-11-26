@@ -262,6 +262,8 @@ final class Routines {
         change(&list)
         let mine = list
         let known = stamp
+        // Written into the file by hand and waiting for the person's yes: kept off in whatever is written.
+        let holding = heldOff
         let url = Self.file
         Self.io.async {
             var routines = mine
@@ -274,13 +276,14 @@ final class Routines {
                 change(&routines)
                 outside = true
             }
+            for index in routines.indices where Self.waits(routines[index], holding) { routines[index].on = false }
             try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
             Config.writeObject(["routines": routines.map(\.json)], to: url)
             let stamp = Self.modified(url)
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     self.stamp = stamp
-                    if outside { self.adopt(routines) }
+                    if outside { self.adopt(routines, ours: mine) }
                 }
             }
         }
@@ -288,7 +291,67 @@ final class Routines {
 
     /// The routines as they are in the file now. One whose rule changed there (or that's gone) drops what was
     /// decided under the old one, as when it's saved through Petal.
-    private func adopt(_ routines: [Routine]) {
+    ///
+    /// One that opens something or runs a Shortcut, new there or changed (or turned on) there, isn't taken on: it's
+    /// kept off, in the file too, until the person says yes on Petal AI's card (kind `routine`, asked every time:
+    /// whoever edited the file, neither Full access nor an Always given to Petal AI says yes for them), as when
+    /// Petal AI saves one (RoutineRules.savingAsks).
+    ///
+    /// `ours`: what Petal itself had when it wrote the file (a save that found the file changed meanwhile): a routine
+    /// as Petal had it is Petal's own, never taken for a hand edit.
+    private func adopt(_ routines: [Routine], ours: [Routine] = []) {
+        var routines = routines
+        var held: [Routine] = []
+        for index in routines.indices where routines[index].on {
+            let new = routines[index]
+            // A card is already out for it as it is: kept off, not asked again.
+            if Self.waits(new, heldOff) { routines[index].on = false; continue }
+            if ours.contains(where: { $0.id == new.id && $0.on && $0.trigger == new.trigger && $0.actions == new.actions }) { continue }
+            let now = list.first { $0.id == new.id }
+            let same = now.map { $0.trigger == new.trigger && $0.actions == new.actions } ?? false
+            guard RoutineRules.savingAsks(actions: new.actions.map(\.kind), same: same, wasOn: now?.on ?? false, on: true) else { continue }
+            routines[index].on = false
+            held.append(new)
+        }
+        take(routines)
+        guard !held.isEmpty else { return }
+        for routine in held { heldOff[routine.id] = routine }
+        let ids = Set(held.map(\.id))
+        saveRoutines { list in
+            for index in list.indices where ids.contains(list[index].id) { list[index].on = false }
+        }
+        confirmFromFile(held)
+    }
+
+    /// Routines that open something or run a Shortcut, written into routines.json by hand: asked about one at a
+    /// time (a card replaces the one before it), each turned on only with a yes and only while it's still as asked.
+    private func confirmFromFile(_ held: [Routine]) {
+        guard let routine = held.first else { return }
+        let rest = Array(held.dropFirst())
+        let rule = ruleVersion[routine.id, default: 0]
+        allow("Turn on the routine “\(routine.name)”? It was added or changed in routines.json, outside Petal.", summary(routine),
+              owner: nil, always: true) { yes in
+            // Answered (or not, within two minutes): turned on in the file again, it's asked again.
+            if Self.waits(routine, self.heldOff) { self.heldOff[routine.id] = nil }
+            if yes, rule == self.ruleVersion[routine.id, default: 0],
+               var now = self.list.first(where: { $0.id == routine.id }), !now.on, now.trigger == routine.trigger, now.actions == routine.actions {
+                now.on = true
+                self.save(now)
+            }
+            self.confirmFromFile(rest)
+        }
+    }
+
+    /// Routines written into the file by hand whose card is out (by id, as they were asked about).
+    @ObservationIgnored private var heldOff: [String: Routine] = [:]
+
+    /// Whether `routine` is one waiting for the person's yes, as it was asked about.
+    nonisolated private static func waits(_ routine: Routine, _ holding: [String: Routine]) -> Bool {
+        guard let asked = holding[routine.id] else { return false }
+        return asked.trigger == routine.trigger && asked.actions == routine.actions
+    }
+
+    private func take(_ routines: [Routine]) {
         for old in list {
             let new = routines.first { $0.id == old.id }
             if new == nil || new!.words != old.words || new!.actions != old.actions || new!.trigger != old.trigger {
@@ -405,6 +468,12 @@ final class Routines {
                 run(routine, file: nil)
             }
         }
+        readFile()
+    }
+
+    /// routines.json read again when it changed since Petal last read or wrote it (every 30 seconds; the check asks
+    /// for it at once).
+    func readFile() {
         let known = stamp
         Self.io.async {
             let now = Self.modified(Self.file)
@@ -1207,10 +1276,11 @@ final class Routines {
     /// A routine that opens something or runs a Shortcut goes on doing it by itself, so the person is asked before
     /// Petal AI saves, changes or runs one: Petal AI's card (kind `routine`, which Always covers), showing what the
     /// routine does. `owner`: the chat or AI session asking. The check answers through `answering`, else never asks.
-    private func allow(_ title: String, _ detail: String, owner: String?, done: @escaping (Bool) -> Void) {
+    /// `always`: asked every time, whatever Full access or an Always says (a routine written into the file by hand).
+    private func allow(_ title: String, _ detail: String, owner: String?, always: Bool = false, done: @escaping (Bool) -> Void) {
         if let answering { return done(answering(Self.card, title, detail)) }
         guard !standalone else { return done(true) }
-        PetalApp.shared.assist.ask("routine", title, detail: detail, owner: owner, done: done)
+        PetalApp.shared.assist.ask("routine", title, detail: detail, always: always, owner: owner, done: done)
     }
     /// The card's kind, as Always keeps it in `aiAllowed`.
     nonisolated static let card = "routine"

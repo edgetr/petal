@@ -222,6 +222,12 @@ struct NotesCheck {
         expect(NoteShelf.safeStem(redacted: "# Card (hidden)\nmore", fallback: "Note 1") == "Card (hidden)", "a title holding a secret: named after redaction")
         expect(NoteShelf.safeStem(redacted: nil, fallback: "Note 1") == "Note 1", "the vault unreadable: a plain name")
         expect(NoteShelf.safeStem(redacted: "", fallback: "Note 1") == "Note 1", "no title: a plain name")
+        let coverLike = NoteShelf.safeStem(redacted: "# About this notebook\nmore", fallback: "Note 1")
+        let coverLikeToo = NoteShelf.safeStem(redacted: "# About this notebook – Q3", fallback: "Note 1")
+        expect(!NoteLibrary.isCoverName(coverLike + ".md") && !NoteLibrary.isCoverName(NoteShelf.freeName(coverLike, taken: [(coverLike + ".md").lowercased()]))
+               && !NoteLibrary.isCoverName(NoteShelf.conflictName(coverLike, taken: [])) && !coverLike.lowercased().hasPrefix("about this notebook")
+               && !coverLikeToo.lowercased().hasPrefix("about this notebook"),
+               "a note titled like a cover is never named like one, nor are its copies", coverLike)
 
         // A trash never of an existing file Petal can't read to check.
         expect(!NoteShelf.mayTrashFile(.unreadable, foundID: nil, expected: "A", texts: ["x"]), "an unreadable file is never trashed")

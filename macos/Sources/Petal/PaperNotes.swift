@@ -2018,7 +2018,15 @@ final class NoteStore {
         // made on it as it is once the id is in.
         ensureID(key)
         guard var paper = paper(key), let session = session(for: key) else { return nil }
-        let since = base.map { $0 == before.revision ? paper.revision : $0 } ?? paper.revision
+        var since = base.map { $0 == before.revision ? paper.revision : $0 } ?? paper.revision
+        // A tool's change while an earlier write to this note hasn't landed yet (a tool's shows nothing until it
+        // lands): made on that write's text, the file as it will be, so the two land one after the other instead of
+        // the second finding the first and going beside it as a conflict copy. That write not landing (its asker
+        // gone, the file changed elsewhere), this one is kept beside the file, never lost.
+        if live != nil, base == nil, let waiting = NoteStore.unlanded(session.pending), waiting != paper.revision {
+            since = waiting
+            paper.file = NoteFile.parse(waiting, fallbackID: paper.noteID, fallbackDate: paper.file.created)
+        }
         edit(&paper.file)
         if stamp { paper.file.modified = Date() }
         let text = paper.file.serialized()
@@ -2033,6 +2041,12 @@ final class NoteStore {
         // The person's: a whole snapshot in the journal, as the queue now holds it.
         if live == nil { snapshot(paper, text: text, session: session) }
         return text
+    }
+
+    /// The text the last write waiting in a session (or under way) will leave in the note's file; nil with none.
+    nonisolated static func unlanded(_ pending: [NoteSession.Item]) -> String? {
+        for item in pending.reversed() { if case .write(let text, _) = item.work { return text } }
+        return nil
     }
 
     /// Notes whose newer version was held off while their editor had typing not saved yet.
@@ -2194,11 +2208,17 @@ final class NoteStore {
         return folderName
     }
 
+    /// A notebook's cover (by its file's name, the cover rule, or as read): never moved to another notebook.
+    nonisolated static func isCover(_ paper: PaperNote) -> Bool { paper.file.cover || NoteLibrary.isCoverName(paper.url.lastPathComponent) }
+
     /// The one move: a note (and first its pictures) into another notebook, made if it's new, through its session,
     /// after whatever is waiting there and before whatever comes next (saves and pictures made meanwhile land where
     /// it lands). `done`: the note where it is now, or nil when it couldn't be moved (or its asker went).
     func move(_ key: String, to notebook: String, live: (@Sendable () -> Bool)? = nil, then done: @escaping @MainActor (PaperNote?) -> Void = { _ in }) {
         guard let paper = paper(key) else { return done(nil) }
+        // A notebook's cover stays in its notebook: moved, the notebook would lose its color, its view and its
+        // privacy (a Private notebook's cover moved out would make it readable), and the cover land as a note.
+        guard !NoteStore.isCover(paper) else { return done(nil) }
         // The notebook as it exists, whatever its case ("inbox" is Inbox): the same one, nothing to do.
         let name = NoteShelf.canonicalNotebook(NoteShelf.folderName(notebook), existing: notebooks.map(\.name))
         guard name.compare(paper.notebook, options: .caseInsensitive) != .orderedSame else { return done(paper) }

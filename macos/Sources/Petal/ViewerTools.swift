@@ -21,6 +21,20 @@ extension Viewers {
         return helpers.mayRead(paper.notebook, from: asking)
     }
 
+    /// Whether the viewer may show (or tell of) a file at `place` among Petal Notes' files to `caller` (nil: the
+    /// person): the note tools' Private fence (ViewerPath.mayView over NotePrivacy), as things are now.
+    func mayView(_ place: ViewerPath.NotePlace, by caller: String?) -> Bool {
+        guard let caller, place != .outside else { return true }
+        let store = app.paper.store
+        let helpers = app.paper.helpers
+        let asking = app.claude.note(withID: caller)?.paper.flatMap { helpers.paper($0) }
+        return ViewerPath.mayView(place, notes: store.notes.map { (id: $0.noteID, notebook: $0.notebook) }, privateBooks: store.privateBooks,
+                                  asker: asking?.notebook)
+    }
+
+    /// What's told in place of an answer about a file that's in a Private notebook for this asker now.
+    static let privateText = ViewerPath.Refusal.privateNote.description
+
     func handle(_ name: String, _ args: [String: Any], caller: String, live: @escaping @Sendable () -> Bool,
                 _ answer: @escaping (Any) -> Void, _ refuse: @escaping (String) -> Void) {
         // Everything told goes through the vault's redaction first (NoteShield, as the note tools' answers): file
@@ -87,7 +101,7 @@ extension Viewers {
             // A page counts from 1; a number that isn't one is refused before anything is worked out from it.
             let page = ViewerPages.requested(args["page"])
             if args["page"] != nil, page == nil { return fail("page counts from 1 (a whole number).") }
-            open(path: path, page: page, live: live) { result in
+            open(path: path, page: page, caller: caller, live: live) { result in
                 guard live() else { return }
                 switch result {
                 case .failure(let refusal): fail(refusal.description)
@@ -103,6 +117,7 @@ extension Viewers {
                             // meanwhile, told again as it is then.
                             told({
                                 guard !model.isClosed else { return Told(refusal: Self.closedText) }
+                                guard self.mayView(model.notePlace, by: caller) else { return Told(refusal: Self.privateText) }
                                 var told = self.told(model, caller: caller)
                                 // The page asked for is checked only against a finished document: while it loads or
                                 // reloads the answer says it's loading (never the pages of the document before).
@@ -126,7 +141,7 @@ extension Viewers {
             }
         case "petal_view_versions":
             let labels = (args["names"] as? [Any] ?? []).compactMap { $0 as? String }
-            open(path: path, show: true, live: live) { result in
+            open(path: path, show: true, caller: caller, live: live) { result in
                 guard live() else { return }
                 switch result {
                 case .failure(let refusal): fail(refusal.description)
@@ -141,6 +156,7 @@ extension Viewers {
                             told {
                                 guard !model.isClosed, !set.closed else { return Told(refusal: ViewerCopyError.cancelled.description) }
                                 guard model.versions === set else { return Told(refusal: ViewerCopyError.superseded.description) }
+                                guard self.mayView(model.notePlace, by: caller) else { return Told(refusal: Self.privateText) }
                                 let held = model.pickSuspended(set)
                                 let note = "Copies in a folder of Petal's own, shown under the document with Use this. Change the copies (never the file itself); their pictures follow. petal_view_pick tells you which one the person picks. Newer versions replace these (their copies go, but a picked one; one you changed goes to the Trash), and every copy goes when the viewer closes: read the picked one while it's open."
                                 return Told(["set": set.id, "file": model.name,
@@ -162,7 +178,8 @@ extension Viewers {
             // is that, never the pick.
             let answer = {
                 told {
-                    switch set.pickState {
+                    if let viewer = set.viewer, !self.mayView(viewer.notePlace, by: caller) { return Told(refusal: Self.privateText) }
+                    return switch set.pickState {
                     case .picked(let picked):
                         Told(["picked": ["id": picked.id, "name": picked.label, "path": picked.url.path],
                               "note": "The original is as it was when these were made. Change it only after the person allows it, and ask petal_view_pick again right before you do: once the original changes, the pick isn't told."],
@@ -186,14 +203,17 @@ extension Viewers {
             DispatchQueue.main.asyncAfter(deadline: .now() + wait) { once(nil) }
         case "petal_note_pdf_comments":
             let original = args["into_original"] as? Bool ?? false
+            let notes = app.paper.store.root.path
             Self.queue.async {
                 let checked = ViewerPath.check(path)
+                let notesRoot = ViewerPath.canonical(notes) ?? notes
                 DispatchQueue.main.async {
                     MainActor.assumeIsolated {
                         guard live() else { return }
                         switch checked {
                         case .failure(let refusal): fail(refusal.description)
                         case .success(let url):
+                            guard self.mayView(ViewerPath.notePlace(url.path, notesRoot: notesRoot), by: caller) else { return fail(Self.privateText) }
                             guard ViewerKind.of(url.path) == .pdf else { return fail("Comments go into a PDF; that file isn't one.") }
                             // What was written is a fact of its own (no viewer's state): told while its asker is there.
                             self.comments(url, opened: path, intoOriginal: original, caller: caller, live: live,
@@ -262,14 +282,18 @@ extension Viewers {
     private func viewAll(path: String, from first: Int = 0, caller: String, live: @escaping @Sendable () -> Bool,
                          told: @escaping (@escaping @MainActor () -> Told, Int, @escaping @MainActor (Any) -> Any) -> Void,
                          fail: @escaping (String) -> Void) {
-        open(path: path, page: nil, live: live) { result in
+        open(path: path, page: nil, caller: caller, live: live) { result in
             guard live() else { return }
             switch result {
             case .failure(let refusal): fail(refusal.description)
             case .success(let model):
                 model.whenLoaded(within: Self.loadLimit) { _ in
                     guard let source = model.text, !model.loading, !model.live, model.pageCount > 0 else {
-                        return told({ model.isClosed ? Told(refusal: Self.closedText) : Told(self.told(model, caller: caller), state: model.shownState) }, 0, { $0 })
+                        return told({
+                            guard !model.isClosed else { return Told(refusal: Self.closedText) }
+                            guard self.mayView(model.notePlace, by: caller) else { return Told(refusal: Self.privateText) }
+                            return Told(self.told(model, caller: caller), state: model.shownState)
+                        }, 0, { $0 })
                     }
                     let count = model.pageCount, word = model.unit.word
                     guard first < count else { return fail("It has \(count) \(word)s; from \(first + 1) is past its end.") }
@@ -279,6 +303,7 @@ extension Viewers {
                     func finish(_ reached: Int) {
                         told({
                             guard !model.isClosed else { return Told(refusal: Self.closedText) }
+                            guard self.mayView(model.notePlace, by: caller) else { return Told(refusal: Self.privateText) }
                             var answer = self.told(model, caller: caller)
                             guard !model.loading, model.text === source else { return Told(answer, state: model.shownState) }
                             answer["text"] = pages.joined(separator: "\n\n")
