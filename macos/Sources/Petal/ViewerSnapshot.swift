@@ -731,8 +731,11 @@ enum ViewerCheck {
         expect(place.kind == .file && place.path == model.url.path && place.page == 2 && !place.fileID.isEmpty && !place.bookmark.isEmpty,
                "⌃⌥N in the viewer: a note on its file (with its incarnation) and page")
         model.refreshPlaces()
-        wait(5) { model.shows(key) }
-        expect(model.shows(key) && model.face == .open, "and it opens in the viewer's margin")
+        // The viewer follows the note by its current key: the store may key it again once it reads the folder (in a
+        // temporary folder, by its real /private/var path rather than the /var one it was made with).
+        let current = { model.openKey ?? key }
+        wait(5) { model.shows(current()) }
+        expect(model.shows(current()) && model.face == .open, "and it opens in the viewer's margin")
         func notesHere() -> [String: Any]? {
             var listed: [String: Any]?
             var refused: String?
@@ -768,7 +771,7 @@ enum ViewerCheck {
         wait(20) { nowhere != nil }
         expect(app.paper.store.notes.first { $0.file.body == "Not on a window twelve" }?.file.places.isEmpty ?? true, "a window asked for in the viewer: stuck nowhere")
         // Not left empty for the Trash: the ⌃⌥N note keeps its file.
-        app.paper.fresh.remove(key)
+        app.paper.fresh.remove(current())
         app.viewers.closed(model)
         print("twelfth: " + (ok ? "a corrupt PDF reports its error; the viewer with the keyboard is here (listed, stuck to its file and page, ⌃⌥N in its margin)" : "failed"))
         return ok
